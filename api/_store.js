@@ -56,6 +56,48 @@ async function putFile(path, obj, message, sha) {
   return r.json();
 }
 
+// GET a file via the contents API as raw text (no JSON.parse). Used for the
+// anchor .txt files, which are plain "<sha> <iso-timestamp>", not JSON.
+// Returns {text, sha} or null on 404.
+async function getRawFile(path) {
+  const r = await fetch(
+    `${API}/repos/${REPO}/contents/${path}?ref=${BRANCH}`,
+    { headers: ghHeaders() }
+  );
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`github GET ${path} -> ${r.status}`);
+  const body = await r.json();
+  return { text: Buffer.from(body.content, "base64").toString("utf-8"), sha: body.sha };
+}
+
+// List entries of a directory via the contents API. Returns [] for a
+// missing/empty directory rather than throwing — callers (the status page)
+// treat "nothing pinned/observed/anchored yet" as a legitimate state, not
+// an error condition.
+async function listDir(path) {
+  const r = await fetch(
+    `${API}/repos/${REPO}/contents/${path}?ref=${BRANCH}`,
+    { headers: ghHeaders() }
+  );
+  if (r.status === 404) return [];
+  if (!r.ok) throw new Error(`github GET ${path} -> ${r.status}`);
+  const body = await r.json();
+  return Array.isArray(body) ? body : [];
+}
+
+// Full recursive tree of the pin repo (one call, {path, type} per entry).
+// Used by the status page to count files under observations/ without one
+// contents-API call per namespace subdirectory.
+async function getTree() {
+  const r = await fetch(
+    `${API}/repos/${REPO}/git/trees/${BRANCH}?recursive=1`,
+    { headers: ghHeaders() }
+  );
+  if (!r.ok) throw new Error(`github GET tree -> ${r.status}`);
+  const body = await r.json();
+  return Array.isArray(body.tree) ? body.tree : [];
+}
+
 // Live reachability check for /api/health.
 async function repoReachable() {
   try {
@@ -127,7 +169,10 @@ module.exports = {
   REPO,
   BRANCH,
   getFile,
+  getRawFile,
   putFile,
+  listDir,
+  getTree,
   repoReachable,
   keyPrefixFor,
   validatePin,
