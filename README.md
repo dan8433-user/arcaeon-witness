@@ -85,12 +85,39 @@ no CAS loop at all.
 curl -s "https://arcaeon-witness.vercel.app/api/latest?ns=velouria-myledger"
 ```
 
-Returns `{ok, pin, source, freshness_note, history}`. Primary read path is the
-GitHub contents API (commit-fresh); fallback is `raw.githubusercontent.com`
-with cache-busting, which in practice can serve stale content for **minutes**
-(its CDN largely ignores query-string cache-busters — measured, not folklore).
-`source` names which path served the read; the commit history link is always
-the authoritative record.
+Returns `{ok, pin, next_pin_due_by, status, overdue_by_seconds?, source,
+freshness_note, history}`. Primary read path is the GitHub contents API
+(commit-fresh); fallback is `raw.githubusercontent.com` with cache-busting,
+which in practice can serve stale content for **minutes** (its CDN largely
+ignores query-string cache-busters — measured, not folklore). `source` names
+which path served the read; the commit history link is always the
+authoritative record.
+
+**Cadence deadline (`next_pin_due_by` / `status`).** Every accepted pin
+stores `next_pin_due_by = pinned_at + the namespace's declared cadence`
+(default **24h**; per-namespace-prefix overrides via the `WITNESS_CADENCE`
+env var — JSON `{"<namespace-prefix>": <hours>}`, longest matching prefix
+wins). `status` is computed live at read time: `"current"` if now is before
+the deadline, `"overdue"` (with `overdue_by_seconds`) if not, or
+`"legacy_no_deadline"` for pins recorded before this field existed — those
+never crash the read, they just can't claim a deadline they didn't make.
+
+This turns **silence into a stranger-gradeable alarm**: a verifier polling
+`/api/latest` sees `"overdue"` in the JSON without trusting our API or our
+uptime — the same computation is reproducible from the pin's own
+`pinned_at` and the declared cadence. Excelsior's framing, verbatim, from
+the review that asked for this: *"the public conflict log says what the
+witness saw; the deadline says when absence has become unknowable."*
+
+**Honest scope — this is visibility, not proof.** A missed deadline means a
+missed deadline. It does **not** mean tampering: availability and integrity
+are distinct properties, and a writer who stops pinning could be dead,
+compromised, migrated, or simply done. The deadline makes the *absence of a
+promised pin* impossible to miss; it says nothing about *why* the pin
+stopped. Pair it with the conflict-observation log (`observations/<ns>/`,
+written on a same-rows/different-chain re-mint attempt) for the other half
+of the picture — what the witness saw versus when it stopped seeing
+anything at all.
 
 ### GET /api/health (no auth)
 
@@ -179,6 +206,10 @@ api/_meter.js   per-key monthly usage caps against the PRIVATE usage repo (not r
 ```
 
 Plain Node 18+ serverless functions. No dependencies. No tokens in this repo —
-`GITHUB_PIN_TOKEN`, `WITNESS_KEYS`, and `WITNESS_PLANS` live only in Vercel env
-vars. `GITHUB_PIN_TOKEN` is reused for both the public pins repo and the
-private usage repo — same account, same token, two repos.
+`GITHUB_PIN_TOKEN`, `WITNESS_KEYS`, `WITNESS_PLANS`, and `WITNESS_CADENCE`
+live only in Vercel env vars. `GITHUB_PIN_TOKEN` is reused for both the
+public pins repo and the private usage repo — same account, same token, two
+repos. `WITNESS_CADENCE` is optional (default cadence is 24h for every
+namespace when unset or malformed) and holds no secrets, but lives with the
+others for one reason: it's operational policy, not code — changing it
+shouldn't require a redeploy.

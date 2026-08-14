@@ -59,12 +59,37 @@ module.exports = async (req, res) => {
     }
   }
 
+  // --- cadence-deadline status (excelsior's review) ---
+  // "The public conflict log says what the witness saw; the deadline says
+  // when absence has become unknowable." A verifier polling this endpoint
+  // sees "overdue" without trusting our API — silence becomes a
+  // stranger-gradeable alarm. This is visibility, not proof: a missed
+  // cadence could mean tampering, or could mean the writer is dead,
+  // compromised, or just done (availability and integrity are distinct).
+  let status = "legacy_no_deadline";
+  let overdue_by_seconds;
+  const dueRaw = pin && typeof pin.next_pin_due_by === "string" ? pin.next_pin_due_by : null;
+  const dueMs = dueRaw ? Date.parse(dueRaw) : NaN;
+  if (Number.isFinite(dueMs)) {
+    const now = Date.now();
+    if (now >= dueMs) {
+      status = "overdue";
+      overdue_by_seconds = Math.floor((now - dueMs) / 1000);
+    } else {
+      status = "current";
+    }
+  }
+
   res.setHeader("cache-control", "no-store");
-  return res.status(200).json({
+  const out = {
     ok: true,
     pin,
+    next_pin_due_by: dueRaw,
+    status,
     source,
     freshness_note: `${note}; the authoritative record is the commit history at ${HISTORY_BASE}/pins/${ns}`,
     history: `${HISTORY_BASE}/pins/${ns}`,
-  });
+  };
+  if (status === "overdue") out.overdue_by_seconds = overdue_by_seconds;
+  return res.status(200).json(out);
 };

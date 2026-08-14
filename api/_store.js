@@ -95,6 +95,34 @@ function validatePin(body) {
   return null;
 }
 
+// ---- cadence: how often a namespace PROMISES to pin (excelsior's review) ----
+// A pin's deadline is a promise, not a proof — it makes a missed cadence
+// VISIBLE to a stranger polling /api/latest, it does not prove tampering.
+// Default 24h for every namespace; WITNESS_CADENCE overrides per
+// namespace-PREFIX (JSON: {"<prefix>": <hours>}), longest-matching-prefix
+// wins (same shape as WITNESS_KEYS's prefix binding, but many-to-one, so
+// there's no single "the" prefix to key off of the way an auth key has one).
+const DEFAULT_CADENCE_HOURS = 24;
+
+function resolveCadenceHours(namespace) {
+  const raw = process.env.WITNESS_CADENCE || "{}";
+  let map;
+  try {
+    const parsed = JSON.parse(raw);
+    map = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    map = {};
+  }
+  let best = null; // {prefix, hours}
+  for (const [prefix, hours] of Object.entries(map)) {
+    if (!namespace.startsWith(prefix)) continue;
+    const h = Number(hours);
+    if (!Number.isFinite(h) || h <= 0) continue; // malformed entries are ignored, not fatal
+    if (best === null || prefix.length > best.prefix.length) best = { prefix, hours: h };
+  }
+  return best ? best.hours : DEFAULT_CADENCE_HOURS;
+}
+
 module.exports = {
   REPO,
   BRANCH,
@@ -104,4 +132,6 @@ module.exports = {
   keyPrefixFor,
   validatePin,
   NS_RE,
+  resolveCadenceHours,
+  DEFAULT_CADENCE_HOURS,
 };

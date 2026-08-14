@@ -126,12 +126,19 @@ module.exports = async (req, res) => {
     }
 
     const seq = cur && Number.isInteger(cur.json.seq) ? cur.json.seq + 1 : 1;
+    const pinnedAt = new Date();
+    const cadenceHours = store.resolveCadenceHours(namespace);
     const pin = {
       namespace,
       rows,
       chain: chain.toLowerCase(),
-      pinned_at: new Date().toISOString(), // the witness's OWN clock
+      pinned_at: pinnedAt.toISOString(), // the witness's OWN clock
       seq,
+      // Cadence deadline (excelsior's review): a promise, not a proof —
+      // makes a missed cadence VISIBLE to a stranger polling /api/latest,
+      // does not by itself prove tampering. See _store.resolveCadenceHours.
+      cadence_hours: cadenceHours,
+      next_pin_due_by: new Date(pinnedAt.getTime() + cadenceHours * 3600_000).toISOString(),
     };
 
     // --- commit the pin, then update latest.json (2 commits, Stage-0) ---
