@@ -79,6 +79,58 @@ this is an acceptable gap, not a hidden one. The real fix, when it's
 warranted, is a Stage-2 KV (Vercel KV / Upstash) with an atomic `INCR` and
 no CAS loop at all.
 
+### Credit balance — the decrementing balance behind prepaid packs (mechanism only, not yet sold)
+
+Built 2026-08-14 per `COUNCIL_PRICING_REVIEW_2026-08-14.md` §4 decision #5 (the hard
+gate): the free-tier meter above resets monthly and can't honestly back a
+prepaid, non-expiring per-pin credit promise. This is the mechanism that makes
+one real. **Naming the pack sizes here is not the same as selling them** —
+`.well-known/offers.json` remains the single source of truth for what's
+actually for sale; the pricing cutover is a separate, later step.
+
+- Free 100/mo stays the default and is unaffected: a key that has never
+  purchased credits behaves exactly as before this build.
+- Once the free monthly cap is spent, a purchased credit balance is the
+  additive overflow pool — `api/pin.js` decrements one credit per pin only
+  after `over_cap`, never instead of the free tier.
+- A key with zero purchased credits still gets `429 over_cap` on overflow
+  (unchanged shape, now with `top_up_available` + pack info added).
+- A key that bought credits and spent them all gets `402` with
+  `reason:"credit_exhausted"` — "insufficient funds," distinct from
+  "never had an account." Fails CLOSED either way, never waved through.
+- `X-Credit-Balance` / `X-Meter-Source: credit` headers appear on any pin
+  funded by the credit balance.
+
+Storage: same private `arcaeon-witness-usage` repo the meter already uses
+(`api/_balance.js`), same GitHub-contents-API CAS pattern, plus an
+append-only ledger (`ledger/<key_hash>/...`) for every grant and decrement —
+a balance you can't audit contradicts this repo's own honesty contract.
+Top-up is idempotent on the Stripe event id (or an admin-supplied one): a
+webhook replay reads a `applied:true` ledger entry and returns
+`already_credited:true` without moving the balance twice.
+
+**POST /api/credit** (Bearer `WITNESS_ADMIN_KEY`) — internal/test top-up path.
+Body `{key or key_hash, pack, event_id}`. This is the stand-in for the real
+Stripe webhook until it's wired (see below) — same `creditPack()` function
+either way.
+
+**POST /api/stripe-webhook** — verifies `checkout.session.completed` against
+`WITNESS_STRIPE_WEBHOOK_SECRET` (Stripe's own HMAC scheme, hand-verified, no
+SDK). **Human steps still owed, not done by this build:** (1) create a Stripe
+webhook endpoint pointed at this path and set its signing secret as
+`WITNESS_STRIPE_WEBHOOK_SECRET` in Vercel env; (2) each pack's Stripe Payment
+Link / Checkout Session needs `client_reference_id` set to the buyer's
+`sha256(witness key)` and `metadata.pack` set to `starter`/`standard`/`bulk`.
+Until both are done, this endpoint fails closed with `501` on every call —
+the crediting logic itself is already built and tested via `/api/credit`.
+
+**GET /api/balance** (Bearer `<your witness key>`) — read-only self-check:
+`{credit_balance, credit_ever_purchased, free_tier:{plan, used, cap, month}}`.
+Never consumes a pin (reads via `meter.peek()`, not `meter.check()`).
+
+Pack sizes (ratified, not yet offered): Starter $15/3,000 pins · Standard
+$50/12,000 pins · Bulk $150/40,000 pins (`api/_balance.js` `PACKS`).
+
 ### GET /api/latest?ns=&lt;namespace&gt; (no auth)
 
 ```bash
@@ -194,20 +246,40 @@ anchor commits, forming a chain.
 - Metering's CAS increment retries once on conflict; a three-way race on the
   same key in the same instant can still fail a request outright (`502`)
   rather than silently under-count it — see the metering section above.
+- **Credit balance: observed, not just theoretical, read-after-write lag.**
+  In testing (2026-08-14), a `GET` on `balance/<key_hash>.json` immediately
+  after the `PUT` that created it occasionally returned 404 (not-found)
+  rather than the just-written content -- reproduced once in about six runs,
+  not reliably reproducible in isolation, consistent with an occasional
+  GitHub contents-API propagation gap rather than a bug in this code.
+  Effect: a pin request landing in the same instant as its own credit
+  top-up could see `ever_purchased:false` and get a `429` instead of being
+  covered by the credit that, in reality, already landed. This does not
+  overcharge or double-credit -- the failure mode is "denied a pin you
+  should have had," not "billed twice" -- but it is a real Stage-0 gap,
+  named here rather than assumed away. The Stage-2 fix is the same one
+  metering already names: a real KV with atomic reads, not the contents
+  API's eventual-consistency window.
 
 ## Layout
 
 ```
-api/pin.js      POST /api/pin     — auth, validate, metering, monotonic guard, commit
-api/latest.js   GET  /api/latest  — public read via raw + cache-busting
-api/health.js   GET  /api/health  — live store reachability
+api/pin.js            POST /api/pin       — auth, validate, metering, credit decrement, monotonic guard, commit
+api/latest.js          GET /api/latest    — public read via raw + cache-busting
+api/health.js           GET /api/health   — live store reachability
+api/status.js            GET /status      — public trust-surface page
+api/balance.js           GET /api/balance — key-holder's own credit + free-tier read (auth'd, read-only)
+api/credit.js           POST /api/credit  — internal/admin credit top-up (Bearer WITNESS_ADMIN_KEY)
+api/stripe-webhook.js   POST /api/stripe-webhook — real top-up path (501 until WITNESS_STRIPE_WEBHOOK_SECRET is set)
 api/_store.js   shared GitHub-contents-API store for the PUBLIC pin repo (not routed)
 api/_meter.js   per-key monthly usage caps against the PRIVATE usage repo (not routed)
+api/_balance.js per-key decrementing credit balance + ledger against the PRIVATE usage repo (not routed)
 ```
 
 Plain Node 18+ serverless functions. No dependencies. No tokens in this repo —
-`GITHUB_PIN_TOKEN`, `WITNESS_KEYS`, `WITNESS_PLANS`, and `WITNESS_CADENCE`
-live only in Vercel env vars. `GITHUB_PIN_TOKEN` is reused for both the
+`GITHUB_PIN_TOKEN`, `WITNESS_KEYS`, `WITNESS_PLANS`, `WITNESS_CADENCE`,
+`WITNESS_ADMIN_KEY` (set 2026-08-14), and `WITNESS_STRIPE_WEBHOOK_SECRET`
+(**not yet set — human step**) live only in Vercel env vars. `GITHUB_PIN_TOKEN` is reused for both the
 public pins repo and the private usage repo — same account, same token, two
 repos. `WITNESS_CADENCE` is optional (default cadence is 24h for every
 namespace when unset or malformed) and holds no secrets, but lives with the

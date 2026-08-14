@@ -200,4 +200,26 @@ async function check(secret) {
   throw lastErr || new Error("usage store: exhausted CAS retries");
 }
 
-module.exports = { check, keyHash, utcMonth, resolveCap, resolveEntry, PLAN_CAPS, USAGE_REPO, USAGE_BRANCH };
+// Non-mutating read of the current month's usage + cap for a key -- same
+// resolution rules as check(), but never increments. Added for /api/balance
+// (a self-read of your own account state must never itself consume a
+// pin's worth of anything -- that would make "checking your balance" an
+// action with a side effect, which is exactly the kind of quiet surprise
+// this product's whole brand argues against).
+async function peek(secret) {
+  const month = utcMonth();
+  const hash = keyHash(secret);
+  const entry = resolveEntry(hash);
+  const plan = entry.plan || "free";
+  const cap = resolveCap(entry);
+
+  if (cap === NO_CAP) {
+    return { key_hash: hash, plan, month, used: null, cap: null, reason: "no_cap_configured" };
+  }
+
+  const cur = await getUsageFile(usagePath(hash, month));
+  const used = cur ? Number(cur.json.used) || 0 : 0;
+  return { key_hash: hash, plan, month, used, cap };
+}
+
+module.exports = { check, peek, keyHash, utcMonth, resolveCap, resolveEntry, PLAN_CAPS, USAGE_REPO, USAGE_BRANCH };

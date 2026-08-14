@@ -9,6 +9,7 @@
 
 const store = require("./_store.js");
 const meter = require("./_meter.js");
+const balance = require("./_balance.js");
 
 // Naive per-key rate limit (Stage-0): per-instance, resets on cold start.
 const RATE_LIMIT = 60; // pins per key per hour, per warm instance
@@ -68,21 +69,62 @@ module.exports = async (req, res) => {
   }
   if (!m.ok) {
     if (m.reason === "over_cap") {
-      return res.status(429).json({
-        error: "monthly pin cap reached",
-        reason: "over_cap",
-        plan: m.plan,
-        used: m.used,
-        cap: m.cap,
-        month: m.month,
+      // Free-tier monthly cap is spent. Purchased credit balance
+      // (api/_balance.js) is the additive overflow pool on top of it
+      // (COUNCIL_PRICING_REVIEW_2026-08-14 §4 decision #5) — nothing above
+      // this line changed: the free 100/mo default still behaves exactly
+      // as before for a key that never bought credits. This branch only
+      // decides what happens once the free allotment is exhausted.
+      let c;
+      try {
+        c = await balance.decrementCredit(key, `over free cap ${m.month}`);
+      } catch (err) {
+        return res.status(502).json({ error: `credit store error: ${err.message}` });
+      }
+      if (c.ok) {
+        res.setHeader("X-Credit-Balance", String(c.balance));
+        res.setHeader("X-Meter-Source", "credit");
+        // fall through — the pin proceeds below using the credit grant.
+      } else if (c.ever_purchased) {
+        // Bought credits before; balance is genuinely at zero now.
+        // "Insufficient funds," not "never had an account" — fails
+        // CLOSED, same as every other denial path here.
+        return res.status(402).json({
+          error: "credit balance exhausted — top up to continue",
+          reason: "credit_exhausted",
+          credit_balance: 0,
+          plan: m.plan,
+          free_tier_used: m.used,
+          free_tier_cap: m.cap,
+          month: m.month,
+          packs: balance.PACKS,
+        });
+      } else {
+        // Never purchased credits — same fail-closed outcome this key
+        // would have hit before this build; pack info is added so the
+        // denial doubles as an honest upsell (the free path itself is
+        // unchanged, so this isn't a bait-and-switch on existing users).
+        return res.status(429).json({
+          error: "monthly pin cap reached",
+          reason: "over_cap",
+          plan: m.plan,
+          used: m.used,
+          cap: m.cap,
+          month: m.month,
+          top_up_available: true,
+          packs: balance.PACKS,
+        });
+      }
+    } else {
+      // no_cap_configured: fails CLOSED — a key with no resolvable cap is
+      // denied, never silently treated as unlimited. Credits do not
+      // override a misconfigured account: this is an operator-config bug,
+      // not a usage-exhaustion state, and the two shouldn't be conflated.
+      return res.status(401).json({
+        error: "no usage cap configured for this key",
+        reason: "no_cap_configured",
       });
     }
-    // no_cap_configured: fails CLOSED — a key with no resolvable cap is
-    // denied, never silently treated as unlimited.
-    return res.status(401).json({
-      error: "no usage cap configured for this key",
-      reason: "no_cap_configured",
-    });
   }
 
   try {
