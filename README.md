@@ -77,6 +77,39 @@ in the repo's own history (force-push divergence visible to anyone who cloned).
 - independence from GitHub — GitHub's timestamps are the third-party clock; if
   you need stronger anchoring, cross-pin to a second witness.
 
+## Anchoring (OpenTimestamps counter-anchor)
+
+GitHub's clock is the first witness; Bitcoin's is the second. Once a day an
+automated job records the pin repo's HEAD commit hash to
+`anchors/<date>-head.txt` (`<sha> <iso-timestamp>`) in
+[`dan8433-user/arcaeon-witness-pins`](https://github.com/dan8433-user/arcaeon-witness-pins)
+and stamps that file with [OpenTimestamps](https://opentimestamps.org),
+committing the resulting `.ots` proof alongside it. Because each anchor lands
+in the repo itself, the witness is self-escrowing: force-rewriting pin history
+would also have to erase or fake proofs whose hashes are already anchored in
+the Bitcoin blockchain.
+
+Verify an anchor yourself — no trust in the repo's owner required:
+
+```bash
+pip install opentimestamps-client
+ots verify anchors/<date>-head.txt.ots
+# then confirm the sha inside the .txt is a real commit in the pin repo:
+git log --format=%H | grep <sha-from-the-txt>
+```
+
+A fresh proof reads "Pending confirmation in Bitcoin blockchain" — that is
+normal: `ots stamp` collects calendar-server attestations immediately, and the
+Bitcoin attestation follows once the calendar's merkle root is committed to a
+block (the job upgrades the previous day's proof automatically). After the
+upgrade, `ots verify` reports the block height and time.
+
+Honest scope: an anchor proves the pin repo's HEAD — and therefore every pin
+beneath it — **existed by time T**. It does NOT prove any pin's contents are
+true, complete, or honestly produced; only that they were not fabricated after
+the fact. Each day's anchor covers all history through the previous day's
+anchor commits, forming a chain.
+
 ## Stage-0 limits
 
 - Single region, single operator, no SLA.
