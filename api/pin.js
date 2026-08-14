@@ -8,6 +8,7 @@
 "use strict";
 
 const store = require("./_store.js");
+const meter = require("./_meter.js");
 
 // Naive per-key rate limit (Stage-0): per-instance, resets on cold start.
 const RATE_LIMIT = 60; // pins per key per hour, per warm instance
@@ -52,6 +53,36 @@ module.exports = async (req, res) => {
 
   if (rateLimited(key)) {
     return res.status(429).json({ error: "rate limit exceeded (naive Stage-0 limiter)" });
+  }
+
+  // --- metering (free-tier caps, native reimpl of arcaeon-meter — api/_meter.js) ---
+  let m;
+  try {
+    m = await meter.check(key);
+  } catch (err) {
+    return res.status(502).json({ error: `metering store error: ${err.message}` });
+  }
+  res.setHeader("X-Meter-Cap", m.cap === null || m.cap === undefined ? "unlimited" : String(m.cap));
+  if (m.used !== null && m.used !== undefined) {
+    res.setHeader("X-Meter-Used", String(m.used));
+  }
+  if (!m.ok) {
+    if (m.reason === "over_cap") {
+      return res.status(429).json({
+        error: "monthly pin cap reached",
+        reason: "over_cap",
+        plan: m.plan,
+        used: m.used,
+        cap: m.cap,
+        month: m.month,
+      });
+    }
+    // no_cap_configured: fails CLOSED — a key with no resolvable cap is
+    // denied, never silently treated as unlimited.
+    return res.status(401).json({
+      error: "no usage cap configured for this key",
+      reason: "no_cap_configured",
+    });
   }
 
   try {

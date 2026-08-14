@@ -35,6 +35,50 @@ curl -s -X POST https://arcaeon-witness.vercel.app/api/pin \
 - Success (`201`) returns the stored pin, the GitHub commit sha, and the public
   history URL.
 
+**Free-tier limits are enforced (metering).** Every pin call is checked
+against a per-key monthly cap before it commits. Denials never happen
+silently:
+
+- `429` (over cap) — headers `X-Meter-Cap` / `X-Meter-Used` and a JSON body
+  `{error, reason:"over_cap", plan, used, cap, month}`.
+- `401` with `reason:"no_cap_configured"` if a key somehow resolves to no
+  cap at all — metering **fails CLOSED**; a misconfigured key is denied,
+  never silently treated as unlimited.
+- On grant, `X-Meter-Cap` / `X-Meter-Used` are set on the success response
+  too, so callers can see how much headroom is left.
+
+Default plan is **free: 100 pins/month**. Per-key overrides (including
+explicit unlimited) live in the `WITNESS_PLANS` env var — JSON keyed by
+`sha256(key)`, e.g. `{"<sha256 of a key>": {"plan": "internal"}}` (defers
+to the built-in `internal` plan, which is unlimited but still counted) or
+`{"<sha256 of a key>": {"plan": "free", "monthly_cap": 500}}` (an explicit
+per-key cap that wins over any plan default).
+
+This is a hand-written Node port of
+[arcaeon-meter](https://github.com/dan8433-user/arcaeon-meter)'s behavior
+contract (same denial reasons, same header names, same fail-closed
+default) — arcaeon-meter itself is Python + SQLite and can't run inside a
+Vercel Node function, so `api/_meter.js` reimplements just the semantics
+natively. Usage counts live as one JSON file per key-hash per month in a
+**second, PRIVATE** GitHub repo,
+[`dan8433-user/arcaeon-witness-usage`](https://github.com/dan8433-user/arcaeon-witness-usage)
+— counts are not fingerprints and don't belong in the public pin repo's
+commit log.
+
+**Honest CAS race note.** SQLite's `BEGIN IMMEDIATE` (what arcaeon-meter
+uses locally) has no equivalent here — there's no shared process between
+invocations. The stand-in is the GitHub contents API's compare-and-swap:
+read the usage file, check the cap against that read, write with that
+read's `sha`. A concurrent writer that lands between the read and the
+write makes the write 409 (or, on the file's very first creation, 422
+`"sha" wasn't supplied` — same race, different status code, both handled);
+the loser re-reads and retries **once**. A third writer landing inside
+that retry's own window still fails the request outright (`502`) rather
+than silently dropping the count. At Stage-0 traffic (a handful of pins/hour)
+this is an acceptable gap, not a hidden one. The real fix, when it's
+warranted, is a Stage-2 KV (Vercel KV / Upstash) with an atomic `INCR` and
+no CAS loop at all.
+
 ### GET /api/latest?ns=&lt;namespace&gt; (no auth)
 
 ```bash
@@ -120,15 +164,21 @@ anchor commits, forming a chain.
   fallback can lag minutes; the repo history is the source of truth either way.
 - Two commits per pin (`<seq>.json` + `latest.json`) are not atomic; a crash
   between them self-heals on the next pin (seq derives from `latest.json`).
+- Metering's CAS increment retries once on conflict; a three-way race on the
+  same key in the same instant can still fail a request outright (`502`)
+  rather than silently under-count it — see the metering section above.
 
 ## Layout
 
 ```
-api/pin.js      POST /api/pin     — auth, validate, monotonic guard, commit
+api/pin.js      POST /api/pin     — auth, validate, metering, monotonic guard, commit
 api/latest.js   GET  /api/latest  — public read via raw + cache-busting
 api/health.js   GET  /api/health  — live store reachability
-api/_store.js   shared GitHub-contents-API store (not routed)
+api/_store.js   shared GitHub-contents-API store for the PUBLIC pin repo (not routed)
+api/_meter.js   per-key monthly usage caps against the PRIVATE usage repo (not routed)
 ```
 
 Plain Node 18+ serverless functions. No dependencies. No tokens in this repo —
-`GITHUB_PIN_TOKEN` and `WITNESS_KEYS` live only in Vercel env vars.
+`GITHUB_PIN_TOKEN`, `WITNESS_KEYS`, and `WITNESS_PLANS` live only in Vercel env
+vars. `GITHUB_PIN_TOKEN` is reused for both the public pins repo and the
+private usage repo — same account, same token, two repos.
