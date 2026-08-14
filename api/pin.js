@@ -66,6 +66,34 @@ module.exports = async (req, res) => {
       });
     }
 
+    // Same-length re-mint guard (reticuli's missing typed case, excelsior's
+    // two-ledger design, 2026-08-14): equal rows + identical chain is an
+    // idempotent re-pin; equal rows + DIFFERENT chain never advances accepted
+    // state — it lands in an append-only observation log and returns a typed
+    // conflict, so detection can't itself poison the namespace.
+    if (cur && Number.isInteger(cur.json.rows) && rows === cur.json.rows) {
+      if (chain.toLowerCase() === String(cur.json.chain).toLowerCase()) {
+        return res.status(200).json({
+          ok: true, note: "already witnessed (idempotent re-pin)", pin: cur.json,
+        });
+      }
+      const obs = {
+        observed_at: new Date().toISOString(),
+        claimed: { namespace, rows, chain: chain.toLowerCase() },
+        accepted_head: { rows: cur.json.rows, chain: cur.json.chain, seq: cur.json.seq },
+        auth_result: "key-valid-for-namespace",
+        verdict: "head-conflict: same rows, different chain (re-mint signature)",
+      };
+      const obsName = obs.observed_at.replace(/[:.]/g, "-");
+      await store.putFile(`observations/${namespace}/${obsName}.json`, obs,
+        `OBSERVATION head-conflict ${namespace} rows=${rows}`);
+      return res.status(409).json({
+        error: "head-conflict: same rows, different chain — recorded as observation; accepted head unchanged",
+        accepted_head: obs.accepted_head,
+        observation: `observations/${namespace}/${obsName}.json`,
+      });
+    }
+
     const seq = cur && Number.isInteger(cur.json.seq) ? cur.json.seq + 1 : 1;
     const pin = {
       namespace,
