@@ -4,6 +4,17 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-14 — Fix: `/` served a bare Vercel 404
+
+Only `/status` and `/api/*` resolved; the domain root returned `NOT_FOUND`. The
+Arcaeon HF org card — whose own pitch is "hand the reader the means to check" —
+linked its hosted-witness call-to-action at `https://arcaeon-witness.vercel.app`,
+so a stranger clicking the one link that proves the operator cannot silently
+advance their own pins landed on a Vercel 404. The root of a tamper-evidence
+domain is the last place to serve a broken page.
+
+`/` now rewrites to `/api/status`, the same destination `/status` already used.
+
 ## 2026-08-14 — Fix: `HEAD` on the public read endpoints answered 405
 
 `/api/latest`, `/api/badge`, `/api/status.json` and `/api/verify` all guarded with
