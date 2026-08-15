@@ -1,6 +1,6 @@
 # Arcaeon Witness Practices Statement
 
-**v1.0 · effective 2026-08-14 · applies to** `arcaeon-witness.vercel.app` **and its backing repos**
+**v1.1 · effective 2026-08-14 · applies to** `arcaeon-witness.vercel.app` **and its backing repos**
 [`arcaeon-witness-pins`](https://github.com/dan8433-user/arcaeon-witness-pins) (public) and
 `arcaeon-witness-usage` (private, metering only).
 
