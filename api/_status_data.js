@@ -132,8 +132,21 @@ async function gatherStatusData() {
   }
 
   // --- OTS Bitcoin anchor state ---------------------------------------
+  // Board item 26: the daily self-anchor (bridge/arcaeon/ots_anchor.py, Task
+  // Scheduler "velouria-ots-anchor", 03:15 UTC-local daily) is an instrument
+  // that fires into a void unless something reads it and says so out loud.
+  // anchorStatus is ALWAYS one of "current" | "stale" | "cannot_determine" —
+  // never left unset — so a caller never has to infer freshness from the
+  // presence/absence of other fields. "stale" (>36h — half again the 24h
+  // cadence, so one slow run doesn't false-alarm) folds into `degraded`;
+  // "cannot_determine" (anchors/ unreadable, OR readable but empty — either
+  // way freshness is unknowable, not merely unwitnessed) folds into
+  // `indeterminate`, same discipline as an ungradeable pin below.
+  const ANCHOR_STALE_HOURS = 36;
   let anchor = null;
   let anchorErr = null;
+  let anchorStatus = "cannot_determine";
+  let anchorAgeHours = null;
   try {
     const entries = await store.listDir("anchors");
     const names = entries.filter((e) => e.type === "file").map((e) => e.name);
@@ -154,17 +167,31 @@ async function gatherStatusData() {
           claimedAt = parts[1] || null;
         }
       } catch { /* non-fatal — the file listing itself is still shown */ }
-      const ageMs = renderedAt.getTime() - Date.parse(`${date}T00:00:00Z`);
+      // Prefer the timestamp claimed inside the file (second-precision); fall
+      // back to the filename's date at UTC midnight only if that's unreadable
+      // — either way age is measured, never assumed.
+      const claimedMs = claimedAt ? Date.parse(claimedAt) : NaN;
+      const refMs = Number.isFinite(claimedMs) ? claimedMs : Date.parse(`${date}T00:00:00Z`);
+      const ageMs = renderedAt.getTime() - refMs;
+      anchorAgeHours = Number.isFinite(ageMs) ? Math.round((ageMs / 3600000) * 10) / 10 : null;
+      anchorStatus = anchorAgeHours === null
+        ? "cannot_determine"
+        : (anchorAgeHours > ANCHOR_STALE_HOURS ? "stale" : "current");
       anchor = {
         date, hasOts, sha, claimedAt,
+        ageHours: anchorAgeHours,
+        status: anchorStatus,
         staleDays: Number.isFinite(ageMs) ? Math.floor(ageMs / 86400000) : null,
         txtUrl: BLOB(`anchors/${latestName}`),
         otsUrl: hasOts ? BLOB(`anchors/${latestName}.ots`) : null,
         folderUrl: TREE("anchors"),
       };
     }
+    // else: dir readable, but no anchor file ever landed — anchorStatus stays
+    // "cannot_determine" (freshness unknowable, not merely "none yet").
   } catch (err) {
     anchorErr = err.message;
+    anchorStatus = "cannot_determine";
   }
 
   const overdueCount = rows.filter((r) => r.status === "overdue").length;
@@ -175,9 +202,13 @@ async function gatherStatusData() {
   const errCount = rows.filter((r) => r.error).length;
 
   // Three states, not two. An ungradeable namespace is not a failure — but it
-  // is not an OK either.
-  const degraded = !reachable || !!nsErr || errCount > 0 || overdueCount > 0;
-  const indeterminate = !degraded && ungradeableCount > 0;
+  // is not an OK either. A stale anchor is a real failure (the daily self-
+  // anchor job stopped); "cannot_determine" anchor freshness gets the same
+  // non-failure-but-not-OK treatment as an ungradeable pin.
+  const anchorStale = anchorStatus === "stale";
+  const anchorUnknown = anchorStatus === "cannot_determine";
+  const degraded = !reachable || !!nsErr || errCount > 0 || overdueCount > 0 || anchorStale;
+  const indeterminate = !degraded && (ungradeableCount > 0 || anchorUnknown);
   const overallOk = !degraded && !indeterminate;
 
   return {
@@ -185,7 +216,7 @@ async function gatherStatusData() {
     reachable, healthErr,
     namespaces, rows, nsErr,
     obsCount, obsSample, obsErr,
-    anchor, anchorErr,
+    anchor, anchorErr, anchorStatus, anchorAgeHours,
     overdueCount, currentCount, heartbeatCount, ungradeableCount, missedEverCount, errCount,
     degraded, indeterminate, overallOk,
     repoUrl: REPO_URL,

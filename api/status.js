@@ -98,15 +98,17 @@ module.exports = async (req, res) => {
 
   let anchorHtml;
   if (anchorErr) {
-    anchorHtml = `<p>anchor listing failed: ${esc(anchorErr)}. <a href="${TREE("anchors")}">see the anchors/ folder directly</a>.</p>`;
+    anchorHtml = `<p>anchor listing failed &mdash; <strong>status: cannot_determine</strong>: ${esc(anchorErr)}. <a href="${TREE("anchors")}">see the anchors/ folder directly</a>.</p>`;
   } else if (!anchor) {
-    anchorHtml = `<p>no daily anchor recorded yet &mdash; <strong>anchor: see pins repo</strong>. <a href="${TREE("anchors")}">anchors/ folder</a>.</p>`;
+    anchorHtml = `<p>no daily anchor recorded yet &mdash; <strong>status: cannot_determine</strong>. <a href="${TREE("anchors")}">anchors/ folder</a>.</p>`;
   } else {
-    const staleWarn = anchor.staleDays != null && anchor.staleDays > 1;
+    const staleWarn = anchor.status === "stale";
     anchorHtml = `
       <p>
         Last daily anchor: <strong>${esc(anchor.date)}</strong>
-        ${staleWarn ? `<span class="badge badge-red">${anchor.staleDays}d old</span>` : `<span class="badge badge-green">recent</span>`}
+        ${staleWarn
+          ? `<span class="badge badge-red">stale &mdash; ${anchor.ageHours}h old (>36h)</span>`
+          : `<span class="badge badge-green">current &mdash; ${anchor.ageHours}h old</span>`}
       </p>
       <p class="muted">
         Recorded HEAD: <code>${anchor.sha ? esc(anchor.sha.slice(0, 16)) + "&hellip;" : "unreadable"}</code>

@@ -4,6 +4,29 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-14 — Add: anchor staleness now degrades `/status`, `/api/status.json`, `/api/badge` (board item 26)
+
+The daily self-anchor (`bridge/arcaeon/ots_anchor.py`, Task Scheduler
+`velouria-ots-anchor`, 03:15 local) writes `anchors/<date>-head.txt(.ots)` to
+the pin repo and logged locally to `ots_anchor_log.jsonl` — but nothing public
+noticed if the job silently stopped running. `/status` rendered the anchor's
+age but never fed it into the page's own degraded/ok verdict, so a dead
+anchor job left the badge green.
+
+`api/_status_data.js`'s `anchor` object now carries `ageHours` and a
+`status` of `current` / `stale` (>36h — 1.5x the 24h cadence) /
+`cannot_determine` (anchors/ unreadable or empty — same non-answer
+discipline as an ungradeable pin), computed from the timestamp inside the
+anchor file itself, not just its filename date. `stale` now folds into the
+page's `degraded` state and `cannot_determine` into `indeterminate`, so a
+stopped anchor job turns the badge red/yellow instead of staying silently
+green. `api/status.json.js` exposes this as a dedicated top-level
+`ots_anchor` block (date, age_hours, status, stale_after_hours, sha,
+has_ots_proof, claimed_at, url, error) so a monitor doesn't have to know the
+rest of the schema to find it. `api/badge.js`'s message now appends
+`· anchor stale` / `· anchor cannot_determine` when relevant instead of
+leaving the reason to a click-through.
+
 ## 2026-08-14 — Fix: `/` served a bare Vercel 404
 
 Only `/status` and `/api/*` resolved; the domain root returned `NOT_FOUND`. The

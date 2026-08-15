@@ -80,6 +80,27 @@ module.exports = async (req, res) => {
         : undefined,
     },
     anchor: data.anchor,
+    // Board item 26 — the daily self-anchor is an instrument that fires into
+    // a void unless something reads it and says so out loud. This block is
+    // that reader, phrased as the three facts a monitor needs: how stale
+    // (age_hours), the verdict (status), and — same discipline as every
+    // other gradeable field on this endpoint — cannot_determine instead of a
+    // silent guess when anchors/ is unreadable or empty. Duplicates fields
+    // already inside `anchor` above; kept as its own top-level key because
+    // that's the literal shape asked for and it's the one field a monitor
+    // scraping this JSON should have to find without knowing the rest of the
+    // schema.
+    ots_anchor: {
+      date: data.anchor ? data.anchor.date : null,
+      age_hours: data.anchorAgeHours,
+      status: data.anchorStatus,
+      stale_after_hours: 36,
+      sha: data.anchor ? data.anchor.sha : null,
+      has_ots_proof: data.anchor ? data.anchor.hasOts : null,
+      claimed_at: data.anchor ? data.anchor.claimedAt : null,
+      url: data.anchor ? data.anchor.txtUrl : null,
+      error: data.anchorErr,
+    },
     errors: {
       namespace_listing: data.nsErr,
       observations: data.obsErr,

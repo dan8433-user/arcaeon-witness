@@ -28,7 +28,14 @@ module.exports = async (req, res) => {
 
   const word = data.degraded ? "degraded" : data.indeterminate ? "indeterminate" : "ok";
   const color = data.degraded ? "red" : data.indeterminate ? "yellow" : "green";
-  const message = `${word} · ${data.namespaces.length} ns · ${data.overdueCount} overdue`;
+  // Board item 26: a stale/cannot_determine anchor already pulls `word`/
+  // `color` red or yellow via data.degraded/data.indeterminate (see
+  // _status_data.js) — this just makes the badge SAY why at a glance instead
+  // of leaving a stranger to click through for the reason.
+  const anchorNote = data.anchorStatus && data.anchorStatus !== "current"
+    ? ` · anchor ${data.anchorStatus}`
+    : "";
+  const message = `${word} · ${data.namespaces.length} ns · ${data.overdueCount} overdue${anchorNote}`;
 
   // shields.io caches endpoint badges itself; this just sets our own
   // response's freshness window shorter than a status/latest read (a badge
