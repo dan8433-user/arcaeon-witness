@@ -295,6 +295,136 @@ We are not claiming owner-auth. When Stage-1 lands, `auth_level` becomes
 distinguishable in the public repo record-by-record — including retroactively,
 because every record written before then says `bearer-stage0` in its own text.
 
+### GET /api/verify?ns=&lt;namespace&gt;&rows=&lt;n&gt;&chain=&lt;hex&gt; (no auth, no metering)
+
+One-call public proof-of-inclusion: "does this exact head exist in the
+witness record?" `digest` is accepted as an alias for `chain` (both may be
+given only if they agree). No auth and no metering on purpose — this is a
+funnel and a trust surface, not a write path, and it can't leak anything a
+stranger couldn't already read by cloning the public pins repo directly.
+
+```bash
+curl -s "https://arcaeon-witness.vercel.app/api/verify?ns=velouria-canon&rows=5&chain=fe40dd197dabe3db58341e8f54524a38"
+```
+
+```json
+{
+  "ok": true,
+  "witnessed": true,
+  "pin": { "namespace": "velouria-canon", "rows": 5, "chain": "fe40dd...", "seq": 4, "...": "..." },
+  "seq": 4,
+  "pinned_at": "2026-08-14T21:30:44.225Z",
+  "is_current_head": true,
+  "raw_record_url": "https://raw.githubusercontent.com/dan8433-user/arcaeon-witness-pins/main/pins/velouria-canon/00000004.json",
+  "history": "https://github.com/dan8433-user/arcaeon-witness-pins/commits/main/pins/velouria-canon",
+  "cadence_gradeable": true, "cadence_status": "current", "cadence_grade": "pass", "...": "..."
+}
+```
+
+`raw_record_url` is a direct `raw.githubusercontent.com` link — the point is
+a caller can confirm the pin **without trusting this API at all**, by
+fetching that URL themselves. Cadence fields (`cadence_gradeable`,
+`cadence_status`, `cadence_grade`, `head_state`, etc.) come from the exact
+same `store.computeCadenceFields` function `/api/latest` uses (extracted
+from it), so the two endpoints grade a pin identically.
+
+**Scope.** The submitted `(rows, chain)` is checked first against the
+namespace's *current* head (one read — "is my log witnessed right now?",
+the common case). If it doesn't match the current head and the requested
+`rows` is *lower* than the current head's `rows`, a bounded backward scan
+over the namespace's numbered records looks for a historical match — a
+same-rows/different-chain conflict is never written into `pins/` (it's
+rejected and logged to `observations/` instead, see `POST /api/pin`), so
+within `pins/` a given `rows` value has at most one accepted chain, and
+finding `rows === target` there is conclusive. The scan is capped at 50
+records (`MAX_HISTORY_SCAN` in `api/verify.js`) — this bounds this repo's
+shared GitHub API budget per unauthenticated call, not the caller's usage.
+A scan that exhausts the cap without an answer says so honestly
+(`reason:"scan_bound_reached"`) rather than guessing.
+
+Miss reasons: `no_pin_recorded_for_namespace`, `rows_match_chain_mismatch`
+(a record exists at that rows count with a *different* chain — not the
+accepted head), `exceeds_current_head` (rows is ahead of what's been
+witnessed), `rows_never_witnessed` (that rows count was skipped by an
+advance and was never itself a head), `not_found_in_history` /
+`scan_bound_reached` (bounded backward scan exhausted). Every response is
+HTTP `200` — `witnessed:true/false` is the signal, not the status code, the
+same way this is a yes/no question, not a resource fetch.
+
+A historical (superseded) match sets `is_current_head:false` and its
+cadence fields describe that old record, not the namespace's live status —
+read `is_current_head` before reading `cadence_status` on a hit.
+
+### GET /api/status.json (no auth)
+
+Machine-readable twin of `GET /status` — same underlying data (both call
+`api/_status_data.js`'s `gatherStatusData()`, so they can't drift apart),
+rendered as a stable JSON schema instead of an HTML table.
+
+```bash
+curl -s https://arcaeon-witness.vercel.app/api/status.json
+```
+
+```json
+{
+  "ok": false,
+  "status": "indeterminate",
+  "rendered_at": "2026-08-15T01:36:57.267Z",
+  "store": {"kind": "public-github-repo", "repo": "dan8433-user/arcaeon-witness-pins", "branch": "main", "reachable": true},
+  "summary": {"namespaces": 7, "current": 2, "heartbeat_only": 0, "overdue": 0, "not_gradeable": 5, "ever_missed_deadline": 0, "conflicts_observed": 1},
+  "namespaces": [ {"namespace": "velouria-canon", "rows": 5, "chain": "fe40dd...", "status": "current", "cadence_gradeable": true, "...": "..."} ],
+  "conflict_observations": {"count": 1, "sample": ["..."]},
+  "anchor": {"date": "2026-08-14", "hasOts": true, "...": "..."},
+  "errors": {"namespace_listing": null, "observations": null, "anchor": null, "health": null}
+}
+```
+
+`status` is `"ok"` / `"degraded"` / `"indeterminate"` — the same three-state
+verdict `/status`'s header badge shows (`indeterminate` means every
+namespace is either current or merely ungradeable, never overdue or
+erroring — see the refuse-semantics section above). `cache-control: no-store`;
+this reads live at request time same as every other endpoint here.
+
+**Independent cadence math, on purpose.** `/status`, `/api/status.json`, and
+`/api/badge` all share ONE data-gathering pass (`gatherStatusData()`), but
+that pass computes cadence with its own reimplementation
+(`_status_data.js`'s `cadenceStatus()`) — **not** `store.computeCadenceFields`,
+the function `/api/latest` and `/api/verify` share. This is the same
+deliberate duplication `/status` always carried (a bug in one computation
+can't silently take the whole trust surface down at once, and a stranger
+diffing `/api/status.json`'s per-namespace `status` against a raw
+`/api/latest?ns=<ns>` call is comparing two independent implementations of
+the same public rule) — the refactor just factored it so the status family
+shares one copy of its independent logic instead of each hand-copying it.
+
+### GET /api/badge (no auth)
+
+Shields.io-compatible [endpoint badge](https://shields.io/badges/endpoint-badge).
+Point a shields.io badge URL at it and it renders live:
+
+```bash
+curl -s https://arcaeon-witness.vercel.app/api/badge
+```
+
+```json
+{"schemaVersion": 1, "label": "witness", "message": "indeterminate · 7 ns · 0 overdue", "color": "yellow", "cacheSeconds": 120}
+```
+
+Markdown for a README:
+
+```markdown
+![witness status](https://img.shields.io/endpoint?url=https://arcaeon-witness.vercel.app/api/badge)
+```
+
+![witness status](https://img.shields.io/endpoint?url=https://arcaeon-witness.vercel.app/api/badge)
+
+Color: green when every namespace is `ok` (current or heartbeat, none
+overdue, none ungradeable), yellow when `indeterminate` (nothing overdue,
+but at least one namespace has no gradeable deadline), red when `degraded`
+(store unreachable, a namespace read failed, or anything is overdue). Same
+`gatherStatusData()` pass as `/status` and `/api/status.json` — the badge
+can't say "ok" while the page says otherwise.
+
 ### GET /api/health (no auth)
 
 ```bash
@@ -399,12 +529,16 @@ anchor commits, forming a chain.
 api/pin.js            POST /api/pin       — auth, validate, metering, credit decrement, monotonic guard, commit
 api/renew.js          POST /api/renew     — publisher heartbeat: refresh the deadline, never claim an advance (thin wrapper over pin.js)
 api/latest.js          GET /api/latest    — public read via raw + cache-busting
+api/verify.js           GET /api/verify   — one-call public proof-of-inclusion (no auth, no metering)
 api/health.js           GET /api/health   — live store reachability
 api/status.js            GET /status      — public trust-surface page
+api/status.json.js       GET /api/status.json — machine-readable twin of /status
+api/badge.js             GET /api/badge   — shields.io-compatible uptime badge
 api/balance.js           GET /api/balance — key-holder's own credit + free-tier read (auth'd, read-only)
 api/credit.js           POST /api/credit  — internal/admin credit top-up (Bearer WITNESS_ADMIN_KEY)
 api/stripe-webhook.js   POST /api/stripe-webhook — real top-up path (501 until WITNESS_STRIPE_WEBHOOK_SECRET is set)
-api/_store.js   shared GitHub-contents-API store for the PUBLIC pin repo (not routed)
+api/_store.js   shared GitHub-contents-API store for the PUBLIC pin repo (not routed); also holds computeCadenceFields, the cadence-grading function api/latest.js and api/verify.js share
+api/_status_data.js shared data-gathering pass behind /status, /api/status.json, and /api/badge (not routed); carries its own deliberately-independent cadence reimplementation, see its module comment
 api/_meter.js   per-key monthly usage caps against the PRIVATE usage repo (not routed)
 api/_balance.js per-key decrementing credit balance + ledger against the PRIVATE usage repo (not routed)
 ```

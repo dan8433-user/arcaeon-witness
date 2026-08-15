@@ -288,6 +288,103 @@ function appendInterval(prev, { now, seq, cadenceHours, dueBy, kind }) {
   return { fields, wasOverdue, missedDueAt: wasOverdue ? prevDueRaw : null, interval };
 }
 
+// ---- cadence read-side verdict (shared by api/latest.js and api/verify.js) ----
+//
+// This is the ONE cadence-grading implementation for the "read a stored pin
+// and say whether it's inside its declared window" question. api/status.js
+// (and its api/status.json twin) deliberately do NOT call this — they carry
+// their own independent reimplementation on purpose (see api/_status_data.js),
+// so a bug in this function can't silently take the whole trust surface down
+// at once. api/latest.js and api/verify.js SHOULD share one implementation:
+// they're both "grade this one pin against its own deadline" reads, and a
+// stranger diffing verify's cadence fields against latest's for the same pin
+// should see the identical computation, not two hand-copies that can drift.
+//
+// Returns exactly the fields api/latest.js has always put on its response
+// (this is an extraction, not a behavior change — api/latest.js's output is
+// unchanged after switching to this). `now` is injectable for testability;
+// defaults to the real clock.
+function computeCadenceFields(pin, now = Date.now()) {
+  const dueRaw = pin && typeof pin.next_pin_due_by === "string" ? pin.next_pin_due_by : null;
+  const dueMs = dueRaw ? Date.parse(dueRaw) : NaN;
+
+  const cadence_gradeable = Number.isFinite(dueMs);
+
+  let cadence_status = "legacy_no_deadline";
+  let overdue_by_seconds;
+  if (cadence_gradeable) {
+    if (now >= dueMs) {
+      cadence_status = "overdue";
+      overdue_by_seconds = Math.floor((now - dueMs) / 1000);
+    } else {
+      cadence_status = "current";
+    }
+  }
+
+  const recordKind = pin && typeof pin.record_kind === "string" ? pin.record_kind : null;
+  const head_state =
+    recordKind === "publisher_heartbeat" ? "publisher_heartbeat_current" : "content_head_advanced";
+
+  let status;
+  if (!cadence_gradeable) status = "legacy_no_deadline";
+  else if (cadence_status === "overdue") status = "overdue";
+  else if (head_state === "publisher_heartbeat_current") status = "publisher_heartbeat_current";
+  else status = "current";
+
+  const out = {
+    next_pin_due_by: dueRaw,
+    status,
+    cadence_status,
+    cadence_gradeable,
+    head_state,
+  };
+  if (!recordKind) {
+    out.head_state_source = "inferred_pre_renewal_record (this record predates the heartbeat path, which could only write on a content advance)";
+  }
+  if (cadence_status === "overdue") out.overdue_by_seconds = overdue_by_seconds;
+
+  if (!cadence_gradeable) {
+    out.cadence_grade = "cannot_determine";
+    out.gate_note =
+      "REFUSE-SEMANTICS: this record predates the cadence field and declared no deadline, " +
+      "so its cadence CANNOT be graded. A consumer gating on cadence MUST treat " +
+      "cadence_gradeable:false as cannot_determine and apply its own not-determined policy — " +
+      "it is NOT a pass. Nothing is backfilled to make this row look graded; the namespace " +
+      "becomes gradeable again on its next pin or renewal, and never retroactively.";
+  } else {
+    out.cadence_grade = cadence_status === "current" ? "pass" : "fail";
+  }
+
+  const firstSeenRaw =
+    pin && typeof pin.head_first_seen_at === "string" ? pin.head_first_seen_at : null;
+  const firstSeenMs = firstSeenRaw ? Date.parse(firstSeenRaw) : NaN;
+  if (Number.isFinite(firstSeenMs)) {
+    out.head_first_seen_at = firstSeenRaw;
+    out.content_unchanged_for_seconds = Math.max(0, Math.floor((now - firstSeenMs) / 1000));
+  }
+  if (Number.isInteger(pin && pin.renewals_since_advance)) {
+    out.renewals_since_advance = pin.renewals_since_advance;
+  }
+  if (head_state === "publisher_heartbeat_current") {
+    out.heartbeat_note =
+      "The latest record is a publisher heartbeat: the deadline was renewed, the content head did NOT advance. " +
+      "Do not read this as new activity — read it as 'a key-holder was alive and asserting nothing changed'.";
+  }
+
+  if (pin && pin.ever_missed_deadline === true) {
+    out.ever_missed_deadline = true;
+    if (typeof pin.missed_due_at === "string") out.missed_due_at = pin.missed_due_at;
+    if (typeof pin.first_missed_due_at === "string") out.first_missed_due_at = pin.first_missed_due_at;
+    if (Number.isInteger(pin.missed_deadline_count)) out.missed_deadline_count = pin.missed_deadline_count;
+  }
+  if (pin && pin.had_ungradeable_history === true) out.had_ungradeable_history = true;
+
+  out.auth_level = (pin && pin.auth_level) || AUTH_LEVEL;
+  out.auth_note = (pin && pin.auth_note) || AUTH_LEVEL_NOTE;
+
+  return out;
+}
+
 module.exports = {
   REPO,
   BRANCH,
@@ -300,10 +397,12 @@ module.exports = {
   keyPrefixFor,
   validatePin,
   NS_RE,
+  CHAIN_RE,
   resolveCadenceHours,
   DEFAULT_CADENCE_HOURS,
   appendInterval,
   MAX_INLINE_HISTORY,
   AUTH_LEVEL,
   AUTH_LEVEL_NOTE,
+  computeCadenceFields,
 };
