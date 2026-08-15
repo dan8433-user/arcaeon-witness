@@ -137,7 +137,8 @@ $50/12,000 pins · Bulk $150/40,000 pins (`api/_balance.js` `PACKS`).
 curl -s "https://arcaeon-witness.vercel.app/api/latest?ns=velouria-myledger"
 ```
 
-Returns `{ok, pin, next_pin_due_by, status, overdue_by_seconds?, source,
+Returns `{ok, pin, next_pin_due_by, status, cadence_status, cadence_gradeable,
+cadence_grade, head_state, overdue_by_seconds?, auth_level, source,
 freshness_note, history}`. Primary read path is the GitHub contents API
 (commit-fresh); fallback is `raw.githubusercontent.com` with cache-busting,
 which in practice can serve stale content for **minutes** (its CDN largely
@@ -149,10 +150,53 @@ authoritative record.
 stores `next_pin_due_by = pinned_at + the namespace's declared cadence`
 (default **24h**; per-namespace-prefix overrides via the `WITNESS_CADENCE`
 env var — JSON `{"<namespace-prefix>": <hours>}`, longest matching prefix
-wins). `status` is computed live at read time: `"current"` if now is before
-the deadline, `"overdue"` (with `overdue_by_seconds`) if not, or
-`"legacy_no_deadline"` for pins recorded before this field existed — those
-never crash the read, they just can't claim a deadline they didn't make.
+wins). The verdict is computed live at read time, across three
+**orthogonal** fields rather than one overloaded one:
+
+| field | values | means |
+|---|---|---|
+| `cadence_gradeable` | `true` / `false` | can this record be graded against a deadline **at all**? |
+| `cadence_status` | `current` / `overdue` / `legacy_no_deadline` | the pure deadline verdict |
+| `head_state` | `content_head_advanced` / `publisher_heartbeat_current` | did the content actually move, or did the publisher just renew? |
+| `status` | `current` / `publisher_heartbeat_current` / `overdue` / `legacy_no_deadline` | the single combined verdict, for consumers that read one field |
+
+`status` resolves to the **safe** side in both non-obvious cases: a
+heartbeat-only namespace is never reported as plain `"current"`, and an
+ungradeable record is never reported as passing. `cadence_grade` is the
+same verdict in gate vocabulary: `"pass"`, `"fail"`, or
+`"cannot_determine"`.
+
+#### Refuse-semantics: `cadence_gradeable:false` is NOT a pass
+
+Owed to **atomic-raven**, whose objection to the first cut of this was exact:
+*"a warning that cannot refuse is telemetry, not a control."* The original
+`legacy_no_deadline` status printed and armed nothing — every downstream
+consumer that gated on cadence still saw an unqualified green light.
+
+A record recorded before the cadence field existed **made no promise**, so no
+promise can be graded. That is a refusal to grade, and it is now
+machine-readable in three places:
+
+- **`cadence_gradeable: false`** in the JSON body (present as `true` on every
+  gradeable read too, so a consumer can gate on its presence without special-casing);
+- **`cadence_grade: "cannot_determine"`** — distinct from `"pass"` and `"fail"`;
+- **`X-Cadence-Gradeable: false`** response header, so a proxy or gate can
+  refuse without parsing the body.
+
+**A consumer gating on cadence MUST treat `cadence_gradeable:false` as
+`cannot_determine` and apply its own not-determined policy — fail closed,
+alert, or ask a human. It is NOT a pass.** Treating it as one reintroduces
+exactly the hole atomic-raven named.
+
+Nothing is backfilled to make an ungradeable record look graded — no
+synthetic deadline is ever written onto a pin that never declared one. A
+legacy namespace becomes gradeable again on its **next** pin or renewal, and
+only forward from that moment; the ungradeable stretch stays ungradeable
+forever, and `had_ungradeable_history:true` stays on the record permanently so
+a later clean-looking row can't hide it. On `/status`, these rows render
+hatched amber and labeled **"cadence not gradeable"** — never the neutral grey
+that reads as fine — and the page header says `INDETERMINATE`, not `OK`, while
+any namespace is ungradeable.
 
 This turns **silence into a stranger-gradeable alarm**: a verifier polling
 `/api/latest` sees `"overdue"` in the JSON without trusting our API or our
@@ -170,6 +214,86 @@ stopped. Pair it with the conflict-observation log (`observations/<ns>/`,
 written on a same-rows/different-chain re-mint attempt) for the other half
 of the picture — what the witness saw versus when it stopped seeing
 anything at all.
+
+### POST /api/renew (bearer-key auth) — publisher heartbeat
+
+```bash
+curl -s -X POST https://arcaeon-witness.vercel.app/api/renew \
+  -H "Authorization: Bearer $WITNESS_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"namespace":"velouria-myledger","rows":42,"chain":"a1b2c3d4e5f60718"}'
+```
+
+Owed to **excelsior**, who found the hole and wrote the invariants this
+implements. Before this, a namespace whose log *genuinely stopped changing*
+went permanently overdue: the idempotent re-pin branch returned the stored pin
+untouched, and the deadline only moved when `rows` advanced. A finished log and
+an abandoned one looked identical, and there was no way to say "still here,
+nothing new."
+
+Renewal says it. The whole design problem is that it must not be launderable
+into "and everything is fine," so:
+
+- **The head is restated, never advanced.** `rows` and `chain` must match the
+  current head exactly. Mismatched rows → `409 renewal_head_mismatch`. Same
+  rows with a *different* chain still takes the conflict-observation path,
+  unchanged — a renewal can never stand in for a re-mint attempt.
+- **A missed deadline is retained.** If the namespace was overdue when the
+  renewal landed, the record keeps `missed_due_at`, `first_missed_due_at`,
+  `missed_deadline_count`, `ever_missed_deadline:true` and an entry in
+  `missed_deadlines[]`. **Renewal moves the deadline; it never erases the fact
+  that one was missed.** Neither does a later content advance — the same
+  append-only history code runs on both write paths, so a namespace that
+  recovers still shows the miss on every future read and on `/status`.
+- **The new deadline is an appended interval, not a rewrite.** Each renewal
+  appends an `intervals[]` object `{seq, kind, opened_at, cadence_hours,
+  due_by, supersedes_due_by, superseded_deadline_was_missed}`. The superseded
+  window stays readable in the record. The most recent 20 intervals and misses
+  are inlined; the complete series is the per-seq record history in the public
+  pin repo, which is authoritative.
+- **A heartbeat is typed differently from an advance.** The record carries
+  `record_kind: "publisher_heartbeat"` vs `"content_head_advance"`;
+  `/api/latest` surfaces that as `head_state: "publisher_heartbeat_current"` vs
+  `"content_head_advanced"`, and `status` reports `publisher_heartbeat_current`
+  rather than `current` so a naive `status === "current"` gate does **not** pass
+  a namespace whose content never moved.
+- **The staleness is measurable, not just labeled.** `head_first_seen_at` (when
+  this exact head was first witnessed) is never moved by a renewal, so
+  `/api/latest` returns `content_unchanged_for_seconds` and
+  `renewals_since_advance` — the numbers that expose a log "kept current" for
+  months without producing a single row.
+- **A renewal creates a new numbered record** (`pins/<ns>/<seq>.json`) and a new
+  commit, exactly like a pin. Renewals are metered like pins, because they cost
+  the same two commits.
+- **A bare re-pin still does nothing to the deadline.** Without an explicit
+  renew intent, same-rows/same-chain returns the same idempotent `200` it always
+  did. Refreshing a deadline has to be asked for out loud. `POST /api/pin` with
+  `"intent":"renew"` is equivalent; `/api/renew` is the same handler with the
+  intent stamped on. An unrecognized `intent` value is a `400`, never a silent
+  fallthrough to the plain-pin path.
+
+#### Auth honesty — bearer now, owner-signature is Stage-1 and NOT built
+
+**`auth_level: "bearer-stage0"`** appears on every write response, in every
+stored record, and on every `/api/latest` read. It means exactly this, and the
+same sentence ships in the API responses themselves (`auth_note`):
+
+> Bearer-key auth only. This is NOT owner-signature auth: the witness verifies
+> that the caller holds a key bound to this namespace prefix, not that the
+> log's owner authorized this record. Anyone who obtains the key can pin or
+> renew. Owner-signature auth — a detached signature over `{namespace, rows,
+> chain, timestamp}` verified against a public key registered to the namespace
+> — is the Stage-1 requirement and is NOT built yet. Read
+> `publisher_heartbeat_current` as proof that a key-holder was alive and
+> asserting nothing changed, never as proof of the log owner's intent.
+
+Renewal is the write where this matters most: a leaked bearer key can keep a
+namespace looking alive indefinitely without the owner's involvement. That is a
+real, currently-unclosed gap in Stage-0, named here rather than papered over.
+We are not claiming owner-auth. When Stage-1 lands, `auth_level` becomes
+`"owner-signature"` on records that carry one, and the two will be
+distinguishable in the public repo record-by-record — including retroactively,
+because every record written before then says `bearer-stage0` in its own text.
 
 ### GET /api/health (no auth)
 
@@ -246,6 +370,14 @@ anchor commits, forming a chain.
 - Metering's CAS increment retries once on conflict; a three-way race on the
   same key in the same instant can still fail a request outright (`502`)
   rather than silently under-count it — see the metering section above.
+- **Renewal is bearer-authorized, not owner-signed.** A leaked key can keep a
+  namespace's deadline alive without the owner's involvement. `auth_level:
+  "bearer-stage0"` says so on every record and every read; owner-signature auth
+  is the Stage-1 requirement and is not built. See "Auth honesty" above.
+- **Renewal cannot prove the publisher is honest, only that a key-holder is
+  responsive.** `publisher_heartbeat_current` plus `content_unchanged_for_seconds`
+  is the honest pair: alive, not active. A witness still cannot tell a finished
+  log from a suppressed one — it can only stop the two from looking identical.
 - **Credit balance: observed, not just theoretical, read-after-write lag.**
   In testing (2026-08-14), a `GET` on `balance/<key_hash>.json` immediately
   after the `PUT` that created it occasionally returned 404 (not-found)
@@ -265,6 +397,7 @@ anchor commits, forming a chain.
 
 ```
 api/pin.js            POST /api/pin       — auth, validate, metering, credit decrement, monotonic guard, commit
+api/renew.js          POST /api/renew     — publisher heartbeat: refresh the deadline, never claim an advance (thin wrapper over pin.js)
 api/latest.js          GET /api/latest    — public read via raw + cache-busting
 api/health.js           GET /api/health   — live store reachability
 api/status.js            GET /status      — public trust-surface page

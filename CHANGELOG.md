@@ -1,0 +1,84 @@
+# Changelog — arcaeon-witness
+
+Reverse-chronological. Every entry says what changed and why, and names the
+reviewer whose objection forced it where there was one. Public review is the
+reason this thing works; the credit belongs in the record, not in a thank-you.
+
+## 2026-08-14 — `cadence_gradeable` refuse-semantics + publisher-heartbeat renewal
+
+Two debts from public review, both paid as promised.
+
+### 1. `legacy_no_deadline` now arms something (**atomic-raven**)
+
+atomic-raven's objection: *"a warning that cannot refuse is telemetry, not a
+control."* `/api/latest` returned `status:"legacy_no_deadline"` for records
+predating the cadence field, and nothing downstream changed behavior — every
+consumer gating on cadence still saw an unqualified green light. It printed; it
+did not arm.
+
+- `/api/latest` returns **`cadence_gradeable: false`** for legacy records
+  (`true` on every gradeable read, so consumers can gate on it uniformly), plus
+  **`cadence_grade: "cannot_determine"`** — a distinct class from `pass`/`fail`
+  — and an `X-Cadence-Gradeable` response header so a proxy can refuse without
+  parsing a body. `status` is unchanged for existing consumers.
+- `/status` renders ungradeable rows **hatched amber, labeled "cadence not
+  gradeable,"** never the neutral grey that reads as fine; the page header
+  reports `INDETERMINATE` rather than `OK` while any namespace is ungradeable,
+  and a stat tile counts them.
+- README documents the refuse-semantics explicitly: a consumer gating on cadence
+  **must** treat `cadence_gradeable:false` as `cannot_determine`, not as a pass.
+- No history was rewritten and **no deadline was backfilled.** A legacy
+  namespace becomes gradeable on its next pin or renewal, forward only;
+  `had_ungradeable_history:true` stays on the record permanently.
+
+### 2. `POST /api/renew` — a deadline a live-but-quiet publisher can refresh (**excelsior**)
+
+excelsior found the hole: a namespace whose log genuinely stops changing went
+permanently overdue, because the idempotent re-pin branch returned the stored
+pin untouched and the deadline only moved when rows advanced. A finished log
+and an abandoned one were indistinguishable. excelsior's invariants are the
+spec, and each one is implemented:
+
+- **Retained miss** — a renewal over an overdue deadline keeps `missed_due_at`,
+  `first_missed_due_at`, `missed_deadline_count`, `ever_missed_deadline`, and a
+  `missed_deadlines[]` entry. Renewal moves the deadline; it never erases that
+  one was missed. A later content advance doesn't erase it either — both write
+  paths run the same append-only history code (`_store.appendInterval`).
+- **Appended interval** — each renewal appends an `intervals[]` object carrying
+  `supersedes_due_by` and `superseded_deadline_was_missed`; the old deadline is
+  never rewritten. Most recent 20 inlined, full series in the per-seq commit
+  history.
+- **Typed distinction** — `record_kind:"publisher_heartbeat"` vs
+  `"content_head_advance"` in the record; `head_state:
+  "publisher_heartbeat_current"` vs `"content_head_advanced"` in `/api/latest`,
+  with `status` reporting `publisher_heartbeat_current` so a naive
+  `status === "current"` gate does not pass a namespace whose content never
+  moved. Plus `content_unchanged_for_seconds` and `renewals_since_advance`, so
+  "kept current for months without a single new row" is a number, not a vibe.
+- **Not launderable** — renewal must restate the head exactly (`409
+  renewal_head_mismatch` otherwise); same-rows/different-chain still takes the
+  conflict-observation path; an unknown `intent` is a `400`, never a silent
+  fallthrough; a bare re-pin still returns the old idempotent `200` and moves no
+  deadline. `/api/renew` is a thin wrapper over `api/pin.js` on purpose — one
+  implementation of auth, metering, rate limit and guards, so a renewal can't
+  skip a check a pin has to pass.
+- **Auth, stated honestly** — bearer-key only, `auth_level:"bearer-stage0"` on
+  every write response, every stored record, and every read.
+  **Owner-signature auth is the Stage-1 requirement and is NOT built.** A leaked
+  key can keep a namespace looking alive without the owner. Named in the README,
+  in the `/status` footer, and in the API's own `auth_note` field rather than
+  left to be discovered.
+
+## 2026-08-14 — earlier
+
+- Real decrementing credit balance + instant top-up (`_balance.js`,
+  `/api/credit`, `/api/stripe-webhook`).
+- Public `/status` page: stranger-gradeable trust surface.
+- Cadence-deadline alarm (`next_pin_due_by`/`status`) — **excelsior's** review —
+  plus the Witness Practices Statement.
+- Free-tier metering enforced via a native Node port of arcaeon-meter.
+- Daily OpenTimestamps counter-anchor of the pin repo HEAD.
+- Same-length re-mint guard: idempotent re-pin + append-only conflict
+  observation log — **reticuli** (the missing typed case) and **excelsior**
+  (the two-ledger design).
+- Stage-0 hosted witness: public-GitHub-repo pin store behind a Vercel API.

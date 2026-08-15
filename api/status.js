@@ -35,12 +35,25 @@ function esc(s) {
 function cadenceStatus(pin) {
   const dueRaw = pin && typeof pin.next_pin_due_by === "string" ? pin.next_pin_due_by : null;
   const dueMs = dueRaw ? Date.parse(dueRaw) : NaN;
-  if (!Number.isFinite(dueMs)) return { status: "legacy_no_deadline", dueRaw };
+  const heartbeat = !!(pin && pin.record_kind === "publisher_heartbeat");
+  if (!Number.isFinite(dueMs)) {
+    // Ungradeable, NOT fine. Rendered distinctly below for exactly the reason
+    // atomic-raven named: a warning that changes nothing downstream is
+    // telemetry, not a control — and a neutral grey badge in a row of green
+    // ones changes nothing.
+    return { status: "legacy_no_deadline", gradeable: false, heartbeat, dueRaw };
+  }
   const now = Date.now();
   if (now >= dueMs) {
-    return { status: "overdue", dueRaw, overdueSeconds: Math.floor((now - dueMs) / 1000) };
+    return {
+      status: "overdue", gradeable: true, heartbeat, dueRaw,
+      overdueSeconds: Math.floor((now - dueMs) / 1000),
+    };
   }
-  return { status: "current", dueRaw };
+  return {
+    status: heartbeat ? "publisher_heartbeat_current" : "current",
+    gradeable: true, heartbeat, dueRaw,
+  };
 }
 
 function humanDuration(seconds) {
@@ -57,10 +70,16 @@ function humanDuration(seconds) {
 
 function statusBadge(status, overdueSeconds) {
   if (status === "current") return `<span class="badge badge-green">current</span>`;
+  if (status === "publisher_heartbeat_current") {
+    return `<span class="badge badge-blue">heartbeat &middot; content unchanged</span>`;
+  }
   if (status === "overdue") {
     return `<span class="badge badge-red">overdue${overdueSeconds != null ? ` &middot; ${esc(humanDuration(overdueSeconds))}` : ""}</span>`;
   }
-  return `<span class="badge badge-grey">legacy (no deadline recorded)</span>`;
+  // Ungradeable. Deliberately NOT the neutral grey it used to be: grey in a
+  // column of green reads as "fine, nothing to see." This one has to read as
+  // an open question, because that is what it is.
+  return `<span class="badge badge-amber">&#9888; cadence not gradeable</span>`;
 }
 
 module.exports = async (req, res) => {
@@ -99,6 +118,13 @@ module.exports = async (req, res) => {
           pinnedAt: pin.pinned_at,
           nextDueBy: cad.dueRaw,
           status: cad.status,
+          gradeable: cad.gradeable,
+          heartbeat: cad.heartbeat,
+          headFirstSeenAt: typeof pin.head_first_seen_at === "string" ? pin.head_first_seen_at : null,
+          renewalsSinceAdvance: Number.isInteger(pin.renewals_since_advance) ? pin.renewals_since_advance : null,
+          everMissed: pin.ever_missed_deadline === true,
+          missedDueAt: typeof pin.missed_due_at === "string" ? pin.missed_due_at : null,
+          missedCount: Number.isInteger(pin.missed_deadline_count) ? pin.missed_deadline_count : null,
           overdueSeconds: cad.overdueSeconds,
           recordUrl: seqName ? BLOB(`pins/${ns}/${seqName}.json`) : BLOB(`pins/${ns}/latest.json`),
           historyUrl: COMMITS(`pins/${ns}`),
@@ -176,11 +202,17 @@ module.exports = async (req, res) => {
   // --- render -----------------------------------------------------------
   const overdueCount = rows.filter((r) => r.status === "overdue").length;
   const currentCount = rows.filter((r) => r.status === "current").length;
-  const legacyCount = rows.filter((r) => r.status === "legacy_no_deadline").length;
+  const heartbeatCount = rows.filter((r) => r.status === "publisher_heartbeat_current").length;
+  const ungradeableCount = rows.filter((r) => r.gradeable === false).length;
+  const missedEverCount = rows.filter((r) => r.everMissed).length;
   const errCount = rows.filter((r) => r.error).length;
 
-  const overallOk = reachable && !nsErr && errCount === 0 && overdueCount === 0;
-  const degraded = !reachable || nsErr || errCount > 0;
+  // Three states, not two. An ungradeable namespace is not a failure — but it
+  // is not an OK either, and the header badge is the one thing a stranger
+  // reads first, so it must not say OK over an unanswered question.
+  const degraded = !reachable || nsErr || errCount > 0 || overdueCount > 0;
+  const indeterminate = !degraded && ungradeableCount > 0;
+  const overallOk = !degraded && !indeterminate;
 
   const nsRowsHtml = rows.length
     ? rows.map((r) => {
@@ -191,13 +223,29 @@ module.exports = async (req, res) => {
           </tr>`;
         }
         const shortChain = r.chain.length > 16 ? `${r.chain.slice(0, 16)}…` : r.chain;
-        return `<tr>
+        const unchangedFor =
+          r.headFirstSeenAt && Number.isFinite(Date.parse(r.headFirstSeenAt))
+            ? humanDuration(Math.floor((renderedAt.getTime() - Date.parse(r.headFirstSeenAt)) / 1000))
+            : null;
+        // A retained miss is shown on EVERY later render, including a namespace
+        // that is healthy again — renewal moves the deadline, never this.
+        const missedFlag = r.everMissed
+          ? `<div class="flag-missed" title="a deadline passed unmet; retained permanently in the record">missed a deadline${r.missedCount ? ` &times;${esc(r.missedCount)}` : ""}${r.missedDueAt ? ` &middot; last <time datetime="${esc(r.missedDueAt)}">${esc(r.missedDueAt)}</time>` : ""}</div>`
+          : "";
+        const heartbeatDetail = r.heartbeat
+          ? `<div class="muted-sm">publisher heartbeat &mdash; head unchanged${unchangedFor ? ` for ${esc(unchangedFor)}` : ""}${r.renewalsSinceAdvance ? `, ${esc(r.renewalsSinceAdvance)} renewal${r.renewalsSinceAdvance === 1 ? "" : "s"} since the last advance` : ""}</div>`
+          : "";
+        return `<tr${r.gradeable === false ? ' class="row-ungradeable"' : ""}>
           <td><code>${esc(r.ns)}</code> <a class="src" href="${esc(r.historyUrl)}" title="commit history for this namespace">history</a></td>
           <td><a href="${esc(r.recordUrl)}" title="raw witnessed record on GitHub"><code>${esc(shortChain)}</code></a></td>
           <td>${r.rowsWitnessed != null ? esc(r.rowsWitnessed) : "&mdash;"}</td>
           <td><time datetime="${esc(r.pinnedAt || "")}">${esc(r.pinnedAt || "unknown")}</time></td>
-          <td>${r.nextDueBy ? `<time datetime="${esc(r.nextDueBy)}">${esc(r.nextDueBy)}</time>` : "<em>none recorded</em>"}</td>
-          <td>${statusBadge(r.status, r.overdueSeconds)}</td>
+          <td>${r.nextDueBy ? `<time datetime="${esc(r.nextDueBy)}">${esc(r.nextDueBy)}</time>` : "<em>none declared &mdash; nothing to grade</em>"}</td>
+          <td>${statusBadge(r.status, r.overdueSeconds)}${heartbeatDetail}${
+            r.gradeable === false
+              ? `<div class="muted-sm">predates the cadence field &mdash; this row is <strong>not</strong> a pass; <code>cadence_gradeable:false</code> in the API</div>`
+              : ""
+          }${missedFlag}</td>
           <td><a class="src" href="${esc(r.apiUrl)}">/api/latest</a></td>
         </tr>`;
       }).join("\n")
@@ -253,12 +301,16 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     --bg:#f7f7f5; --panel:#ffffff; --ink:#1a1a18; --muted:#5f5c56; --line:#e2ded4;
     --green-bg:#e6f4ea; --green-ink:#1e6b34; --red-bg:#fbe7e6; --red-ink:#a3271f;
     --grey-bg:#eceae4; --grey-ink:#5a564e; --link:#0a5c8a; --code-bg:#f0eee7;
+    --amber-bg:#fdf1d8; --amber-ink:#8a5a08; --amber-line:#d9a441;
+    --blue-bg:#e6eef8; --blue-ink:#1f4e79;
   }
   @media (prefers-color-scheme: dark){
     :root{
       --bg:#15140f; --panel:#1d1c16; --ink:#eae7de; --muted:#a8a496; --line:#332f24;
       --green-bg:#123420; --green-ink:#7fd99a; --red-bg:#3a1613; --red-ink:#f0a29c;
       --grey-bg:#2a281f; --grey-ink:#b8b4a6; --link:#7cc0e6; --code-bg:#221f18;
+      --amber-bg:#3a2c0d; --amber-ink:#f0c76a; --amber-line:#8a6a1e;
+      --blue-bg:#152a3d; --blue-ink:#8fc2ee;
     }
   }
   *{box-sizing:border-box}
@@ -277,6 +329,18 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   th,td{text-align:left;padding:.45rem .5rem;border-bottom:1px solid var(--line);vertical-align:top}
   th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.02em}
   tr.row-error td{color:var(--red-ink)}
+  /* Ungradeable rows are visually SEPARATE from healthy ones, not a quieter
+     shade of them: hatched ground + an amber rule, so the eye stops here
+     instead of sliding past a grey badge in a column of green ones. */
+  tr.row-ungradeable td{
+    background:repeating-linear-gradient(135deg,var(--amber-bg),var(--amber-bg) 7px,transparent 7px,transparent 14px);
+  }
+  tr.row-ungradeable td:first-child{border-left:4px solid var(--amber-line)}
+  .muted-sm{color:var(--muted);font-size:.78rem;margin-top:.25rem;max-width:22rem}
+  .flag-missed{
+    margin-top:.3rem;font-size:.75rem;font-weight:600;color:var(--red-ink);
+    background:var(--red-bg);border-radius:4px;padding:.1em .45em;display:inline-block;
+  }
   code{background:var(--code-bg);padding:.1em .35em;border-radius:4px;font-size:.85em}
   pre{background:var(--code-bg);padding:.75rem 1rem;border-radius:6px;overflow-x:auto;font-size:.82rem}
   a{color:var(--link)}
@@ -285,6 +349,8 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   .badge-green{background:var(--green-bg);color:var(--green-ink)}
   .badge-red{background:var(--red-bg);color:var(--red-ink)}
   .badge-grey{background:var(--grey-bg);color:var(--grey-ink)}
+  .badge-amber{background:var(--amber-bg);color:var(--amber-ink);border:1px dashed var(--amber-line)}
+  .badge-blue{background:var(--blue-bg);color:var(--blue-ink)}
   .muted{color:var(--muted);font-size:.88rem}
   .stat-row{display:flex;flex-wrap:wrap;gap:1.5rem;margin:.5rem 0}
   .stat{min-width:8rem}
@@ -302,7 +368,9 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     <h1>arcaeon-witness &mdash; status</h1>
     ${overallOk
       ? `<span class="badge badge-green" style="font-size:.95rem">OK</span>`
-      : `<span class="badge badge-red" style="font-size:.95rem">DEGRADED</span>`}
+      : degraded
+        ? `<span class="badge badge-red" style="font-size:.95rem">DEGRADED</span>`
+        : `<span class="badge badge-amber" style="font-size:.95rem">&#9888; INDETERMINATE &middot; ${ungradeableCount} namespace${ungradeableCount === 1 ? "" : "s"} not gradeable</span>`}
   </header>
   <p class="sub">
     Rendered <time datetime="${renderedAt.toISOString()}">${renderedAt.toISOString()}</time> (UTC, this request).
@@ -315,16 +383,25 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     <div class="stat-row">
       <div class="stat"><span class="n">${reachable ? "reachable" : "unreachable"}</span><span class="l">pin store (<a href="/api/health">/api/health</a>)</span></div>
       <div class="stat"><span class="n">${namespaces.length}</span><span class="l">namespaces</span></div>
-      <div class="stat"><span class="n">${currentCount}</span><span class="l">current</span></div>
+      <div class="stat"><span class="n">${currentCount}</span><span class="l">current (head advanced)</span></div>
+      <div class="stat"><span class="n">${heartbeatCount}</span><span class="l">heartbeat only</span></div>
       <div class="stat"><span class="n" style="${overdueCount ? "color:var(--red-ink)" : ""}">${overdueCount}</span><span class="l">overdue</span></div>
-      <div class="stat"><span class="n">${legacyCount}</span><span class="l">legacy (no deadline)</span></div>
+      <div class="stat"><span class="n" style="${ungradeableCount ? "color:var(--amber-ink)" : ""}">${ungradeableCount}</span><span class="l">not gradeable</span></div>
+      <div class="stat"><span class="n">${missedEverCount}</span><span class="l">ever missed a deadline</span></div>
       <div class="stat"><span class="n">${obsCount}</span><span class="l">conflicts observed</span></div>
     </div>
     ${healthErr ? `<p class="muted">health check error: ${esc(healthErr)}</p>` : ""}
+    ${ungradeableCount ? `<p class="muted"><strong>${ungradeableCount} namespace${ungradeableCount === 1 ? " is" : "s are"} not gradeable</strong> &mdash; ${ungradeableCount === 1 ? "its latest record predates" : "their latest records predate"} the cadence field, so no deadline was ever declared and none is being invented now. That is <em>cannot determine</em>, not <em>pass</em>: the API returns <code>cadence_gradeable:false</code> and any consumer gating on cadence must apply its own not-determined policy. ${ungradeableCount === 1 ? "It becomes" : "They become"} gradeable again on the next pin or renewal &mdash; forward only, never retroactively.</p>` : ""}
+    ${missedEverCount ? `<p class="muted"><strong>${missedEverCount} namespace${missedEverCount === 1 ? " has" : "s have"} missed a deadline at some point.</strong> A renewal refreshes the deadline; it never erases the miss. The missed window stays in the record permanently and is shown below even for namespaces that are healthy again.</p>` : ""}
   </div>
 
   <h2>Namespaces &amp; pin cadence</h2>
   <p class="muted">Every namespace that has ever been pinned, its latest witnessed record, and whether it's inside its own declared cadence window right now. <strong>Overdue means a promised pin did not land</strong> &mdash; it does not by itself mean tampering (a witness can't tell dead from quiet). Recompute this yourself: <code>next_pin_due_by</code> vs. now, both readable from the raw record.</p>
+  <p class="muted">Four statuses, and the difference between them is the point:
+    <span class="badge badge-green">current</span> the head advanced inside the window &middot;
+    <span class="badge badge-blue">heartbeat</span> the publisher renewed the deadline while the content stayed exactly the same (alive, not active) &middot;
+    <span class="badge badge-red">overdue</span> a promised record did not land &middot;
+    <span class="badge badge-amber">&#9888; not gradeable</span> the record predates the cadence field and declared no deadline, so there is nothing to grade &mdash; <strong>cannot determine, not pass</strong> (<code>cadence_gradeable:false</code>). Nothing is backfilled to close that gap.</p>
   <div class="panel scroll">
     <table>
       <thead><tr><th>namespace</th><th>digest</th><th>rows</th><th>pinned at</th><th>next due by</th><th>status</th><th>live check</th></tr></thead>
@@ -345,6 +422,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
 
   <footer>
     <p><strong>What this page proves:</strong> the pins are public, the cadence math is reproducible by anyone, and the conflict log can't quietly disappear a detected problem. Every link above goes to the same GitHub history a stranger can clone and check independently &mdash; nothing here is asserted from a database only we can read.</p>
+    <p><strong>Auth honesty (Stage-0):</strong> every write here &mdash; pin <em>and</em> renewal &mdash; is authorized by a bearer key and nothing else. That is not owner-signature auth: it proves a key-holder acted, not that the log's owner did. Anyone holding the key can renew a deadline. Owner-signature auth is the Stage-1 requirement and is <strong>not built yet</strong>; until it is, read <code>heartbeat</code> as "a key-holder was alive and asserting nothing changed." Responses carry <code>auth_level:"bearer-stage0"</code> so this can't be mistaken for something stronger.</p>
     <p><strong>What it does not prove:</strong> that logged content is true (a chain notarizes a fingerprint, not a fact), anything about the gap between pins (a witness only sees what's sent to it), or that we never lose data. Full scope and the standing challenge to break this: <a href="/PRACTICES.md">PRACTICES.md</a>.</p>
     <p class="muted">Stage-0: single region, single operator, no SLA. Source: <a href="${esc(REPO_URL)}">${esc(store.REPO)}</a>.</p>
   </footer>

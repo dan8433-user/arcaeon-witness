@@ -29,7 +29,13 @@ timestamps, not in a database only we can read.
 ## 2. What we store — fingerprints, never content
 
 Every pin is exactly: `{namespace, rows, chain, pinned_at, seq, cadence_hours,
-next_pin_due_by}`. That is the complete schema. We never receive, request, or store:
+next_pin_due_by}` plus, since 2026-08-14, the cadence bookkeeping that makes a renewal
+honest — `{record_kind, head_first_seen_at, renewals_since_advance, renewals_total,
+auth_level, auth_note, intervals[], intervals_total, missed_deadlines[],
+missed_deadline_count, ever_missed_deadline, missed_due_at?, first_missed_due_at?,
+had_ungradeable_history?}` (§5). That is the complete schema: every added field is a
+timestamp, a counter, a type tag, or our own auth caveat. **Not one of them derives from
+your log's content.** We never receive, request, or store:
 
 - the content of your log rows,
 - any artifact your log references,
@@ -101,8 +107,28 @@ availability norm), and we're not claiming more than that shape affords:
 
 Every accepted pin stores `next_pin_due_by = pinned_at + the namespace's declared cadence`
 (default 24h; overridable per namespace-prefix via `WITNESS_CADENCE`). `GET /api/latest` computes
-`status` live: `"current"`, `"overdue"` (with `overdue_by_seconds`), or `"legacy_no_deadline"` for
-pins recorded before this field existed.
+`status` live: `"current"`, `"publisher_heartbeat_current"`, `"overdue"` (with
+`overdue_by_seconds`), or `"legacy_no_deadline"` for pins recorded before this field existed.
+
+**A record that declared no deadline is not graded, and not passed.** Legacy pins return
+`cadence_gradeable:false` / `cadence_grade:"cannot_determine"` (and an `X-Cadence-Gradeable`
+header), and `/status` renders them hatched amber and labeled "cadence not gradeable" rather
+than in the neutral grey that reads as fine. A consumer gating on cadence **must** treat that as
+cannot-determine, never as a pass. We do not backfill deadlines onto records that never made a
+promise; the ungradeable stretch stays ungradeable permanently
+(`had_ungradeable_history:true`), and a namespace becomes gradeable only forward, from its next
+pin or renewal. (atomic-raven's objection, which this answers: *"a warning that cannot refuse is
+telemetry, not a control."*)
+
+**A publisher who is alive but quiet can renew, and it is never laundered into activity.**
+`POST /api/renew` refreshes the deadline for an unchanged head. The renewal is typed
+(`record_kind:"publisher_heartbeat"` → `head_state:"publisher_heartbeat_current"`), appends a new
+interval rather than rewriting the old one, and **retains any missed deadline permanently** —
+`missed_due_at` and `ever_missed_deadline` survive every later renewal and every later content
+advance, and are shown on `/status` even for a namespace that is healthy again. Renewal is
+authorized by a **bearer key only** (`auth_level:"bearer-stage0"`): it proves a key-holder was
+responsive, not that the log's owner authorized anything. Owner-signature auth is the Stage-1
+requirement and is not built. (excelsior's invariants, which this implements.)
 
 This is the mechanism that turns an absence of pins into something a stranger can grade without
 asking us: poll `/api/latest`, read `status`. No trust in our honesty required — the computation
@@ -155,6 +181,14 @@ hits" table — that table is the actual track record this statement can't yet c
 - Try to make `next_pin_due_by` or `status` lie relative to what's recoverable from the pin's own
   `pinned_at` and the declared cadence — e.g., get `/api/latest` to report `"current"` for a
   namespace that's genuinely missed its deadline.
+- Try to get a **legacy** record graded as a pass: `cadence_gradeable:true` or
+  `cadence_grade:"pass"` on a record that never declared a deadline, or find a
+  deadline we backfilled onto one that didn't have one.
+- Try to **launder a renewal into an advance**: get `/api/latest` to report
+  `head_state:"content_head_advanced"` (or plain `"current"`) for a namespace whose head never
+  moved, or get any write — renewal or advance — to erase `missed_due_at` /
+  `ever_missed_deadline` from a namespace that genuinely missed a deadline, or to rewrite an
+  existing `intervals[]` entry instead of appending a new one.
 
 **Needs a scoped write key — attack the accept path:** email **hello@arcaeon.io** for a free
 demo key bound to a `breakthis-<your-handle>-` namespace prefix (capped low, revocable on sight).
@@ -177,6 +211,13 @@ already ran on. We don't have a cash bounty program; we're not pretending otherw
 
 ## Changelog
 
+- **2026-08-14 — v1.1.** §2 schema updated for the renewal bookkeeping (all timestamps, counters
+  and type tags — no field derives from log content). §5 gains the two review debts paid the same
+  day: **atomic-raven's** refuse-semantics (`cadence_gradeable:false` = cannot-determine, never a
+  pass — a warning that can't refuse is telemetry, not a control) and **excelsior's** renewal
+  invariants (`POST /api/renew`: retained miss, appended interval, heartbeat typed apart from a
+  content advance, bearer-only auth stated as interim). §8 gains two new standing-challenge
+  targets for exactly those paths.
 - **2026-08-14 — v1.0.** First publication. Companion to the `next_pin_due_by`/`status` cadence
   fields shipped the same day (§5). Written in response to `RESEARCH_28`'s week-1 recommendation
   and excelsior's review point on making pinning silence gradeable.
