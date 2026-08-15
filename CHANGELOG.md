@@ -4,6 +4,40 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-14 — Stage-1 owner-signature design doc (**design only, nothing built**)
+
+`STAGE1_SIGNATURE_DESIGN.md` — the owner-signature scheme whose absence every
+record in this repo currently announces (`auth_level:"bearer-stage0"`). Written
+against **excelsior's** proposed conflict-receipt schema from the Colony thread
+(`{accepted_head, candidate_head, candidate_sig, namespace_key_id, auth_verdict,
+observed_at, request_digest}`), posted for review before any code exists.
+
+Nothing in it is implemented. What it settles: per-namespace Ed25519 keypairs;
+first-binding-wins registration; `prev_seq` + `prev_record_digest` as the replay
+control (chosen over an idempotency header because it needs no new server state
+and is checkable from the public record); dual-signature conflict receipts where
+the candidate's signature-or-absence is recorded **affirmatively**, never by
+omission; bearer keys demoted to metering and rate identity only.
+
+Two things it refuses to soften. **The first key binding for an existing
+namespace is trust-on-first-use** — today the bearer key is the only ownership
+proof this service has (`api/_store.js:130-140`), so the bearer key is the only
+thing that can authorize a first binding, and a key that leaked before then hands
+its holder a permanent credential instead of a temporary one. The doc says that
+in those words (§2.3). And **Stage-1 proves key custody, not owner intent** — a
+compromised owner machine signs happily, which matters more here than most places
+because the intended publisher is often an agent (§9.1).
+
+**One real bug found while writing it, and it is not a design item.**
+`api/_store.js:382` — `out.auth_level = (pin && pin.auth_level) || AUTH_LEVEL;`.
+Records written before the auth stamp existed carry no `auth_level`, so they fall
+back to the *current constant*. That is harmless today and becomes a silent
+retroactive upgrade of every legacy record the day the constant flips — breaking
+the promise at `README.md:293-296` that pre-Stage-1 records stay distinguishable
+"because every record written before then says `bearer-stage0` in its own text."
+They do not say it; the fallback speaks for them. The fix is two lines
+(§7.1) and should land independently of whether the rest is ever built.
+
 ## 2026-08-14 — `cadence_gradeable` refuse-semantics + publisher-heartbeat renewal
 
 Two debts from public review, both paid as promised.
