@@ -188,10 +188,32 @@ machine-readable in three places:
 alert, or ask a human. It is NOT a pass.** Treating it as one reintroduces
 exactly the hole atomic-raven named.
 
+#### Arming a legacy head
+
+Refusing to grade is only half of atomic-raven's objection. The other half is
+that the refusal needs an **exit**: a namespace pinned before the cadence field
+existed reported `cadence_gradeable:false` forever, and a publisher whose log
+had gone quiet re-pinned that same unchanged head and stayed ungradeable with
+it. A status with no path out of itself is still telemetry.
+
+So **a bare re-pin of a head that carries no deadline arms the first one.**
+Same rows, same chain, no intent, on a legacy head → `201` with
+`armed_cadence: true`, and the namespace is under the cadence contract from
+that record forward.
+
+This is not the "ask out loud" rule bending. There is no window to extend and
+none to launder — the only movement possible is `cannot_determine` → gradeable,
+which is strictly *stronger* for a consumer gating on cadence. It is one-time
+per namespace (once armed, the head has a deadline and bare re-pins are plain
+idempotent no-ops again), it is forward-only, and `had_ungradeable_history:true`
+stays on the record permanently, so an armed row can never pass itself off as
+having been under contract all along. Graded reads of such a namespace also
+carry a `cadence_history_note` saying exactly that.
+
 Nothing is backfilled to make an ungradeable record look graded — no
 synthetic deadline is ever written onto a pin that never declared one. A
-legacy namespace becomes gradeable again on its **next** pin or renewal, and
-only forward from that moment; the ungradeable stretch stays ungradeable
+legacy namespace becomes gradeable again on its **next** pin, renewal, or arm,
+and only forward from that moment; the ungradeable stretch stays ungradeable
 forever, and `had_ungradeable_history:true` stays on the record permanently so
 a later clean-looking row can't hide it. On `/status`, these rows render
 hatched amber and labeled **"cadence not gradeable"** — never the neutral grey
@@ -215,7 +237,7 @@ written on a same-rows/different-chain re-mint attempt) for the other half
 of the picture — what the witness saw versus when it stopped seeing
 anything at all.
 
-### POST /api/renew (bearer-key auth) — publisher heartbeat
+### POST /api/renew (deadline-owner key) — publisher heartbeat
 
 ```bash
 curl -s -X POST https://arcaeon-witness.vercel.app/api/renew \
@@ -265,12 +287,23 @@ into "and everything is fine," so:
 - **A renewal creates a new numbered record** (`pins/<ns>/<seq>.json`) and a new
   commit, exactly like a pin. Renewals are metered like pins, because they cost
   the same two commits.
-- **A bare re-pin still does nothing to the deadline.** Without an explicit
-  renew intent, same-rows/same-chain returns the same idempotent `200` it always
-  did. Refreshing a deadline has to be asked for out loud. `POST /api/pin` with
+- **A bare re-pin still does nothing to an existing deadline.** Without an
+  explicit renew intent, same-rows/same-chain on a head that already carries a
+  deadline returns the same idempotent `200` it always did. *Refreshing* a
+  deadline has to be asked for out loud. `POST /api/pin` with
   `"intent":"renew"` is equivalent; `/api/renew` is the same handler with the
   intent stamped on. An unrecognized `intent` value is a `400`, never a silent
-  fallthrough to the plain-pin path.
+  fallthrough to the plain-pin path. The one exception is *arming the first*
+  deadline on a legacy head — see "Arming a legacy head" below, where there is
+  no window to refresh and nothing that can be laundered.
+- **A deadline write requires the namespace's deadline-owner key.** The first
+  key to renew or arm a namespace binds itself as that namespace's deadline
+  owner in `owners/<namespace>.json`; every later renewal or arm must present
+  that same key, or it is `403 not_deadline_owner` and writes nothing. The
+  namespace-prefix gate alone is not enough here, because issued prefixes can
+  overlap. This is bearer-key *continuity*, **not** owner-signature auth — a
+  stolen key still renews (see "Auth honesty" below). Content advances are
+  unaffected: they remain governed by the prefix gate exactly as before.
 
 #### Auth honesty — bearer now, owner-signature is Stage-1 and NOT built
 
@@ -290,6 +323,15 @@ same sentence ships in the API responses themselves (`auth_note`):
 Renewal is the write where this matters most: a leaked bearer key can keep a
 namespace looking alive indefinitely without the owner's involvement. That is a
 real, currently-unclosed gap in Stage-0, named here rather than papered over.
+
+The deadline-owner binding above narrows it without closing it, and the
+difference is worth stating plainly. It closes *the other key* — a second
+issued key whose prefix happens to cover this namespace can no longer renew or
+arm its deadline, because `owners/<namespace>.json` names which key may. It
+does **not** close *the stolen key*: whoever holds the bound key is still
+indistinguishable from the owner, because a bearer key is all the witness ever
+checks. Only Stage-1's detached owner signature closes that, and it is still
+not built.
 We are not claiming owner-auth. When Stage-1 lands, `auth_level` becomes
 `"owner-signature"` on records that carry one, and the two will be
 distinguishable in the public repo record-by-record — including retroactively,
@@ -527,7 +569,7 @@ anchor commits, forming a chain.
 
 ```
 api/pin.js            POST /api/pin       — auth, validate, metering, credit decrement, monotonic guard, commit
-api/renew.js          POST /api/renew     — publisher heartbeat: refresh the deadline, never claim an advance (thin wrapper over pin.js)
+api/renew.js          POST /api/renew     — publisher heartbeat: refresh the deadline, never claim an advance (thin wrapper over pin.js); deadline-owner gated
 api/latest.js          GET /api/latest    — public read via raw + cache-busting
 api/verify.js           GET /api/verify   — one-call public proof-of-inclusion (no auth, no metering)
 api/health.js           GET /api/health   — live store reachability

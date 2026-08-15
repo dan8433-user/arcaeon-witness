@@ -10,6 +10,15 @@
 // deadline is refreshed without claiming the content moved. It runs inside the
 // same-rows/same-chain branch on purpose — a renewal can never take the
 // conflict path's place, and it can never stand in for an advance.
+//
+// Two rules govern deadlines specifically (the reviewer-owed pair, 2026-08-15):
+//   - a bare re-pin of a head that carries NO deadline ARMS the first one
+//     (atomic-raven: legacy_no_deadline had to have an exit), one-time and
+//     forward-only; a head that already has a deadline still needs the explicit
+//     renew intent, unchanged;
+//   - every deadline write — renewal or arm — must come from the key bound as
+//     that namespace's deadline owner (excelsior: owner-authorized, not merely
+//     bearer-authorized). See ownerGate below and _store.ownerKeyId.
 
 "use strict";
 
@@ -198,6 +207,78 @@ function verifyOrphanSuccessor(orphan, cur, namespace) {
   return true;
 }
 
+// ---- deadline-owner gate (excelsior: renewal must be OWNER-authorized) ----
+//
+// Applies to the writes that SET A DEADLINE WITHOUT ADVANCING CONTENT — the
+// renewal path and the legacy-arm path below. A content advance is deliberately
+// NOT gated by it: advancing the head is the write the prefix gate has always
+// governed, and bolting a second gate onto it would change the meaning of a
+// live path nobody asked us to change.
+//
+// Reads owners/<namespace>.json (see _store.ownerKeyId for why the id is
+// domain-separated from the billing hash):
+//   absent  -> bind THIS key, create-only, so a concurrent binder is never
+//              silently overwritten; the loser re-reads and is judged against
+//              the winner
+//   present -> constant-time compare; a mismatch is 403 and writes NOTHING
+//
+// Runs BEFORE metering on purpose: a refused deadline write burns no meter
+// count and no credit, same discipline as every other rejection here.
+async function ownerGate(namespace, key) {
+  const id = store.ownerKeyId(key);
+  const path = store.ownerPath(namespace);
+  let rec = await store.getFile(path);
+
+  if (!rec) {
+    const binding = {
+      namespace,
+      owner_key_id: id,
+      bound_at: new Date().toISOString(),
+      bound_by: "first deadline write (renewal or legacy arm) under prefix auth",
+      auth_level: store.AUTH_LEVEL,
+      note:
+        "Deadline-owner binding, Stage-0. This records WHICH key may renew or arm this " +
+        "namespace's cadence deadline; it is trust-on-first-use over a key that had already " +
+        "passed the namespace-prefix gate. It is NOT owner-signature auth (Stage-1, not built): " +
+        "a stolen key still renews. The id is sha256 over a fixed domain string plus the key, " +
+        "deliberately NOT the sha256(key) used as a billing identifier elsewhere.",
+    };
+    try {
+      await store.putFile(path, binding, `bind deadline owner ${namespace}`);
+      return { ok: true, bound: "created" };
+    } catch (err) {
+      // Another writer bound it first — fall through and be judged against
+      // whatever landed, rather than 502 on a race we can resolve by reading.
+      if (!err || !err.conflict) throw err;
+      rec = await store.getFile(path);
+      if (!rec) throw err;
+    }
+  }
+
+  const stored = typeof rec.json.owner_key_id === "string" ? rec.json.owner_key_id : "";
+  if (!store.safeEqual(stored, id)) {
+    return {
+      deny: {
+        status: 403,
+        body: {
+          error:
+            "not the deadline owner of this namespace — a cadence deadline may only be renewed or armed by the key bound to it",
+          reason: "not_deadline_owner",
+          namespace,
+          owner_binding: store.ownerPath(namespace),
+          note:
+            "the namespace-prefix gate alone is not enough for a deadline write: issued prefixes can " +
+            "overlap, so the first key to arm or renew this namespace is recorded as its deadline owner " +
+            "and every later deadline write must present that same key. To advance content, POST /api/pin " +
+            "with a new head — content advances are governed by the prefix gate, unchanged.",
+          public_record: `https://github.com/${store.REPO}/blob/${store.BRANCH}/${store.ownerPath(namespace)}`,
+        },
+      },
+    };
+  }
+  return { ok: true, bound: "existing" };
+}
+
 function orphanedSeqBody(namespace, seqName) {
   return {
     error:
@@ -340,7 +421,29 @@ module.exports = async (req, res) => {
       // conflict, so detection can't itself poison the namespace.
       if (cur && Number.isInteger(cur.json.rows) && rows === cur.json.rows) {
         if (chain.toLowerCase() === String(cur.json.chain).toLowerCase()) {
-          if (intent !== "renew") {
+          // --- legacy arming (atomic-raven: legacy_no_deadline must ARM) ---
+          // A head recorded before the cadence field existed carries no
+          // deadline, so it reports cadence_gradeable:false forever — and a
+          // quiet publisher re-pinning that unchanged head got the idempotent
+          // 200 below and stayed ungradeable forever with it. That is the
+          // "arms nothing" half of atomic-raven's objection: the refusal to
+          // grade was machine-readable but had no exit.
+          //
+          // So a bare re-pin of a head that has NO deadline arms the FIRST one.
+          // This is not the "refreshing a deadline must be asked for out loud"
+          // rule bending: there is no window to extend and none to launder —
+          // the only possible movement is ungradeable -> gradeable, which is
+          // strictly stronger for the consumer. It is one-time per namespace
+          // (once armed, the head has a deadline and bare re-pins are plain
+          // no-ops again), forward-only, and appendInterval keeps
+          // had_ungradeable_history:true on the record permanently, so no past
+          // stretch is retroactively graded and no armed row can pass itself
+          // off as always-having-been-under-contract.
+          const headDueMs =
+            typeof cur.json.next_pin_due_by === "string" ? Date.parse(cur.json.next_pin_due_by) : NaN;
+          const armLegacy = intent !== "renew" && !Number.isFinite(headDueMs);
+
+          if (intent !== "renew" && !armLegacy) {
             // Unchanged behavior: a bare re-pin is idempotent. It records
             // NOTHING, so it now also charges nothing — the metering used to run
             // before this branch and burned a meter count on a pure no-op.
@@ -351,6 +454,10 @@ module.exports = async (req, res) => {
               hint: 'to refresh next_pin_due_by without new rows, POST /api/renew (or add "intent":"renew") — it is recorded as a publisher heartbeat, never as a content advance',
             });
           }
+
+          // --- deadline writes are owner-gated (rejection charges nothing) ---
+          const gate = await ownerGate(namespace, key);
+          if (gate.deny) return res.status(gate.deny.status).json(gate.deny.body);
 
           // --- renewal write path: heal-if-wedged, THEN charge, THEN write ---
           const heal = await healIfWedged(namespace, cur, latestPath);
@@ -400,7 +507,9 @@ module.exports = async (req, res) => {
           try {
             const put = await putSeqRecord(
               namespace, seqName, renewal,
-              `renew ${namespace} rows=${rows} seq=${seq} (publisher heartbeat, content unchanged)`
+              armLegacy
+                ? `arm ${namespace} rows=${rows} seq=${seq} (first cadence deadline on a legacy head, content unchanged)`
+                : `renew ${namespace} rows=${rows} seq=${seq} (publisher heartbeat, content unchanged)`
             );
             await store.putFile(latestPath, renewal,
               `latest ${namespace} rows=${rows} seq=${seq} (heartbeat)`, cur.sha);
@@ -408,8 +517,11 @@ module.exports = async (req, res) => {
             return res.status(201).json({
               ok: true,
               renewed: true,
+              armed_cadence: armLegacy,
               record_kind: "publisher_heartbeat",
-              note: "deadline refreshed as a publisher heartbeat — content head did NOT advance",
+              note: armLegacy
+                ? "legacy head armed: this namespace had no deadline and is now under the cadence contract, forward-only — nothing before this record is graded, and had_ungradeable_history stays on the record permanently"
+                : "deadline refreshed as a publisher heartbeat — content head did NOT advance",
               next_pin_due_by: dueBy,
               interval_appended: hist.interval,
               superseded_deadline_was_missed: hist.wasOverdue,

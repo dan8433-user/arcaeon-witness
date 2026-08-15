@@ -1,6 +1,6 @@
 # Arcaeon Witness Practices Statement
 
-**v1.1 · effective 2026-08-14 · applies to** `arcaeon-witness.vercel.app` **and its backing repos**
+**v1.2 · effective 2026-08-15 · applies to** `arcaeon-witness.vercel.app` **and its backing repos**
 [`arcaeon-witness-pins`](https://github.com/dan8433-user/arcaeon-witness-pins) (public) and
 `arcaeon-witness-usage` (private, metering only).
 
@@ -117,18 +117,26 @@ than in the neutral grey that reads as fine. A consumer gating on cadence **must
 cannot-determine, never as a pass. We do not backfill deadlines onto records that never made a
 promise; the ungradeable stretch stays ungradeable permanently
 (`had_ungradeable_history:true`), and a namespace becomes gradeable only forward, from its next
-pin or renewal. (atomic-raven's objection, which this answers: *"a warning that cannot refuse is
-telemetry, not a control."*)
+pin, renewal, or arm. **The refusal has an exit:** a bare re-pin of a head that carries no
+deadline arms the first one (`201`, `armed_cadence:true`), one-time per namespace and
+forward-only, so a quiet legacy publisher is not stuck reporting cannot-determine forever. The
+only movement that creates is cannot-determine → gradeable, which is strictly stronger for the
+consumer; nothing before that record is graded. (atomic-raven's objection, which this answers:
+*"a warning that cannot refuse is telemetry, not a control."*)
 
 **A publisher who is alive but quiet can renew, and it is never laundered into activity.**
 `POST /api/renew` refreshes the deadline for an unchanged head. The renewal is typed
 (`record_kind:"publisher_heartbeat"` → `head_state:"publisher_heartbeat_current"`), appends a new
 interval rather than rewriting the old one, and **retains any missed deadline permanently** —
 `missed_due_at` and `ever_missed_deadline` survive every later renewal and every later content
-advance, and are shown on `/status` even for a namespace that is healthy again. Renewal is
-authorized by a **bearer key only** (`auth_level:"bearer-stage0"`): it proves a key-holder was
-responsive, not that the log's owner authorized anything. Owner-signature auth is the Stage-1
-requirement and is not built. (excelsior's invariants, which this implements.)
+advance, and are shown on `/status` even for a namespace that is healthy again. **A deadline
+write must come from that namespace's deadline-owner key**: the first key to renew or arm binds
+itself in the public `owners/<namespace>.json`, and any other key — including one whose issued
+namespace-prefix covers it — gets `403 not_deadline_owner` and writes nothing. That is still
+**bearer-key** auth (`auth_level:"bearer-stage0"`): it closes the *other* key, not the *stolen*
+one, and it proves a key-holder was responsive, not that the log's owner authorized anything.
+Owner-signature auth is the Stage-1 requirement and is not built. (excelsior's invariants, which
+this implements.)
 
 This is the mechanism that turns an absence of pins into something a stranger can grade without
 asking us: poll `/api/latest`, read `status`. No trust in our honesty required — the computation
@@ -211,6 +219,11 @@ already ran on. We don't have a cash bounty program; we're not pretending otherw
 
 ## Changelog
 
+- **2026-08-15 — v1.2.** §5 gains the second half of both review debts: the legacy-head **arm**
+  (a bare re-pin of a deadline-less head arms the first deadline — atomic-raven's refusal now has
+  an exit) and the **deadline-owner binding** (`owners/<namespace>.json`; renewal and arm require
+  the bound key, not merely a prefix-matching one — excelsior's "owner-authorized, not merely
+  bearer-authorized", as far as Stage-0 can honestly go).
 - **2026-08-14 — v1.1.** §2 schema updated for the renewal bookkeeping (all timestamps, counters
   and type tags — no field derives from log content). §5 gains the two review debts paid the same
   day: **atomic-raven's** refuse-semantics (`cadence_gradeable:false` = cannot-determine, never a

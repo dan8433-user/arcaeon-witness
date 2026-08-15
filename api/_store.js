@@ -193,6 +193,49 @@ function keyPrefixFor(bearerKey) {
   return found;
 }
 
+// ---- deadline-owner binding (excelsior: renewal must be OWNER-authorized) ----
+//
+// The prefix gate above answers "may this key write somewhere in this
+// namespace's neighbourhood." That is strictly weaker than "this key is this
+// namespace's publisher": issued prefixes can overlap ("acme-" and
+// "acme-ledger-"), so the broader key could refresh the narrower key's cadence
+// deadline. Excelsior's deadline-laundering review asked for renewal to be
+// owner-authorized rather than merely bearer-authorized; this is the Stage-0
+// half of that, and it is honest about being only half.
+//
+// It is NOT owner-signature auth (that is Stage-1, see
+// STAGE1_SIGNATURE_DESIGN.md, still not built): a stolen key still renews.
+// What it closes is the OTHER key — the first key to arm or renew a
+// namespace's deadline is recorded as that namespace's deadline owner, and
+// every later deadline write must present that same key. Trust-on-first-use,
+// and the first binder had already passed the prefix gate, so this can only
+// ever SHRINK who may renew, never widen it.
+//
+// The binding lives in its own file, NOT as a new field on the pin record: the
+// pin record's schema is published verbatim in README/PRACTICES and verified by
+// strangers, and who may renew is not part of what a stranger verifies about a
+// head. Nothing already stored changes shape.
+//
+// The stored id is DOMAIN-SEPARATED from the billing hash on purpose.
+// _meter.js/_balance.js key their PRIVATE stores on sha256(key), and that same
+// value is what a buyer types into Stripe as `client_reference_id`. This file
+// is PUBLIC, so writing sha256(key) here would publish the billing identifier.
+// Prefixing a fixed domain string identifies the same key without being the
+// same number.
+const OWNER_ID_DOMAIN = "arcaeon-witness-owner-v1";
+
+function ownerKeyId(secret) {
+  return crypto
+    .createHash("sha256")
+    .update(`${OWNER_ID_DOMAIN}|${secret}`, "utf8")
+    .digest("hex")
+    .slice(0, 32);
+}
+
+function ownerPath(namespace) {
+  return `owners/${namespace}.json`;
+}
+
 // ---- validation (mirrors the arcaeon_ledger client's Head semantics) ----
 const NS_RE = /^[a-z0-9-]{1,64}$/;
 const CHAIN_RE = /^[0-9a-fA-F]{8,64}$/;
@@ -457,7 +500,18 @@ function computeCadenceFields(pin, now = Date.now()) {
     if (typeof pin.first_missed_due_at === "string") out.first_missed_due_at = pin.first_missed_due_at;
     if (Number.isInteger(pin.missed_deadline_count)) out.missed_deadline_count = pin.missed_deadline_count;
   }
-  if (pin && pin.had_ungradeable_history === true) out.had_ungradeable_history = true;
+  if (pin && pin.had_ungradeable_history === true) {
+    out.had_ungradeable_history = true;
+    if (cadence_gradeable) {
+      // The namespace armed a deadline at some point AFTER running ungradeable.
+      // Say so on the graded read too, so an armed row can never be mistaken for
+      // a namespace that was under the cadence contract all along — the arming
+      // is forward-only and grades nothing that came before it.
+      out.cadence_history_note =
+        "this namespace carried an ungradeable (legacy, no-deadline) record earlier in its history; " +
+        "the deadline graded here was armed forward-only from that point and grades nothing before it";
+    }
+  }
 
   out.auth_level = (pin && pin.auth_level) || LEGACY_AUTH_LEVEL;
   out.auth_note = (pin && pin.auth_note) || LEGACY_AUTH_NOTE;
@@ -475,6 +529,9 @@ module.exports = {
   getTree,
   repoReachable,
   keyPrefixFor,
+  safeEqual,
+  ownerKeyId,
+  ownerPath,
   validatePin,
   NS_RE,
   CHAIN_RE,

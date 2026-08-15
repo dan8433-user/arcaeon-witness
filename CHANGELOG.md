@@ -4,6 +4,77 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-15 — Two public promises paid: legacy heads can ARM, deadlines are OWNER-gated
+
+Both halves of the reviewer debt that 4606d62 only half-paid. Nothing on the
+payment/credit path was touched (`api/stripe-webhook.js` and `_balance.js` are
+byte-identical), no stored pin changed shape, and the conflict-observation log
+and monotonic guard are untouched. **Not deployed in this commit** — it ships in
+the morning batch with a live pin-write verification after.
+
+**1. `legacy_no_deadline` now has an exit (owed to atomic-raven).** Their
+objection was *"a warning that cannot refuse is telemetry, not a control."*
+4606d62 paid the refuse half: `cadence_gradeable:false`,
+`cadence_grade:"cannot_determine"`, an `X-Cadence-Gradeable` header, hatched
+amber on `/status`. It did not pay the exit half. A namespace pinned before the
+cadence field existed carries no deadline, and a publisher whose log had gone
+quiet re-pinned that same unchanged head, hit the idempotent `200`, and stayed
+ungradeable forever — the arming path (a content advance, or an explicit
+`intent:"renew"`) existed but was unreachable for exactly the publisher who
+needed it. Two live namespaces are in that state right now
+(`pins/velouria-demo`, `pins/velouria-selftest`: `seq` present, no
+`next_pin_due_by`). Fix: **a bare re-pin of a head that carries no deadline arms
+the first one** — `201` with `armed_cadence:true`. The "refreshing a deadline
+must be asked for out loud" rule is intact: there is no window to extend and
+nothing to launder, the only possible movement is cannot-determine → gradeable,
+it is one-time per namespace (once armed, bare re-pins are plain no-ops again),
+and `had_ungradeable_history:true` stays on the record permanently. Graded reads
+of a once-ungradeable namespace now also carry a `cadence_history_note` saying
+the deadline was armed forward-only and grades nothing before it.
+
+**Verified locally** (real handlers, mocked GitHub store), seeded with a record
+copied from the live legacy shape:
+
+```
+BEFORE /api/latest verdict: {"status":"legacy_no_deadline","cadence_gradeable":false,"cadence_grade":"cannot_determine","next_pin_due_by":null}
+bare re-pin -> 201 {"armed_cadence":true,"record_kind":"publisher_heartbeat","next_pin_due_by":"2026-08-16T08:46:06.099Z"}
+AFTER  /api/latest verdict: {"status":"publisher_heartbeat_current","cadence_gradeable":true,"cadence_grade":"pass","had_ungradeable_history":true}
+bare re-pin AGAIN -> 200 {"note":"already witnessed (idempotent re-pin) — no renewal intent, deadline unchanged"}
+```
+
+**2. A deadline write requires the namespace's OWNER key (owed to excelsior).**
+Their deadline-laundering plant asked for renewal to be *owner*-authorized, not
+merely bearer-authorized. What shipped was the prefix gate — which answers "may
+this key write in this namespace's neighbourhood," not "is this key this
+namespace's publisher." Issued prefixes can overlap (`acme-` and
+`acme-ledger-`), so a second key could refresh a namespace it does not publish.
+Fix: the first key to renew or arm a namespace binds itself as that namespace's
+deadline owner in a new public `owners/<namespace>.json`; every later renewal or
+arm must present that same key or gets `403 not_deadline_owner` and writes
+nothing (the refusal lands before metering, so it burns no meter count and no
+credit). Content advances are deliberately NOT gated by it — that path is the
+prefix gate's, unchanged. The binding id is `sha256("arcaeon-witness-owner-v1|"
++ key)` truncated to 32 hex, **domain-separated from the `sha256(key)` used as
+the billing identifier**, so publishing it in a public repo does not publish the
+Stripe `client_reference_id`.
+
+This closes *the other key*, not *the stolen key*, and README/PRACTICES/`/status`
+now say so in those words. Owner-signature auth is still Stage-1 and still not
+built.
+
+```
+renew, NO key        -> 401 {"error":"invalid or missing bearer key"}
+renew, WRONG key     -> 403 {"error":"not the deadline owner of this namespace — a cadence deadline may only be renewed or armed by the key bound to it","reason":"not_deadline_owner"}
+  (that key passes the prefix gate: keyPrefixFor(OTHER_KEY) = demo- )
+renew, OWNER key     -> 201 {"renewed":true,"record_kind":"publisher_heartbeat"}  deadline moved: true
+```
+
+Regressions re-run green in the same harness: content advance by a non-owner
+key still `201`, monotonic violation still `409`, unknown intent still `400`,
+same-rows/different-chain still `409` + observation, renewal of an unknown
+namespace still `404` (and binds nothing), a new namespace's first pin creates
+no owner file.
+
 ## 2026-08-14 — Fix: the four billing/race defects the hostile audit FLAGGED — all shipped
 
 The audit earlier today (entry below) shipped the unambiguously-safe fixes and

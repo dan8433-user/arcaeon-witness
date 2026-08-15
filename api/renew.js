@@ -18,8 +18,12 @@
 // head exactly. Mismatched rows -> 409 renewal_head_mismatch; same rows with a
 // different chain still takes the conflict-observation path, unchanged.
 //
-// AUTH IS BEARER-KEY ONLY (auth_level:"bearer-stage0"). Owner-signature auth is
-// the Stage-1 requirement and is not built. See _store.AUTH_LEVEL_NOTE.
+// AUTH IS BEARER-KEY ONLY (auth_level:"bearer-stage0"), narrowed since
+// 2026-08-15 to the namespace's DEADLINE-OWNER key: the prefix gate is not
+// enough for a deadline write, so pin.js's ownerGate requires the key bound in
+// owners/<namespace>.json (excelsior). That closes the other key, not the
+// stolen one. Owner-signature auth is still the Stage-1 requirement and is not
+// built. See _store.AUTH_LEVEL_NOTE and _store.ownerKeyId.
 
 "use strict";
 
