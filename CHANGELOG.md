@@ -4,6 +4,68 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-14 — Fix: hostile security audit of `api/` — four shipped fixes, two escalations
+
+A deliberately adversarial line-by-line audit of every file in `api/`, assuming
+the code guilty. Findings were reproduced live against throwaway namespaces
+(`velouria-audit1..3`, since removed — the delete commits are in the pin repo's
+history). Only unambiguously-safe fixes shipped; anything touching auth or
+billing semantics is written up for review instead, because an auditor who also
+rewrites the billing logic is not an auditor.
+
+**Shipped.**
+
+`api/_store.js` `validatePin` — bounded `rows`. `Number.isInteger` accepts
+2^53, and `JSON.parse` silently rounds `9007199254740993` down to it, so a
+single request could pin an absurd head. Because the monotonic guard is
+absolute and correct — a witness never goes backward — that namespace could
+then *never record a real head again*. One request, permanent, no undo.
+Reproduced live before the guard existed. Now `Number.isSafeInteger` (anything
+larger does not survive a JSON round-trip, and a witness that silently rewrites
+its input is not a witness) plus a `MAX_ROWS` domain bound.
+
+`api/_store.js` `keyPrefixFor` — constant-time key comparison, and an empty
+namespace-prefix is now refused rather than honoured. `===` on a secret
+short-circuits at the first differing byte; and a `WITNESS_KEYS` entry written
+`somekey:` (trailing comma, half-finished edit) granted that key write access
+to *every* namespace, because `"".startsWith(x)` is always true. A config typo
+must never be the thing that widens authorization.
+
+`api/_meter.js`, `api/_balance.js`, `api/_store.js` — stopped putting upstream
+response bodies and private-repo paths into thrown messages. Handlers
+interpolate `err.message` directly into 502 bodies, so a concurrent pin storm
+was returning `usage/<sha256(key)>/<month>.json` and GitHub's raw error body to
+the caller. Detail now goes to the server log; the caller gets the condition.
+
+`api/pin.js` — typed `409 orphaned_seq_record`. The numbered record and
+`latest.json` are two separate commits and are not atomic. If the first lands
+and the second does not (function timeout, transient GitHub error), every later
+pin recomputes the same seq, collides with the orphan, and 502s: the namespace
+is **permanently wedged**, and the code comments claiming it "self-heals on the
+next pin" were wrong. Confirmed live, and it recurred on its own during
+verification. This change is detection only — it names the condition and points
+at the orphan instead of returning an opaque store error. The repair is
+escalated below.
+
+`api/stripe-webhook.js` — `module.exports.config` was assigned *before*
+`module.exports = handler`, so the handler assignment discarded it and
+`bodyParser:false` never applied. The request stream would already be drained,
+`readRawBody` would return empty, and the HMAC would be computed over an empty
+body — every genuine Stripe delivery would have failed signature verification
+the day this endpoint was wired up. Config is now attached after the handler.
+Also: sign over the raw bytes rather than a utf-8-stringified Buffer, and
+reject non-hex `v1` explicitly (`Buffer.from(x,"hex")` does not throw, so the
+existing try/catch was dead code).
+
+`api/status.js` — GET/HEAD guard. Any method rendered the page and fired the
+full GitHub fan-out behind it.
+
+**Escalated, not shipped** (see the audit report): the `applied:false`
+check-then-act window in `_balance.js` `grantCredits`, which lets one paid
+Stripe event be credited twice — demonstrated, 10 pins purchased, 20 granted;
+and the orphaned-seq-record repair, which changes append-only write semantics
+and needs a decision rather than a patch from the person who found it.
+
 ## 2026-08-14 — Add: anchor staleness now degrades `/status`, `/api/status.json`, `/api/badge` (board item 26)
 
 The daily self-anchor (`bridge/arcaeon/ots_anchor.py`, Task Scheduler
