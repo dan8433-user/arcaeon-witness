@@ -21,6 +21,38 @@ const balance = require("./_balance.js");
 const RATE_LIMIT = 60; // pins per key per hour, per warm instance
 const rateBuckets = new Map(); // key -> {windowStart, count}
 
+// Write the numbered, immutable seq record. Create-only on purpose: a record
+// in the public log is never overwritten.
+//
+// If the slot is already taken, that is NOT a generic store error and must not
+// be reported as one (2026-08-14 audit). It means one specific, reproducible
+// thing: a previous write committed the seq record (api/pin.js's first commit)
+// and then FAILED to update latest.json (the second commit) — a function
+// timeout or a transient GitHub error in the gap between two non-atomic
+// commits. latest.json is left one behind, so every later pin recomputes the
+// SAME seq, collides with the orphan, and 502s. The namespace is wedged, and
+// it stays wedged until someone repairs it by hand.
+//
+// This helper does not repair it — adopting an orphan record into latest.json
+// changes the write semantics of an append-only public log and is flagged for
+// review, not shipped by an audit. What it does is stop the failure from
+// masquerading as a transient upstream blip: a typed, named 409 with the
+// orphan's seq, so the operator sees the actual condition on the first call
+// instead of inferring it from a raw GitHub 422 body.
+async function putSeqRecord(namespace, seqName, record, message) {
+  try {
+    return await store.putFile(`pins/${namespace}/${seqName}.json`, record, message);
+  } catch (err) {
+    if (err && err.conflict) {
+      const wedged = new Error("seq record slot already occupied");
+      wedged.wedged = true;
+      wedged.seqName = seqName;
+      throw wedged;
+    }
+    throw err;
+  }
+}
+
 function rateLimited(key) {
   const now = Date.now();
   const b = rateBuckets.get(key);
@@ -229,8 +261,8 @@ module.exports = async (req, res) => {
         };
 
         const seqName = String(seq).padStart(8, "0");
-        const put = await store.putFile(
-          `pins/${namespace}/${seqName}.json`, renewal,
+        const put = await putSeqRecord(
+          namespace, seqName, renewal,
           `renew ${namespace} rows=${rows} seq=${seq} (publisher heartbeat, content unchanged)`
         );
         await store.putFile(latestPath, renewal,
@@ -303,7 +335,7 @@ module.exports = async (req, res) => {
     // --- commit the pin, then update latest.json (2 commits, Stage-0) ---
     const seqName = String(seq).padStart(8, "0");
     const msg = `pin ${namespace} rows=${rows} seq=${seq}`;
-    const put = await store.putFile(`pins/${namespace}/${seqName}.json`, pin, msg);
+    const put = await putSeqRecord(namespace, seqName, pin, msg);
     await store.putFile(latestPath, pin, `latest ${namespace} rows=${rows} seq=${seq}`,
       cur ? cur.sha : undefined);
 
@@ -317,6 +349,25 @@ module.exports = async (req, res) => {
       public_record: `https://github.com/${store.REPO}/commits/${store.BRANCH}/pins/${namespace}`,
     });
   } catch (err) {
+    if (err && err.wedged) {
+      return res.status(409).json({
+        error:
+          "namespace is wedged: the next sequence record already exists but latest.json is behind it, " +
+          "so no new pin can be recorded until the record is reconciled",
+        reason: "orphaned_seq_record",
+        namespace,
+        orphaned_seq_record: `pins/${namespace}/${err.seqName}.json`,
+        cause:
+          "a previous write committed the numbered record and then failed to update latest.json — " +
+          "these are two separate commits and are not atomic (Stage-0, documented)",
+        operator_action:
+          `compare pins/${namespace}/${err.seqName}.json against pins/${namespace}/latest.json in the public repo; ` +
+          "if the orphan is a genuine record, latest.json must be advanced to match it",
+        public_record: `https://github.com/${store.REPO}/commits/${store.BRANCH}/pins/${namespace}`,
+      });
+    }
+    // Generic store failure. err.message is deliberately short and carries no
+    // upstream response body — api/_store.js logs the detail server-side.
     return res.status(502).json({ error: `pin store error: ${err.message}` });
   }
 };

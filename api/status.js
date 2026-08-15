@@ -38,6 +38,14 @@ function statusBadge(status, overdueSeconds) {
 }
 
 module.exports = async (req, res) => {
+  // This page is a read. It had no method guard at all, so POST/PUT/DELETE
+  // /status each rendered the full page and fired the whole GitHub fan-out
+  // behind it — matching the guard the other read endpoints already carry.
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.setHeader("allow", "GET, HEAD");
+    return res.status(405).json({ error: "GET or HEAD only" });
+  }
+
   const {
     renderedAt, reachable, healthErr,
     rows, nsErr,

@@ -85,7 +85,13 @@ async function getFile(path) {
     { headers: ghHeaders() }
   );
   if (r.status === 404) return null;
-  if (!r.ok) throw new Error(`balance store GET ${path} -> ${r.status}`);
+  if (!r.ok) {
+    // Path redacted from the thrown message (2026-08-14 audit): it is
+    // `balance/<sha256(key)>.json` / `ledger/<sha256(key)>/...` in a PRIVATE
+    // repo, and callers see err.message verbatim in a 502 body.
+    console.error(`[balance] GET ${path} -> ${r.status}`);
+    throw new Error(`balance store read failed (${r.status})`);
+  }
   const body = await r.json();
   const text = Buffer.from(body.content, "base64").toString("utf-8");
   return { json: JSON.parse(text), sha: body.sha };
@@ -110,14 +116,16 @@ async function putFile(path, obj, message, sha) {
     body: JSON.stringify(payload),
   });
   if (r.status === 409) {
-    const err = new Error(`balance store PUT ${path} -> 409 sha conflict`);
+    console.error(`[balance] PUT ${path} -> 409 sha conflict`);
+    const err = new Error("balance store write conflict (concurrent writer)");
     err.conflict = true;
     throw err;
   }
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
     const isCreateRace = r.status === 422 && /sha.*wasn't supplied/i.test(detail);
-    const err = new Error(`balance store PUT ${path} -> ${r.status} ${detail.slice(0, 200)}`);
+    console.error(`[balance] PUT ${path} -> ${r.status}: ${detail.slice(0, 400)}`);
+    const err = new Error(`balance store write failed (${r.status})`);
     if (isCreateRace) err.conflict = true;
     throw err;
   }

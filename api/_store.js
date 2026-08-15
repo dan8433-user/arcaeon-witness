@@ -8,6 +8,8 @@
 
 "use strict";
 
+const crypto = require("crypto");
+
 const REPO = process.env.GITHUB_PIN_REPO || "dan8433-user/arcaeon-witness-pins";
 const BRANCH = process.env.GITHUB_PIN_BRANCH || "main";
 const API = "https://api.github.com";
@@ -51,7 +53,20 @@ async function putFile(path, obj, message, sha) {
   });
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
-    throw new Error(`github PUT ${path} -> ${r.status} ${detail.slice(0, 200)}`);
+    // The upstream body goes to the SERVER LOG, never into the thrown message.
+    // Handlers interpolate err.message straight into a 502 response body, and
+    // GitHub's error bodies carry backend URLs and request context that a
+    // caller has no business reading (2026-08-14 audit finding: a concurrent
+    // pin storm returned GitHub's raw 422 body to the client verbatim).
+    console.error(`[store] PUT ${path} -> ${r.status}: ${detail.slice(0, 400)}`);
+    const err = new Error(`github PUT ${path} -> ${r.status}`);
+    err.status = r.status;
+    // GitHub's create-race shape: two writers both tried to CREATE the same
+    // not-yet-existing file, so the loser is told a sha is required. Tagged
+    // here (same idiom as api/_meter.js) so callers can name the condition
+    // instead of surfacing a bare store error.
+    err.conflict = r.status === 409 || (r.status === 422 && /sha.*wasn't supplied/i.test(detail));
+    throw err;
   }
   return r.json();
 }
@@ -141,28 +156,79 @@ const LEGACY_AUTH_NOTE =
   "auth_level stamp, so it carries no stamp of its own; it is reported at the " +
   "bearer-era level it was written under. This is NOT owner-signature auth.";
 
+// Constant-time string compare. `===` on a secret short-circuits at the first
+// differing byte, so its runtime leaks how much of a guess was correct. The
+// window is small over a network, but this is the ONLY thing standing between
+// a stranger and a write to the public record, and a constant-time compare
+// costs nothing. Length is compared first and non-constant-time on purpose:
+// crypto.timingSafeEqual throws on length mismatch, and key LENGTH is not the
+// secret — the bytes are.
+function safeEqual(a, b) {
+  const ab = Buffer.from(String(a), "utf8");
+  const bb = Buffer.from(String(b), "utf8");
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
 function keyPrefixFor(bearerKey) {
   const raw = process.env.WITNESS_KEYS || "";
+  let found = null;
   for (const pair of raw.split(",")) {
     const i = pair.indexOf(":");
     if (i < 1) continue;
     const key = pair.slice(0, i).trim();
     const prefix = pair.slice(i + 1).trim();
-    if (key && key === bearerKey) return prefix;
+    if (!key) continue;
+    // An EMPTY namespace-prefix is refused, not honoured as a wildcard.
+    // `"".startsWith(...)` is true for every string, so a WITNESS_KEYS entry
+    // written as "somekey:" (trailing comma, fat-fingered edit, a prefix
+    // deleted but the pair left behind) would silently grant that key write
+    // access to EVERY namespace in the store. A config typo must never be the
+    // thing that widens authorization — fail closed, treat it as no binding.
+    if (!prefix) continue;
+    // Keep scanning after a hit so the loop's runtime doesn't depend on WHICH
+    // key matched, and compare every entry rather than breaking early.
+    if (safeEqual(key, bearerKey) && found === null) found = prefix;
   }
-  return null;
+  return found;
 }
 
 // ---- validation (mirrors the arcaeon_ledger client's Head semantics) ----
 const NS_RE = /^[a-z0-9-]{1,64}$/;
 const CHAIN_RE = /^[0-9a-fA-F]{8,64}$/;
 
+// Upper bound on `rows`. This is not tidiness — it closes a ONE-REQUEST,
+// IRREVERSIBLE denial of service on a namespace (found by the 2026-08-14
+// hostile audit, and reproduced live before the guard existed).
+//
+// The monotonic guard in api/pin.js is deliberately absolute: a witness never
+// goes backward, so once a namespace's head is at rows=N, nothing below N is
+// ever accepted again. That makes an absurdly large `rows` value a permanent
+// brick, not a transient error — pin rows=9007199254740992 once and that
+// namespace can never record a real head again, forever, by design. There is
+// no admin undo, because "the witness can be walked back" is the one thing
+// this product must never be true.
+//
+// Two guards, and both matter:
+//   Number.isSafeInteger — beyond 2^53-1, JSON round-tripping is LOSSY.
+//     JSON.parse("9007199254740993") silently yields 9007199254740992, so the
+//     witness would record a number the publisher did not send. A witness that
+//     rewrites its input is not a witness. (Number.isInteger accepts these;
+//     isSafeInteger is the check that actually holds.)
+//   MAX_ROWS — a domain bound. A trillion appended rows is far past any real
+//     log this thing will ever see, so anything above it is a client bug or an
+//     attack, and either way it should bounce off a 400 rather than land in an
+//     append-only public record that cannot be corrected.
+const MAX_ROWS = 1e12;
+
 function validatePin(body) {
   if (!body || typeof body !== "object") return "body must be a JSON object";
   if (typeof body.namespace !== "string" || !NS_RE.test(body.namespace))
     return "namespace must match [a-z0-9-]{1,64}";
-  if (!Number.isInteger(body.rows) || body.rows < 1)
+  if (!Number.isSafeInteger(body.rows) || body.rows < 1)
     return "rows must be a positive integer";
+  if (body.rows > MAX_ROWS)
+    return `rows must be <= ${MAX_ROWS} — the monotonic guard makes an oversized head permanent and unrecoverable, so it is refused rather than witnessed`;
   if (typeof body.chain !== "string" || !CHAIN_RE.test(body.chain))
     return "chain must be a hex string of 8-64 chars";
   return null;

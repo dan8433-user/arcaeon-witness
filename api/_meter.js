@@ -111,7 +111,10 @@ async function getUsageFile(path) {
     { headers: ghHeaders() }
   );
   if (r.status === 404) return null;
-  if (!r.ok) throw new Error(`usage store GET ${path} -> ${r.status}`);
+  if (!r.ok) {
+    console.error(`[meter] GET ${path} -> ${r.status}`);
+    throw new Error(`usage store read failed (${r.status})`);
+  }
   const body = await r.json();
   const text = Buffer.from(body.content, "base64").toString("utf-8");
   return { json: JSON.parse(text), sha: body.sha };
@@ -130,7 +133,13 @@ async function putUsageFile(path, obj, message, sha) {
     body: JSON.stringify(payload),
   });
   if (r.status === 409) {
-    const err = new Error(`usage store PUT ${path} -> 409 sha conflict`);
+    // NOTE (2026-08-14 audit): `path` is redacted out of every message this
+    // module throws. It is `usage/<sha256(caller key)>/<month>.json` in a
+    // PRIVATE repo, and api/pin.js interpolates err.message directly into a
+    // 502 body — which was handing the caller the private store's exact
+    // layout. Full detail goes to the server log instead.
+    console.error(`[meter] PUT ${path} -> 409 sha conflict`);
+    const err = new Error("usage store write conflict (concurrent writer)");
     err.conflict = true;
     throw err;
   }
@@ -143,7 +152,8 @@ async function putUsageFile(path, obj, message, sha) {
     // status code; treat it the same as a 409 so the retry loop re-reads
     // and picks up the sha the winner just created.
     const isCreateRace = r.status === 422 && /sha.*wasn't supplied/i.test(detail);
-    const err = new Error(`usage store PUT ${path} -> ${r.status} ${detail.slice(0, 200)}`);
+    console.error(`[meter] PUT ${path} -> ${r.status}: ${detail.slice(0, 400)}`);
+    const err = new Error(`usage store write failed (${r.status})`);
     if (isCreateRace) err.conflict = true;
     throw err;
   }

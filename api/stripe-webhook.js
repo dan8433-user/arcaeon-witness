@@ -37,7 +37,17 @@
 const crypto = require("crypto");
 const balance = require("./_balance.js");
 
-module.exports.config = { api: { bodyParser: false } };
+// NOTE: the `config` export is attached at the BOTTOM of this file, after the
+// handler is assigned to module.exports. It used to be set here, on line 40 —
+// which did nothing, because line 83's `module.exports = async (req,res)=>{}`
+// replaced the whole exports object and took `config` with it (2026-08-14
+// audit). With `bodyParser` left at its default, the request stream is drained
+// and parsed before the handler runs, so readRawBody() below would resolve to
+// an EMPTY buffer and the HMAC would be computed over `${t}.` — every genuine
+// Stripe delivery would have failed signature verification the day this
+// endpoint was wired up. It fails closed, so this was a liveness bug rather
+// than a hole, but it would have been diagnosed as "Stripe is sending bad
+// signatures" and it had to be found before the wiring, not after.
 
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -62,14 +72,27 @@ function verifyStripeSignature(rawBody, sigHeader, secret) {
   const v1 = parts.v1;
   if (!t || !v1) return { ok: false, reason: "malformed stripe-signature header" };
 
-  const expected = crypto.createHmac("sha256", secret).update(`${t}.${rawBody}`, "utf8").digest("hex");
-  let expectedBuf, gotBuf;
-  try {
-    expectedBuf = Buffer.from(expected, "hex");
-    gotBuf = Buffer.from(v1, "hex");
-  } catch {
+  // Sign over the RAW BYTES. The previous form was `` `${t}.${rawBody}` ``,
+  // which stringifies the Buffer through its default utf-8 decoding before
+  // hashing — any byte sequence that is not valid UTF-8 gets replaced with
+  // U+FFFD and the computed HMAC no longer matches what Stripe signed over the
+  // original bytes. Stripe sends UTF-8 JSON so this was latent rather than
+  // live, but a signature check has no business round-tripping its own input
+  // through a lossy decode (2026-08-14 audit).
+  const expected = crypto
+    .createHmac("sha256", secret)
+    .update(Buffer.concat([Buffer.from(`${t}.`, "utf8"), rawBody]))
+    .digest("hex");
+
+  // Buffer.from(x, "hex") does NOT throw on malformed input — it silently
+  // stops at the first invalid pair — so the length check below is what
+  // actually rejects a junk v1, not the try/catch. Reject non-hex explicitly
+  // rather than relying on a truncation happening to produce a length mismatch.
+  if (!/^[0-9a-fA-F]+$/.test(v1) || v1.length % 2 !== 0) {
     return { ok: false, reason: "malformed v1 signature" };
   }
+  const expectedBuf = Buffer.from(expected, "hex");
+  const gotBuf = Buffer.from(v1, "hex");
   if (expectedBuf.length !== gotBuf.length || !crypto.timingSafeEqual(expectedBuf, gotBuf)) {
     return { ok: false, reason: "signature mismatch" };
   }
@@ -161,3 +184,10 @@ module.exports = async (req, res) => {
     return res.status(500).json({ error: `credit store error: ${err.message}` });
   }
 };
+
+// Attached AFTER the handler assignment above, which is the whole point — see
+// the note near the top of this file. Vercel reads `config` off this module's
+// exports, so it has to survive the `module.exports = handler` line.
+// bodyParser MUST stay disabled: Stripe signs the raw request bytes, and a
+// re-serialized parse does not reproduce them byte for byte.
+module.exports.config = { api: { bodyParser: false } };
