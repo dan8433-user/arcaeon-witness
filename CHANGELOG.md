@@ -4,6 +4,72 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-15 — `POST /api/distill`: hosted try-before-pip demo for arcaeon-distill
+
+**Not deployed in this commit** — ships in the morning batch with live
+verification, same discipline as the entry below.
+
+New metered endpoint (`api/distill.js` + `api/_distill_core.js`) so an agent
+can try arcaeon-distill's deterministic tool-output compaction over HTTP with
+zero install: `POST {content, budget}` -> `{content: distilled, receipt}`.
+Auth + free-tier metering reuse the exact `/api/pin` pattern
+(`store.keyPrefixFor` for key validity, `_meter.js` for the monthly cap,
+`_balance.js` for credit top-up past it, charged only after the compute
+succeeds — a malformed request burns nothing, same rule pin.js already
+enforces on its own rejection paths).
+
+**The honest problem: arcaeon-distill is Python; this deployment is Node.**
+The product's entire pitch is "same input, same budget, byte-identical
+output, every run, every machine" — so a lazy `JSON.parse` + walk + re-stringify
+port would have silently BROKEN that promise the moment it crossed the
+language boundary, in two structural ways:
+- Python's `json.dumps(5.0) == "5.0"`; plain JS `JSON.stringify(5.0) == "5"`
+  (JS has one numeric type — the float-vs-int distinction a JSON token
+  carries is gone the instant `JSON.parse` touches it). Python and JS also
+  switch to scientific notation at different magnitude thresholds.
+- Plain JS objects silently reorder integer-looking string keys
+  (`{"2":"b","1":"a"}` enumerates `"1"` before `"2"` regardless of insertion
+  order); Python dicts never do. distill()'s wide-dict head/tail truncation
+  depends on true insertion order.
+
+Fixed rather than punted: `_distill_core.js` ships a hand-written JSON parser
+that classifies each number token as int-vs-float lexically (matching
+Python's `json.scanner` rule exactly) and represents every JSON object as a
+`Map` (never a plain object) end to end; a `pyFloatRepr()` formatter derived
+empirically against a live CPython process (battery: `5.0, 100.0, 1e16,
+1e17, 1e-5, 1.5e300, -0.0, 12345678901234567.0, ...`) reproduces CPython's
+`repr()` presentation exactly — notation-switch threshold, exponent
+zero-padding, trailing `.0`. Every other piece of the algorithm (the three
+strategies — json/tabular/text — head/tail truncation, the drop-receipt
+digests, the cycle-safe admission gate) is a direct line-for-line port of
+`arcaeon_distill/__init__.py` v0.1.2.
+
+**Verified, not assumed:** a 12-case, 515-field cross-language equivalence
+harness (json/tabular/text strategies; floats incl. the exact
+formatting-edge-case battery above; unicode keys/values; wide dicts; deep
+nesting; list-of-lists; CSV; free-text extraction with and without a query)
+ran the SAME literal input bytes through the live Python package and this
+JS port and diffed every field, including the sha256 receipt digests
+(byte-identical canonicalization -> byte-identical hashes, not just
+structurally-similar output). Result: **0 failures across 515 checks** — the
+JS port reproduces the Python package's content, drop manifests, and digests
+exactly for every case tested. `node --check` clean on both new files; a
+local stub-request invocation of the handler exercised auth-reject,
+malformed-JSON-reject, missing-field-reject, a full successful distill call
+(metering itself 401s offline with no live `GITHUB_PIN_TOKEN` in this local
+run — expected, same store dependency `/api/pin` already has), and a
+NaN-content typed rejection.
+
+**Because a port can never be a promise of eternal equivalence** (a future
+edit to either implementation could silently drift the two apart), every
+receipt this endpoint returns is stamped `implementation:"js-port"`,
+`js_port_version`, and `py_package_version_target` — so a receiving agent
+can always tell which implementation produced a given receipt, rather than
+assuming the pip package's guarantees transfer by brand name alone. Documented
+residual (not blocking, same spirit as the Python package's own "non-proofs"
+section): Python's arbitrary-precision ints beyond JS's safe-integer range
+round-trip as strings, not numbers, in the JSON response.
+
 ## 2026-08-15 — Two public promises paid: legacy heads can ARM, deadlines are OWNER-gated
 
 Both halves of the reviewer debt that 4606d62 only half-paid. Nothing on the
