@@ -4,6 +4,80 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-14 — Fix: the four billing/race defects the hostile audit FLAGGED — all shipped
+
+The audit earlier today (entry below) shipped the unambiguously-safe fixes and
+deliberately *escalated* anything that touched billing or write semantics —
+"an auditor who also rewrites the billing logic is not an auditor." Those
+escalations are now authorized and fixed. Each was reproduced against the live
+store with throwaway namespaces first, then re-run green after the fix; the
+throwaway files were deleted (delete commits are in each repo's history). This
+whole path is PRE-REVENUE — no pack has ever been sold, the Stripe webhook is
+not wired, there are zero live balances — so the schema change below needed no
+migration and the fixed-but-inert code is simply *correct-when-wired*.
+
+**1. CRITICAL — credit double-grant (`_balance.js grantCredits`).** A Stripe
+delivery retry could credit one paid pack twice (audit repro: 10 pins bought,
+20 granted). The idempotency claim (`applied:false -> true`) and the balance
+write were two separate GitHub round-trips, so two overlapping deliveries of the
+same `event_id` both read "not yet applied" and both added. Fix: idempotency now
+lives INSIDE the same compare-and-swap as the balance write — the balance file
+carries an `applied_events: [...]` set (bounded to the last 500), and
+check-membership + add-pins + record-event are one CAS against the file's sha.
+The loser of the race re-reads, sees the `event_id` already applied, and returns
+`already_credited` without adding again. The append-only `ledger/` grant file is
+still written as an audit record but is no longer the gate. **Test (two
+concurrent OS processes granting the same event_id, 6 trials each):** pre-fix
+double-granted (balances `[10,10,10,10,10,20]` — a real `20`); fixed granted
+exactly `10` in all 6 trials, the losing writer returning `already_credited`.
+**Schema note for the not-yet-existent cutover:** `balance/<hash>.json` gains
+an `applied_events` array — additive, no migration (zero live balances); a
+pre-field file reads as an empty set, which is correct.
+
+**2. charge-after-commit (`pin.js`).** Metering (`meter.check`, which
+increments) and the over-cap `decrementCredit` ran at the TOP of the handler,
+before the monotonic / conflict / renewal checks — so a pin that then got
+rejected 409 had already burned a meter count and, over the free cap, a real
+credit. Fix: metering moved BELOW every rejection branch, into the two actual
+write paths, guarded so a self-heal retry can't double-charge. A rejected pin —
+and now also an idempotent no-op re-pin, which records nothing — charges
+nothing. **Test (pre-fix vs fixed):** under-cap rejected pin — meter `used`
+went `1->2` pre-fix, stays `1` fixed; over-cap rejected pin on credits —
+balance went `4->3` pre-fix, stays `4` fixed.
+
+**3. webhook payment gate (`stripe-webhook.js`).** `checkout.session.completed`
+credited a pack without checking that the money actually cleared — for async
+payment methods, "session completed" is not "paid." Fix: credit only when
+`session.payment_status === "paid"`; anything else (`unpaid`,
+`no_payment_required`, missing) returns `200 {skipped:"session not paid"}` so
+Stripe doesn't retry, and the real credit arrives later on the async-success
+event if the payment settles. Plus a livemode assertion (`event.livemode` must
+match `WITNESS_STRIPE_LIVEMODE`, default live) so a test-mode event can't credit
+a live balance. **Test:** unpaid, `no_payment_required`, and livemode-mismatch
+sessions all credit `0`; a paid+live session credits the full 3,000-pin starter
+pack.
+
+**4. orphaned-seq self-heal (`pin.js`).** A pin is two non-atomic commits (the
+numbered seq record, then `latest.json`). If the first landed and the second
+didn't, `latest.json` sat one behind, every later pin recomputed the same seq,
+collided, and 502'd — the namespace was **permanently wedged**. The audit
+shipped detection (typed `409 orphaned_seq_record`); this is the repair. On a
+collision the handler reads the orphan and adopts it into `latest.json` ONLY if
+it VERIFIES as the legitimate immediate successor of the current head — exactly
+one seq ahead, monotonic non-decreasing rows, a well-formed hex chain, a known
+`record_kind`, and a prev-chain linkage (the orphan's newest interval must
+supersede THIS head's deadline). Anything less keeps failing typed rather than
+launder a corrupt record into an append-only public log. The check runs before
+any charge, so a wedge never mischarges. **Test:** pre-fix stayed wedged (409,
+head stuck at seq=1); with a valid planted orphan the fixed handler adopted it
+(seq=2) and recorded the caller's pin as seq=3; a corrupt-linkage orphan was
+refused adoption (typed 409, head untouched).
+
+Regression-checked after the `pin.js` restructure: advance / renewal (still
+charged) / idempotent re-pin (now uncharged) / monotonic-reject / head-conflict
+all behave correctly. Deployed to production (safe: inert until the webhook is
+wired); health / latest / status.json / badge / verify confirmed live.
+
 ## 2026-08-14 — Fix: hostile security audit of `api/` — four shipped fixes, two escalations
 
 A deliberately adversarial line-by-line audit of every file in `api/`, assuming

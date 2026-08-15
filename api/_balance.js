@@ -33,16 +33,29 @@
 // Idempotent top-up, explained (grantCredits, below): GitHub's contents
 // API only gives us single-file compare-and-swap, not a real multi-file
 // transaction. A naive "check balance, add, write" is not safe against a
-// webhook retry landing between the check and the write. Instead the
-// ledger entry for a grant IS the atomic claim: it's created FIRST via a
-// create-only PUT keyed by event_id (a second writer racing the same
-// event_id gets a 409/422 and backs off, exactly like _meter.js's CAS
-// loop), written with `applied:false`, and only flipped to `applied:true`
-// once the balance file has actually been updated. A crash between those
-// two steps leaves a `applied:false` claim behind; a retry of the SAME
-// event_id finds it and *completes* the mutation rather than re-doing it
-// or silently dropping it -- self-healing, same idiom as pin.js's own
-// documented "two commits, not atomic, self-heals on the next pin."
+// webhook retry landing between the check and the write.
+//
+// THE FIX (2026-08-14 billing audit, CEO-authorized). The idempotency claim
+// and the balance mutation must be ONE compare-and-swap, not two. The earlier
+// design kept a separate ledger file whose `applied:false -> true` flag was the
+// claim; but "read the flag" and "write the new balance" were two GitHub round-
+// trips, so two overlapping deliveries of the SAME event_id could both read
+// applied:false and both add the pack -- demonstrated live, 10 pins purchased,
+// 20 granted. Now the set of already-applied event ids lives INSIDE the balance
+// file itself (`applied_events`, bounded to the last MAX_APPLIED_EVENTS), and
+// "is this event already applied? / add the pins / record the event" happen as
+// a single CAS against the balance file's sha. A losing writer 409s, re-reads,
+// sees the event_id already in `applied_events`, and returns already_credited
+// WITHOUT adding a second time. The append-only ledger/ grant file is still
+// written afterward as an audit record, but it is no longer the idempotency
+// gate -- the balance file's own CAS is.
+//
+// SCHEMA NOTE for the not-yet-existent cutover: balance/<hash>.json now carries
+// an `applied_events: [...]` array. This is a PURELY ADDITIVE field on a store
+// with ZERO live balances today (no pack has ever been sold, the webhook is not
+// wired) -- there is nothing to migrate. Any balance file written before this
+// field existed reads as `applied_events: []` (treated as "no events applied
+// yet"), which is correct.
 
 "use strict";
 
@@ -51,6 +64,19 @@ const crypto = require("crypto");
 const USAGE_REPO = process.env.GITHUB_USAGE_REPO || "dan8433-user/arcaeon-witness-usage";
 const USAGE_BRANCH = process.env.GITHUB_USAGE_BRANCH || "main";
 const API = "https://api.github.com";
+
+// The balance file remembers the last N applied Stripe event ids so a delivery
+// retry is a no-op. Bounded so the file can't grow without limit: Stripe never
+// retries an event for more than ~3 days, and N=500 top-ups is far more history
+// than that window can hold, so an id can never age out of the set while a
+// retry of it is still possible.
+const MAX_APPLIED_EVENTS = 500;
+
+// The contents API shows observable read-after-write lag (a GET right after a
+// successful create-only PUT can still 404). A short pause before re-reading on
+// a CAS conflict lets it settle so the retry sees the winner's write instead of
+// racing it again. Bounded, tiny, and only on the contended path.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Pack catalogue -- SKU id -> pins. Sizes ratified in
 // COUNCIL_PRICING_REVIEW_2026-08-14.md §2.2 / §4 decision #1: Starter
@@ -248,74 +274,98 @@ async function decrementCredit(secret, reason) {
 // grantCredits(hash, pins, pack, eventId, source) -> idempotent on eventId.
 // Exposed directly (not just via creditPack) so tests can grant an
 // arbitrary small amount without needing a full $15+ pack.
+//
+// Idempotency and the balance mutation are ONE compare-and-swap against
+// balance/<hash>.json (see the header comment). The event id is recorded in
+// the balance file's `applied_events` set in the SAME write that adds the
+// pins, so a concurrent replay of the same event can never add twice: the
+// loser of the CAS re-reads, finds the id already applied, and returns
+// already_credited without touching the balance.
 async function grantCredits(hash, pins, pack, eventId, source) {
-  const ledgerPath = ledgerGrantPath(hash, eventId);
-  let entry = await getFile(ledgerPath);
-
-  if (!entry) {
-    const draft = {
-      event_id: eventId, key_hash: hash, pack, pins, source,
-      applied: false, claimed_at: new Date().toISOString(),
-    };
-    try {
-      // Build `entry` straight from the PUT response's own sha rather than
-      // re-GETting the file — the contents API showed observable read-
-      // after-write lag in testing (a GET immediately after a successful
-      // create-only PUT returned 404), so re-reading here was a real race,
-      // not a defensive nicety.
-      const put = await putFile(ledgerPath, draft, `credit claim ${hash.slice(0, 12)} ${pack} evt=${eventId}`);
-      entry = { json: draft, sha: put.content.sha };
-    } catch (err) {
-      if (err.conflict) {
-        // Someone else (a concurrent replay, most likely) already claimed
-        // this event_id between our GET and our create. Re-read and fall
-        // through to the applied-check below instead of erroring.
-        entry = await getFile(ledgerPath);
-        if (!entry) throw err;
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  if (entry.json.applied === true) {
-    return {
-      ok: true, already_credited: true, key_hash: hash,
-      pins: entry.json.pins, pack: entry.json.pack, balance_after: entry.json.balance_after,
-    };
-  }
-
-  // Complete the claim: CAS-add `pins` onto balance/<hash>.json.
+  const evt = sanitizeEventId(eventId);
   const path = balancePath(hash);
-  let lastErr = null;
-  let newBalance = null;
-  let newSeq = null;
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let alreadyApplied = false;
+  let finalBalance = null;
+  let finalSeq = null;
+  let lastErr = null;
+
+  // A few more attempts than the meter's 2: a create-race on a brand-new
+  // balance file plus read-after-write lag can need one or two extra re-reads
+  // before the loser sees the winner's write. Bounded, with backoff — no spiral.
+  const MAX_ATTEMPTS = 6;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const cur = await getFile(path);
-    const bal = cur ? Number(cur.json.balance) || 0 : 0;
-    const seq = cur && Number.isInteger(cur.json.seq) ? cur.json.seq + 1 : 1;
-    newBalance = bal + pins;
-    newSeq = seq;
-    const obj = { key_id: hash.slice(0, 12), key_hash: hash, balance: newBalance, seq, updated_at: new Date().toISOString() };
+    const curJson = cur ? cur.json : null;
+    const bal = curJson ? Number(curJson.balance) || 0 : 0;
+    const appliedEvents =
+      curJson && Array.isArray(curJson.applied_events) ? curJson.applied_events : [];
+
+    if (appliedEvents.includes(evt)) {
+      // This exact event is already folded into the balance. Idempotent.
+      alreadyApplied = true;
+      finalBalance = bal;
+      finalSeq = curJson && Number.isInteger(curJson.seq) ? curJson.seq : null;
+      break;
+    }
+
+    const seq = curJson && Number.isInteger(curJson.seq) ? curJson.seq + 1 : 1;
+    const newBalance = bal + pins;
+    const newApplied = appliedEvents.concat([evt]).slice(-MAX_APPLIED_EVENTS);
+    const obj = {
+      key_id: hash.slice(0, 12),
+      key_hash: hash,
+      balance: newBalance,
+      seq,
+      applied_events: newApplied,
+      updated_at: new Date().toISOString(),
+    };
     try {
-      await putFile(path, obj, `credit grant ${hash.slice(0, 12)} ${pack} +${pins} seq=${seq}`, cur ? cur.sha : undefined);
+      await putFile(
+        path, obj,
+        `credit grant ${hash.slice(0, 12)} ${pack} +${pins} seq=${seq} evt=${evt}`,
+        cur ? cur.sha : undefined
+      );
+      finalBalance = newBalance;
+      finalSeq = seq;
       break;
     } catch (err) {
-      if (err.conflict && attempt === 0) {
+      if (err.conflict && attempt < MAX_ATTEMPTS - 1) {
         lastErr = err;
-        newBalance = null;
+        await sleep(120 * (attempt + 1)); // let read-after-write settle, then re-read
         continue;
       }
       throw err;
     }
   }
-  if (newBalance === null) throw lastErr || new Error("balance store: exhausted CAS retries on grant");
+  if (finalBalance === null) {
+    throw lastErr || new Error("balance store: exhausted CAS retries on grant");
+  }
 
-  const finalEntry = { ...entry.json, applied: true, balance_after: newBalance, balance_seq: newSeq, applied_at: new Date().toISOString() };
-  await putFile(ledgerPath, finalEntry, `credit applied ${hash.slice(0, 12)} ${pack} evt=${eventId}`, entry.sha);
+  // Append-only audit record for this top-up. NOT the idempotency gate anymore
+  // (the balance file's applied_events set is) — a create-only write, best
+  // effort. A conflict here just means a prior/concurrent delivery already
+  // wrote the audit line, which is fine; a genuine write failure is surfaced
+  // but does NOT fail the grant, because the balance is already correct and the
+  // event is already recorded as applied in the source-of-truth balance file.
+  const ledgerPath = ledgerGrantPath(hash, eventId);
+  const record = {
+    event_id: evt, key_hash: hash, pack, pins, source,
+    applied: true, balance_after: finalBalance, balance_seq: finalSeq,
+    at: new Date().toISOString(),
+  };
+  try {
+    await putFile(ledgerPath, record, `credit ledger ${hash.slice(0, 12)} ${pack} evt=${evt}`);
+  } catch (err) {
+    if (!err.conflict) {
+      return {
+        ok: true, already_credited: alreadyApplied, key_hash: hash,
+        pins, pack, balance_after: finalBalance, ledger_write_failed: err.message,
+      };
+    }
+  }
 
-  return { ok: true, already_credited: false, key_hash: hash, pins, pack, balance_after: newBalance };
+  return { ok: true, already_credited: alreadyApplied, key_hash: hash, pins, pack, balance_after: finalBalance };
 }
 
 // ---- grant by SKU — the entry point api/credit.js and api/stripe-webhook.js call ----

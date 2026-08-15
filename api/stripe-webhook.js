@@ -146,7 +146,41 @@ module.exports = async (req, res) => {
     return res.status(200).json({ ok: true, skipped: `unhandled event type: ${event.type}` });
   }
 
+  // Livemode gate (2026-08-14 billing audit). A test-mode event must never
+  // credit a live balance, nor a live event a test store. The signing secret
+  // already differs between modes, so a cross-mode delivery can't even pass
+  // signature verification — this is defense in depth, and it's cheap. Expected
+  // mode defaults to live; set WITNESS_STRIPE_LIVEMODE=false for a test-mode
+  // endpoint. Only asserted when the event actually carries the boolean.
+  const expectedLive =
+    String(process.env.WITNESS_STRIPE_LIVEMODE ?? "true").toLowerCase() !== "false";
+  if (typeof event.livemode === "boolean" && event.livemode !== expectedLive) {
+    return res.status(200).json({
+      ok: true,
+      skipped: `livemode mismatch (event.livemode=${event.livemode}, expected=${expectedLive})`,
+      event_id: event.id,
+    });
+  }
+
   const session = event.data && event.data.object;
+
+  // Payment gate (2026-08-14 billing audit). `checkout.session.completed` fires
+  // when the Checkout Session COMPLETES, which for asynchronous payment methods
+  // (and unpaid/expired sessions) is NOT the same as the money having cleared.
+  // Crediting on completion alone would grant a pack for a payment that never
+  // settled. Only `payment_status:"paid"` is money in hand; anything else
+  // (`unpaid`, `no_payment_required`, missing) is skipped with a 200 so Stripe
+  // does not retry — the real credit arrives later on the async success event
+  // if and when the payment actually clears.
+  const paymentStatus = session && session.payment_status;
+  if (paymentStatus !== "paid") {
+    return res.status(200).json({
+      ok: true,
+      skipped: `session not paid (payment_status=${paymentStatus === undefined ? "missing" : paymentStatus})`,
+      event_id: event.id,
+    });
+  }
+
   const hash = session && session.client_reference_id;
   const pack = session && session.metadata && session.metadata.pack;
 
