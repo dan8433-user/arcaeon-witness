@@ -15,9 +15,14 @@
 const { gatherStatusData } = require("./_status_data.js");
 
 module.exports = async (req, res) => {
-  if (req.method !== "GET") {
-    res.setHeader("allow", "GET");
-    return res.status(405).json({ error: "GET only" });
+  // HEAD is a read and must answer like one. Uptime monitors and link checkers
+  // default to HEAD; 405-ing them reports this endpoint as DOWN while it is in
+  // fact serving 200. /api/health and /status never had this guard and always
+  // answered HEAD correctly — these read endpoints now match them. Node drops
+  // the body from a HEAD response on its own, so the handler needs no branch.
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    res.setHeader("allow", "GET, HEAD");
+    return res.status(405).json({ error: "GET or HEAD only" });
   }
 
   const data = await gatherStatusData();

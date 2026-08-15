@@ -4,6 +4,55 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-14 — Fix: `HEAD` on the public read endpoints answered 405
+
+`/api/latest`, `/api/badge`, `/api/status.json` and `/api/verify` all guarded with
+`if (req.method !== "GET")`, which rejects `HEAD` — the method uptime monitors and
+link checkers reach for first. The endpoints were serving 200 to every real client
+and reporting themselves **down** to every automated one. `/api/health` and `/status`
+carry no such guard and always answered `HEAD` correctly, so the trust surface
+disagreed with itself depending on which URL a monitor was pointed at.
+
+Guards now accept `GET` and `HEAD`, and advertise `Allow: GET, HEAD`. Node strips
+the body from a `HEAD` response on its own, so no handler needed a second branch.
+`/api/balance` deliberately keeps its `GET`-only guard: it is bearer-gated, no
+monitor reaches it unauthenticated, and widening an auth-gated method surface is
+not a thing to do casually as part of a fix for public read endpoints.
+
+Found by a full endpoint sweep (all 14 routes, hit + miss + unauthenticated cases).
+That sweep also confirmed the thing most worth confirming: `/status`,
+`/api/status.json` and `/api/badge` agree field-for-field with `/api/latest`, even
+though `_status_data.js` computes cadence through a deliberately separate
+reimplementation of `_store.js`'s `computeCadenceFields`. Two independent
+implementations, one answer.
+
+## 2026-08-14 — Fix: unstamped legacy records no longer track the live `AUTH_LEVEL`
+
+`api/_store.js:382` read `out.auth_level = (pin && pin.auth_level) || AUTH_LEVEL`.
+Records written before the auth stamp existed carry no `auth_level` of their own,
+so that expression fell through to the **current value of the constant**. Harmless
+while the constant is `"bearer-stage0"` — and a silent retroactive rewrite the day
+Stage-1 flips it to `"owner-signature"`, at which point every unstamped legacy
+record would begin claiming owner-signed auth it never had.
+
+That is precisely what `README.md` "Auth honesty" promises will not happen:
+*"the two will be distinguishable in the public repo record-by-record — including
+retroactively, because every record written before then says `bearer-stage0` in its
+own text."* Unstamped records do not say it in their own text. They say nothing, and
+the fallback was speaking for them — in whatever voice the constant happened to have.
+
+Fixed per `STAGE1_SIGNATURE_DESIGN.md` §7.1: the fallback now resolves to frozen
+literals (`LEGACY_AUTH_LEVEL` / `LEGACY_AUTH_NOTE`) that do not move when the live
+constants move, and the legacy note names itself as an unstamped pre-Stage-1 record
+rather than borrowing the current era's wording. Records that DO carry a stamp are
+untouched and still report it verbatim. Landed now, independently of whether the
+rest of Stage-1 is ever built — it guards a public promise, it is easy today, and
+it is a postmortem later.
+
+Verified: unstamped record -> `bearer-stage0` + unstamped-legacy note; stamped
+record keeps its own values; no `|| AUTH_LEVEL` live-constant fallback remains in
+the file.
+
 ## 2026-08-14 — Stage-1 owner-signature design doc (**design only, nothing built**)
 
 `STAGE1_SIGNATURE_DESIGN.md` — the owner-signature scheme whose absence every

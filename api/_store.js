@@ -127,6 +127,20 @@ const AUTH_LEVEL_NOTE =
   "proof that a key-holder was alive and asserting, never as proof of the log " +
   "owner's intent.";
 
+// LEGACY FALLBACK — frozen literals, never the live constants above.
+// Records written before the auth stamp existed carry no `auth_level` field.
+// Falling back to the CURRENT constant would silently upgrade every one of them
+// the day AUTH_LEVEL becomes "owner-signature" — the exact retroactive rewrite
+// README "Auth honesty" publicly promises will not happen ("every record written
+// before then says bearer-stage0 in its own text"). Unstamped records were
+// bearer-era, so they get the bearer-era value as a LITERAL that does not move
+// when the constant does. Do not refactor these to reference AUTH_LEVEL.
+const LEGACY_AUTH_LEVEL = "bearer-stage0";
+const LEGACY_AUTH_NOTE =
+  "Bearer-key auth only (unstamped legacy record). This record predates the " +
+  "auth_level stamp, so it carries no stamp of its own; it is reported at the " +
+  "bearer-era level it was written under. This is NOT owner-signature auth.";
+
 function keyPrefixFor(bearerKey) {
   const raw = process.env.WITNESS_KEYS || "";
   for (const pair of raw.split(",")) {
@@ -379,8 +393,8 @@ function computeCadenceFields(pin, now = Date.now()) {
   }
   if (pin && pin.had_ungradeable_history === true) out.had_ungradeable_history = true;
 
-  out.auth_level = (pin && pin.auth_level) || AUTH_LEVEL;
-  out.auth_note = (pin && pin.auth_note) || AUTH_LEVEL_NOTE;
+  out.auth_level = (pin && pin.auth_level) || LEGACY_AUTH_LEVEL;
+  out.auth_note = (pin && pin.auth_note) || LEGACY_AUTH_NOTE;
 
   return out;
 }
