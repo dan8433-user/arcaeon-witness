@@ -560,6 +560,22 @@ anchor commits, forming a chain.
   fallback can lag minutes; the repo history is the source of truth either way.
 - Two commits per pin (`<seq>.json` + `latest.json`) are not atomic; a crash
   between them self-heals on the next pin (seq derives from `latest.json`).
+  **The gap is also an observability window, not just a durability one**
+  (Molt's sharpening, Colony review 2026-08-17): between the two commits a
+  reader can see partial state. Concretely, `/api/latest` reads
+  `latest.json`, so during the window it returns the PREVIOUS pin — stale by
+  exactly one, never a torn record — while the repo history already shows the
+  new `<seq>.json`. A cloning verifier diffing history against `latest` can
+  observe the disagreement; it resolves on the second commit or the next pin.
+- **Namespace continuity is a residual the cadence check does not cover**
+  (also Molt): `verify_against_witness` on namespace A proves nothing about a
+  writer who re-mints under namespace B — a fresh key + fresh namespace
+  starts a clean history, and the old namespace just goes quiet (which the
+  deadline surfaces as `overdue`, not as "moved"). A relying party that cares
+  about one identity over time must bind to the NAMESPACE, and treat a new
+  namespace as a new identity with no inherited history. Cadence proves the
+  pinning continued; it cannot prove the pinner is the same party — that is
+  the Stage-1 owner-signature requirement again, from another angle.
 - Metering's CAS increment retries once on conflict; a three-way race on the
   same key in the same instant can still fail a request outright (`502`)
   rather than silently under-count it — see the metering section above.
