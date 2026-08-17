@@ -133,7 +133,10 @@ test("valid paid session mints a key once — JSON shape {key, credits, namespac
   // the spec's agent-facing shape:
   assert.match(b.key, /^wk_[0-9a-f]{48}$/);
   assert.equal(b.credits, 3000); // starter, via price map (source of truth: PACKS)
-  assert.match(b.namespace, /^wk-[0-9a-f]{12}-$/);
+  // rev-2: the JSON no-form path auto-suggests the prefix from the buyer's
+  // email local part (buyer@example.com -> "buyer-"); response carries it.
+  assert.equal(b.namespace, "buyer-");
+  assert.equal(b.prefix_source, "suggested");
   assert.ok(typeof b.docs_url === "string" && b.docs_url.startsWith("http"));
   // org/pool schema baked in:
   assert.match(b.pool_id, /^pool_[0-9a-f]{16}$/);
@@ -316,9 +319,13 @@ test("paid but unmappable purchase -> 409 unmapped_purchase (manual fulfillment,
 // dual response: HTML for humans, JSON for agents
 // ---------------------------------------------------------------------
 
-test("HTML page (default) shows the key big, quickstart, support email, consent line; no-store; key never in a URL", async () => {
+test("HTML success page shows the key in a copy-box, brand, quickstart, support, consent line; no-store; key never in a URL", async () => {
   const id = sid();
   stripe.seed(paidSession({ id, _pack: "mini" }));
+  // rev-2: the human first visit renders the picker form; mint via the form
+  // POST, then a plain GET revisit shows the key page (the receipt-link view).
+  const minted = await call({ method: "POST", body: { session_id: id, prefix: "copybox-buyer-" } });
+  assert.equal(minted._status, 200);
   const res = await call({ query: { session_id: id } }); // no Accept: json
   assert.equal(res._status, 200);
   assert.equal(res._headers["content-type"], "text/html; charset=utf-8");
@@ -330,6 +337,12 @@ test("HTML page (default) shows the key big, quickstart, support email, consent 
   assert.ok(html.includes("support@arcaeon.io"));
   assert.ok(html.includes("consent=yes")); // the one-line consent link
   assert.ok(html.includes("/api/pin")); // quickstart present
+  // rev-2 ceremony: Arcaeon wordmark + copy-boxes for the key AND pip install
+  assert.ok(html.includes(">Arcaeon</div>"));
+  assert.ok(html.includes('data-copy-target="key"'));
+  assert.ok(html.includes('data-copy-target="pip"'));
+  assert.ok(html.includes("pip install arcaeon-ledger"));
+  assert.ok(html.includes("navigator.clipboard")); // vanilla-JS copy wired
 });
 
 test("?format=json returns JSON without an Accept header", async () => {
@@ -406,4 +419,241 @@ test("a freshly minted key pins under its namespace prefix via /api/pin (dynamic
   const res2 = makeRes();
   await pin(req2, res2);
   assert.equal(res2._status, 403);
+});
+
+// ---------------------------------------------------------------------
+// rev-2: the prefix picker (board item 27)
+// ---------------------------------------------------------------------
+
+const welcome = require("../lib/_welcome_email.js");
+
+// Seed an issued-key record so its prefix is "spoken for" in the store.
+function seedIssuedPrefix(prefix) {
+  const hash = keys.keyHash(`seed-${prefix}-${Math.random()}`);
+  gh.seed(USAGE, `keys/${hash}.json`, {
+    key_hash: hash, key_id: hash.slice(0, 12), namespace_prefix: prefix,
+    plan: "free", org: null, pool_id: "pool_seedseedseedseed",
+    source: "test-seed", created_at: new Date().toISOString(),
+  });
+}
+
+test("rev-2: first-visit HTML GET renders the prefix-picker form — session verified, NOTHING minted", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "starter" }));
+  const res = await call({ query: { session_id: id } }); // human, no Accept: json
+  assert.equal(res._status, 200);
+  assert.equal(res._headers["content-type"], "text/html; charset=utf-8");
+  const html = String(res._body);
+  assert.ok(html.includes('<form method="post"'));
+  assert.ok(html.includes('name="prefix"'));
+  assert.ok(html.includes('value="buyer-"')); // pre-suggested from buyer@example.com
+  assert.ok(html.includes(`value="${id}"`)); // hidden session_id for the POST back
+  assert.ok(html.includes(">Arcaeon</div>")); // wordmark on the ceremony page too
+  assert.ok(!html.includes("wk_")); // no key anywhere — nothing was minted
+  assert.equal(gh.read(USAGE, `fulfillments/${id}.json`), null);
+  assert.equal(gh.putLog.length, 0); // zero store writes of any kind
+  assert.ok(stripe.calls.length >= 1); // but the session WAS verified first
+});
+
+test("rev-2: form POST with a valid custom prefix mints under it (the form->POST mint path)", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const res = await call({ method: "POST", body: { session_id: id, prefix: "acme-" } });
+  assert.equal(res._status, 200);
+  const html = String(res._body);
+  const rec = gh.read(USAGE, `fulfillments/${id}.json`);
+  assert.equal(rec.namespace_prefix, "acme-");
+  assert.equal(rec.prefix_source, "custom");
+  assert.ok(html.includes(rec.key)); // the key page, not the form
+  assert.ok(html.includes("acme-"));
+  const keyRec = gh.read(USAGE, `keys/${rec.key_hash}.json`);
+  assert.equal(keyRec.namespace_prefix, "acme-"); // the binding /api/pin enforces
+});
+
+test("rev-2: form POST normalizes case/whitespace before validating (voice-to-text-proof H3 discipline)", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const res = await call({ method: "POST", body: { session_id: id, prefix: "  Acme-Labs-  " } });
+  assert.equal(res._status, 200);
+  assert.equal(gh.read(USAGE, `fulfillments/${id}.json`).namespace_prefix, "acme-labs-");
+});
+
+test("rev-2: taken prefix on the HTML form re-renders the form with a clear message, mints nothing", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  seedIssuedPrefix("acme-");
+  const res = await call({ method: "POST", body: { session_id: id, prefix: "acme-" } });
+  assert.equal(res._status, 409);
+  const html = String(res._body);
+  assert.ok(html.includes('<form method="post"')); // back to the form
+  assert.ok(html.includes("taken")); // the clear message
+  assert.ok(html.includes('value="acme-"')); // their pick kept editable
+  assert.equal(gh.read(USAGE, `fulfillments/${id}.json`), null); // nothing minted
+});
+
+test("rev-2: two-way overlap rejected in BOTH directions (JSON 409 prefix_taken), nothing minted", async () => {
+  // direction 1: existing "acme-" IS a prefix of the new "acme-labs-"
+  const id1 = sid();
+  stripe.seed(paidSession({ id: id1, _pack: "mini" }));
+  seedIssuedPrefix("acme-");
+  const r1 = await call({ query: { session_id: id1, prefix: "acme-labs-" }, headers: JSON_HDR });
+  assert.equal(r1._status, 409);
+  assert.equal(r1._body.reason, "prefix_taken");
+  assert.equal(gh.read(USAGE, `fulfillments/${id1}.json`), null);
+
+  // direction 2: the new "zeta-" IS a prefix of an existing "zeta-labs-"
+  const id2 = sid();
+  stripe.seed(paidSession({ id: id2, _pack: "mini" }));
+  seedIssuedPrefix("zeta-labs-");
+  const r2 = await call({ query: { session_id: id2, prefix: "zeta-" }, headers: JSON_HDR });
+  assert.equal(r2._status, 409);
+  assert.equal(r2._body.reason, "prefix_taken");
+  assert.equal(gh.read(USAGE, `fulfillments/${id2}.json`), null);
+
+  // a dash-bounded near-miss is NOT an overlap: "acm-" vs existing "acme-"
+  const id3 = sid();
+  stripe.seed(paidSession({ id: id3, _pack: "mini" }));
+  const r3 = await call({ query: { session_id: id3, prefix: "acm-" }, headers: JSON_HDR });
+  assert.equal(r3._status, 200);
+  assert.equal(r3._body.namespace, "acm-");
+});
+
+test("rev-2: illegal prefixes rejected 400 bad_prefix (chars, no trailing dash, leading dash, empty, reserved wk-)", async () => {
+  for (const bad of ["acme_labs-", "acme", "-acme-", "", "wk-mine-"]) {
+    const id = sid();
+    stripe.seed(paidSession({ id, _pack: "mini" }));
+    const res = await call({ query: { session_id: id, prefix: bad }, headers: JSON_HDR });
+    assert.equal(res._status, 400, `prefix ${JSON.stringify(bad)} must be rejected`);
+    assert.equal(res._body.reason, "bad_prefix");
+    assert.equal(gh.read(USAGE, `fulfillments/${id}.json`), null);
+  }
+});
+
+test("rev-2: JSON with ?prefix= mints under the chosen prefix and the key really pins there", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const res = await call({ query: { session_id: id, prefix: "my-agent-" }, headers: JSON_HDR });
+  assert.equal(res._status, 200);
+  assert.equal(res._body.namespace, "my-agent-"); // JSON response carries the chosen prefix
+  assert.equal(res._body.prefix_source, "custom");
+
+  const req = makeReq({
+    method: "POST",
+    headers: { authorization: `Bearer ${res._body.key}` },
+    body: { namespace: "my-agent-prod", rows: 1, chain: "deadbeefdeadbeef" },
+  });
+  const pres = makeRes();
+  await pin(req, pres);
+  assert.equal(pres._status, 201);
+});
+
+test("rev-2: JSON without ?prefix= keeps working (POST too) — auto-suggested prefix, no form roundtrip", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const res = await call({ method: "POST", body: { session_id: id }, headers: JSON_HDR });
+  assert.equal(res._status, 200);
+  assert.equal(res._body.namespace, "buyer-");
+  assert.equal(res._body.prefix_source, "suggested");
+});
+
+test("rev-2: auto-suggest FALLS BACK to the random wk- mint when the suggestion is taken (never fails)", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  seedIssuedPrefix("buyer-"); // someone already owns the email-derived suggestion
+  const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(res._status, 200);
+  assert.match(res._body.namespace, /^wk-[0-9a-f]{12}-$/);
+  assert.equal(res._body.prefix_source, "random");
+});
+
+test("rev-2: suggestion is sanitized from a messy email local part", async () => {
+  const id = sid();
+  stripe.seed(paidSession({
+    id, _pack: "mini",
+    customer_details: { email: "Weird.Local+Tag@example.com" },
+  }));
+  const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(res._status, 200);
+  assert.equal(res._body.namespace, "weird-local-tag-");
+});
+
+test("rev-2: env WITNESS_KEYS prefixes count as taken for the overlap check", async () => {
+  process.env.WITNESS_KEYS = "some-env-key:envcorp-";
+  try {
+    const id = sid();
+    stripe.seed(paidSession({ id, _pack: "mini" }));
+    const res = await call({ query: { session_id: id, prefix: "envcorp-agents-" }, headers: JSON_HDR });
+    assert.equal(res._status, 409);
+    assert.equal(res._body.reason, "prefix_taken");
+  } finally {
+    delete process.env.WITNESS_KEYS;
+  }
+});
+
+test("rev-2: an EXISTING fulfillment is unaffected — key re-shown, no form, ?prefix= ignored", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const minted = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(minted._status, 200);
+
+  // HTML revisit with a stray ?prefix= — the picker only exists at first mint
+  const res = await call({ query: { session_id: id, prefix: "hijack-" } });
+  assert.equal(res._status, 200);
+  const html = String(res._body);
+  assert.ok(html.includes(minted._body.key)); // the key page, same key
+  assert.ok(!html.includes('name="prefix"')); // not the form
+  assert.equal(gh.read(USAGE, `fulfillments/${id}.json`).namespace_prefix, minted._body.namespace);
+
+  // JSON revisit with a different ?prefix= — also ignored, same key back
+  const res2 = await call({ query: { session_id: id, prefix: "hijack-" }, headers: JSON_HDR });
+  assert.equal(res2._status, 200);
+  assert.equal(res2._body.key, minted._body.key);
+  assert.equal(res2._body.namespace, minted._body.namespace);
+});
+
+// ---------------------------------------------------------------------
+// rev-2: welcome email template (lib/_welcome_email.js)
+// ---------------------------------------------------------------------
+
+test("rev-2: welcome email renders branded HTML with key, prefix, credits, pip command — key never in a URL", async () => {
+  const record = {
+    session_id: "cs_test_welcome0000000000000000",
+    key: "wk_" + "ab".repeat(24),
+    namespace_prefix: "acme-",
+    credits: 3000,
+    email: "buyer@example.com",
+  };
+  const html = welcome.renderWelcomeEmailHtml(record);
+  assert.ok(html.includes(record.key));
+  assert.ok(html.includes("acme-"));
+  assert.ok(html.includes("3000"));
+  assert.ok(html.includes("Arcaeon"));
+  assert.ok(html.includes("pip install arcaeon-ledger"));
+  assert.ok(html.includes("support@arcaeon.io"));
+  assert.ok(!/href="[^"]*wk_/.test(html)); // house rule: key only in body text
+  assert.ok(!html.includes("<style")); // email clients strip <style>; inline only
+
+  const text = welcome.renderWelcomeEmailText(record);
+  assert.ok(text.includes(record.key));
+  assert.ok(text.includes("acme-"));
+  assert.ok(text.includes("pip install arcaeon-ledger"));
+  assert.ok(!/<[a-z]+[\s>]/.test(text)); // no markup tags (the <YOUR KEY> placeholder is fine)
+  assert.equal(typeof welcome.WELCOME_SUBJECT, "string");
+});
+
+test("rev-2: first mint renders the welcome email through the stub without breaking fulfillment", async () => {
+  // The stub logs instead of sending (no mail mechanism); this proves the
+  // real template renders on the live mint path with a REAL record shape.
+  const logged = [];
+  const origLog = console.log;
+  console.log = (...a) => logged.push(a.join(" "));
+  try {
+    const id = sid();
+    stripe.seed(paidSession({ id, _pack: "mini" }));
+    const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+    assert.equal(res._status, 200);
+  } finally {
+    console.log = origLog;
+  }
+  assert.ok(logged.some((l) => l.includes("welcome-email") && l.includes("B html")));
 });

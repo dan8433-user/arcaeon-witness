@@ -93,11 +93,26 @@ class MockGitHubStore {
 
     if (method === "GET") {
       const rec = map.get(path);
-      if (!rec) return fakeResponse(404, { message: "Not Found" });
-      return fakeResponse(200, {
-        content: Buffer.from(rec.content, "utf-8").toString("base64"),
-        sha: rec.sha,
-      });
+      if (rec) {
+        return fakeResponse(200, {
+          content: Buffer.from(rec.content, "utf-8").toString("base64"),
+          sha: rec.sha,
+        });
+      }
+      // Real GitHub contents API shape: GET on a DIRECTORY path returns an
+      // ARRAY of entries (name/path/sha/type), not a {content} object.
+      // lib/_keys.js listDir() consumes exactly this for prefix validation.
+      const dirPrefix = path.endsWith("/") ? path : `${path}/`;
+      const entries = [];
+      for (const [p, r] of map) {
+        if (!p.startsWith(dirPrefix)) continue;
+        const rest = p.slice(dirPrefix.length);
+        if (rest && !rest.includes("/")) {
+          entries.push({ name: rest, path: p, sha: r.sha, type: "file" });
+        }
+      }
+      if (entries.length) return fakeResponse(200, entries);
+      return fakeResponse(404, { message: "Not Found" });
     }
 
     if (method === "PUT") {

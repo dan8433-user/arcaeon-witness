@@ -36,12 +36,37 @@
 // Storage: see api/_keys.js (private usage repo; fulfillments/<session_id>
 // .json is the create-only session->key binding, keys/<hash>.json is what
 // makes the minted key valid for /api/pin).
+//
+// REV-2 (board item 27, Daniel's design feedback 12288/12291) — the PREFIX
+// PICKER + ceremony restyle:
+//   - HUMANS (HTML): the first visit no longer mints on GET. It renders a
+//     form — session already verified, nothing minted — with an editable
+//     namespace-prefix field pre-suggested from the buyer's email local part
+//     (or customer name). The form POSTs back; the MINT happens on the POST,
+//     after prefix validation (format + two-way-overlap availability, see
+//     lib/_keys.js validatePrefix/prefixConflicts). A bad prefix re-renders
+//     the form with a clear message; nothing is minted until it passes.
+//   - AGENTS (JSON): unchanged shape, no form roundtrip — a JSON request
+//     mints immediately. Optional ?prefix= (or body.prefix) picks a custom
+//     prefix (validated; 400/409 on failure). Without it the buyer's
+//     auto-suggested prefix is used when free, else the random wk-… mint —
+//     the response's `namespace` field IS the chosen prefix either way.
+//   - EXISTING fulfillments re-show the key exactly as before (any method,
+//     either format); the picker only exists at first-time minting, and a
+//     ?prefix= on an already-fulfilled session is ignored.
+//   - Availability is checked against env WITNESS_KEYS prefixes + every
+//     issued-key record. The check-then-mint pair is NOT atomic across two
+//     concurrent first-time buyers racing DIFFERENT sessions (the create-only
+//     CAS only serializes one session); the window is a few hundred ms and
+//     both racers would have had to hand-pick overlapping prefixes inside it.
+//     Accepted as best-effort; revisit if prefix disputes ever actually occur.
 
 "use strict";
 
 const balance = require("../lib/_balance.js");
 const meter = require("../lib/_meter.js");
 const keys = require("../lib/_keys.js");
+const welcome = require("../lib/_welcome_email.js");
 
 const SUPPORT_EMAIL = "support@arcaeon.io";
 const DOCS_URL = process.env.WITNESS_DOCS_URL || "https://arcaeon.io/ai";
@@ -72,21 +97,68 @@ function esc(s) {
     .replace(/"/g, "&quot;");
 }
 
+// Brand (rev-2): dark blue / white / gold, "Arcaeon" wordmark. Palette note:
+// projects/arcaeon_site carries a slate+teal palette with no logo asset; this
+// page uses the founder-decided navy/gold family instead (12288/12291) and
+// borrows only the site's text-wordmark treatment (uppercase, letterspaced).
+// The same tokens live in lib/_welcome_email.js — keep them in step.
 function pageShell(title, inner) {
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>${esc(title)}</title>
 <style>
-body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0d1117;color:#e6edf3;max-width:760px;margin:40px auto;padding:0 20px;line-height:1.5}
-h1{font-size:1.3rem} a{color:#58a6ff}
-.key{font-size:1.15rem;word-break:break-all;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:16px 0}
-pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;overflow-x:auto;font-size:.85rem}
-.muted{color:#8b949e;font-size:.85rem}
-.warn{color:#d29922}
-</style></head><body>${inner}
+:root{--navy-deep:#07172e;--navy:#0b2545;--panel:#0e2c52;--line:#1e4276;--ink:#f4f7fb;--muted:#9db2d0;--gold:#d4af37;--gold-soft:#e8cc74}
+*{box-sizing:border-box}
+body{font-family:ui-sans-serif,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--navy-deep);color:var(--ink);max-width:680px;margin:36px auto;padding:0 20px;line-height:1.6}
+.wordmark{color:var(--gold);font-weight:700;letter-spacing:.28em;text-transform:uppercase;font-size:13px;text-align:center;margin:4px 0 8px}
+.rule{height:1px;border:0;background:linear-gradient(90deg,transparent,var(--gold),transparent);max-width:320px;margin:0 auto 30px}
+h1{font-size:1.35rem;font-weight:650;letter-spacing:-.01em;margin:0 0 12px}
+h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);font-weight:650;margin:28px 0 10px}
+a{color:var(--gold-soft)}
+code,pre,.copybox code,input[name=prefix]{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+pre{background:var(--navy);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto;font-size:.85rem}
+.copybox{display:flex;align-items:center;gap:12px;background:var(--navy);border:1px solid var(--gold);border-radius:10px;padding:14px 16px;margin:14px 0}
+.copybox code{flex:1;word-break:break-all;font-size:1rem}
+button.copy{flex:none;background:var(--gold);color:var(--navy-deep);border:0;border-radius:8px;padding:8px 14px;font-weight:700;font-size:.85rem;cursor:pointer}
+button.copy:hover{background:var(--gold-soft)}
+.card{background:var(--navy);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+label{display:block;font-weight:650;margin:0 0 6px}
+input[name=prefix]{width:100%;background:var(--navy-deep);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:1rem}
+input[name=prefix]:focus{outline:none;border-color:var(--gold)}
+button.mint{display:block;width:100%;margin-top:16px;background:var(--gold);color:var(--navy-deep);border:0;border-radius:8px;padding:12px;font-weight:700;font-size:1rem;cursor:pointer}
+button.mint:hover{background:var(--gold-soft)}
+.muted{color:var(--muted);font-size:.85rem}
+.warn{color:var(--gold-soft)}
+.error{color:#ff9d9d;background:rgba(255,157,157,.08);border:1px solid rgba(255,157,157,.35);border-radius:8px;padding:10px 14px}
+</style></head><body>
+<div class="wordmark">Arcaeon</div>
+<hr class="rule">
+${inner}
 <p class="muted">support: <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> · <a href="${esc(DOCS_URL)}">docs</a></p>
+<script>
+(function(){
+  function fallbackCopy(t){var ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand("copy")}catch(e){}ta.remove()}
+  var btns=document.querySelectorAll("[data-copy-target]");
+  for(var i=0;i<btns.length;i++){(function(btn){
+    btn.addEventListener("click",function(){
+      var el=document.getElementById(btn.getAttribute("data-copy-target"));
+      var text=el?el.textContent:"";
+      var done=function(){btn.textContent="Copied";setTimeout(function(){btn.textContent="Copy"},1600)};
+      if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(text).then(done,function(){fallbackCopy(text);done()})}
+      else{fallbackCopy(text);done()}
+    });
+  })(btns[i])}
+})();
+</script>
 </body></html>`;
+}
+
+// A styled block with a copy button — the key and the pip command each get
+// one ("a key delivery is a little ceremony"). Vanilla-JS clipboard, no deps;
+// the handler lives once in pageShell's script.
+function copyBox(id, text) {
+  return `<div class="copybox"><code id="${esc(id)}">${esc(text)}</code><button type="button" class="copy" data-copy-target="${esc(id)}">Copy</button></div>`;
 }
 
 function errorHtml(title, detail) {
@@ -163,13 +235,23 @@ function resolvePack(session) {
 // revisit IS the recovery path, and the fulfillment record keeps the email so
 // a real sender can backfill welcome mail later.
 // TODO(post-deploy): route through a real sender (e.g. Resend/SES) once mail
-// creds exist as env vars; send {key, namespace, quickstart, docs_url}.
-function sendWelcomeEmailStub(email, sessionId) {
-  console.log(
-    `[fulfill] TODO welcome-email: would send backup key copy to ${email} ` +
-      `for session ${sessionId.slice(0, 24)}… — no mail mechanism wired yet; ` +
-      `buyer recovers via the Stripe receipt URL (this page, idempotent)`
-  );
+// creds exist as env vars. The template is DONE (lib/_welcome_email.js, both
+// HTML and text, rendered here so the render path stays exercised); only the
+// transport is missing.
+function sendWelcomeEmailStub(record, sessionId) {
+  try {
+    const html = welcome.renderWelcomeEmailHtml(record);
+    const text = welcome.renderWelcomeEmailText(record);
+    console.log(
+      `[fulfill] TODO welcome-email: rendered "${welcome.WELCOME_SUBJECT}" ` +
+        `(${html.length}B html / ${text.length}B text) for ${record.email} ` +
+        `session ${sessionId.slice(0, 24)}… — no mail mechanism wired yet; ` +
+        `buyer recovers via the Stripe receipt URL (this page, idempotent)`
+    );
+  } catch (err) {
+    // Best-effort by contract — a template hiccup must never eat the key page.
+    console.error(`[fulfill] welcome-email render failed (non-fatal): ${err.message}`);
+  }
 }
 
 // ---- success pages ----
@@ -180,17 +262,40 @@ function successHtml(record, creditBalance, consentStored) {
     : `<p class="muted"><a href="?session_id=${esc(record.session_id)}&consent=yes">☐ Email me occasional product updates</a> (off unless you click — nothing is sent otherwise)</p>`;
   return pageShell(
     "Your Arcaeon witness key",
-    `<h1>Payment verified — here is your witness key</h1>
-<div class="key" id="key">${esc(record.key)}</div>
+    `<h1>Payment verified — your witness key</h1>
+${copyBox("key", record.key)}
 <p><b>${esc(String(record.credits))} prepaid pins</b> are on your balance (plus the free tier: 100 pins/month). Your key pins any namespace starting with <code>${esc(ns)}</code>.</p>
 <p class="warn">Save this key now. This page re-shows it any time via your Stripe receipt link — treat that link like the key itself.</p>
-<h1>Quickstart</h1>
+<h2>Install the client</h2>
+${copyBox("pip", "pip install arcaeon-ledger")}
+<h2>Quickstart</h2>
 <pre>curl -X POST ${esc(BASE_URL)}/api/pin \\
   -H "Authorization: Bearer &lt;YOUR KEY&gt;" \\
   -H "Content-Type: application/json" \\
   -d '{"namespace":"${esc(ns)}main","rows":1,"chain":"&lt;16-hex head&gt;"}'</pre>
 <p>Verify (public, no key): <code>GET ${esc(BASE_URL)}/api/verify?ns=${esc(ns)}main&amp;rows=1&amp;chain=…</code> · balance: <code>GET /api/balance</code> with your key.</p>
 ${consentLine}`
+  );
+}
+
+// The first-visit picker (HTML only; session verified, NOTHING minted yet).
+// The form POSTs back to this same endpoint; mint happens on the POST.
+function pickerHtml(sid, pack, packDef, prefill, errorMsg) {
+  const errorBlock = errorMsg ? `<p class="error">${esc(errorMsg)}</p>` : "";
+  return pageShell(
+    "Choose your namespace prefix",
+    `<h1>Payment verified — one choice before your key is minted</h1>
+<p>Your <b>${esc(pack)}</b> pack is paid: <b>${esc(String(packDef.pins))} prepaid pins</b> are waiting. Pick the namespace prefix your key will pin under — every namespace you witness will start with it.</p>
+${errorBlock}
+<form method="post" class="card">
+  <input type="hidden" name="session_id" value="${esc(sid)}">
+  <label for="prefix">Namespace prefix</label>
+  <input type="text" id="prefix" name="prefix" value="${esc(prefill)}" spellcheck="false" autocomplete="off" autocapitalize="none" maxlength="48">
+  <p class="muted">Lowercase letters, digits, and dashes; must end in a dash (e.g. <code>${esc(prefill)}</code> → namespaces like <code>${esc(prefill)}main</code>). It cannot be changed after minting.</p>
+  <label class="muted" style="font-weight:400"><input type="checkbox" name="consent" value="yes"> Email me occasional product updates (off by default — nothing is sent unless you tick this)</label>
+  <button type="submit" class="mint">Mint my witness key</button>
+</form>
+<p class="muted">The suggested prefix works as-is — just mint. Agents: request with <code>Accept: application/json</code> (optionally <code>?prefix=</code>) to mint without this form.</p>`
   );
 }
 
@@ -360,8 +465,82 @@ module.exports = async (req, res) => {
     const cur = await keys.readFulfillment(sid);
     let record;
     if (cur) {
+      // Already fulfilled: re-show as always. The prefix picker exists ONLY
+      // at first-time minting — a ?prefix= here is deliberately ignored.
       record = cur.json;
     } else {
+      // FIRST-TIME MINT — rev-2 prefix picker (see header).
+      const rawPrefix = q.prefix !== undefined ? q.prefix : body.prefix;
+      const prefixProvided = rawPrefix !== undefined && rawPrefix !== null;
+      const buyerEmail =
+        (session.customer_details && session.customer_details.email) ||
+        session.customer_email ||
+        null;
+      const buyerName =
+        (session.customer_details && session.customer_details.name) || null;
+      const suggestion = keys.suggestPrefix(buyerEmail, buyerName);
+      const isJson = wantsJson(req);
+
+      if (!isJson && !prefixProvided) {
+        // Human first visit: render the picker form — verified, NOT minted.
+        // (Render is kept cheap: no availability round-trip here; the POST
+        // validates and re-renders with a clear message if the pick is taken.)
+        const prefill = suggestion || keys.mintNamespacePrefix();
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        return res.status(200).send(pickerHtml(sid, pack, packDef, prefill, null));
+      }
+
+      let nsPrefix = null;
+      let prefixSource = null;
+      if (prefixProvided) {
+        // Explicit choice (form POST or ?prefix=): validate strictly — an
+        // explicit pick that fails is an ERROR, never a silent fallback.
+        const chosen = String(rawPrefix).trim().toLowerCase(); // H3 normalization
+        const v = keys.validatePrefix(chosen);
+        if (!v.ok) {
+          if (isJson) {
+            return res.status(400).json({ error: `invalid prefix: ${v.detail}`, reason: "bad_prefix" });
+          }
+          res.setHeader("content-type", "text/html; charset=utf-8");
+          return res.status(400).send(pickerHtml(
+            sid, pack, packDef,
+            chosen || suggestion || keys.mintNamespacePrefix(),
+            `That prefix can't be used: ${v.detail}.`));
+        }
+        const existing = await keys.listPrefixes();
+        if (keys.prefixConflicts(chosen, existing)) {
+          // Which prefix collided is never echoed — it belongs to someone else.
+          if (isJson) {
+            return res.status(409).json({
+              error: "prefix is taken or overlaps an existing prefix (in either direction) — pick another",
+              reason: "prefix_taken",
+            });
+          }
+          res.setHeader("content-type", "text/html; charset=utf-8");
+          return res.status(409).send(pickerHtml(
+            sid, pack, packDef, chosen,
+            "That prefix is taken — it matches, contains, or is contained by an existing prefix. Pick another."));
+        }
+        nsPrefix = chosen;
+        prefixSource = "custom";
+      } else {
+        // JSON with no prefix param (the no-form agent path): use the
+        // auto-suggested prefix when it is free, else fall back to the random
+        // wk-… mint. This path must never FAIL on availability — only fall
+        // back — so the pre-picker JSON contract (request in, key out) holds.
+        if (suggestion) {
+          const existing = await keys.listPrefixes();
+          if (!keys.prefixConflicts(suggestion, existing)) {
+            nsPrefix = suggestion;
+            prefixSource = "suggested";
+          }
+        }
+        if (!nsPrefix) {
+          nsPrefix = keys.mintNamespacePrefix();
+          prefixSource = "random";
+        }
+      }
+
       const key = keys.mintKey();
       record = {
         session_id: sid,
@@ -370,7 +549,8 @@ module.exports = async (req, res) => {
         // fulfillments/ paragraph in api/_keys.js for the reasoning.
         key,
         key_hash: keys.keyHash(key),
-        namespace_prefix: keys.mintNamespacePrefix(),
+        namespace_prefix: nsPrefix,
+        prefix_source: prefixSource, // "custom" | "suggested" | "random"
         pack,
         pack_source: resolved.source,
         credits: packDef.pins,
@@ -379,10 +559,7 @@ module.exports = async (req, res) => {
         // a solo pool the pool's credit account IS this key's hash.
         pool_id: keys.mintPoolId(),
         org: null,
-        email:
-          (session.customer_details && session.customer_details.email) ||
-          session.customer_email ||
-          null,
+        email: buyerEmail,
         consent_product_updates: false, // default UNCHECKED, always
         livemode: session.livemode === true,
         amount_total: paidCents,
@@ -446,15 +623,16 @@ module.exports = async (req, res) => {
     }
 
     // Email backup copy — stub (no mail mechanism in this app; see above).
-    if (firstVisit && record.email) sendWelcomeEmailStub(record.email, sid);
+    if (firstVisit && record.email) sendWelcomeEmailStub(record, sid);
 
     const jsonBody = {
       ok: true,
       mode: "new_key",
       key: record.key,
       credits: record.credits,
-      namespace: record.namespace_prefix, // pin any namespace starting with this
+      namespace: record.namespace_prefix, // pin any namespace starting with this — the CHOSEN prefix
       namespace_example: `${record.namespace_prefix}main`,
+      prefix_source: record.prefix_source || null, // "custom" | "suggested" | "random" (null on pre-rev-2 records)
       docs_url: DOCS_URL,
       pack: record.pack,
       pool_id: record.pool_id,
