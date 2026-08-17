@@ -4,6 +4,44 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-17 — Balance page: a human face on `/api/balance` via content negotiation; `lib/_page.js` extracted
+
+**COMMITTED LOCALLY ONLY — not deployed, no Vercel config touched.** Founder
+design 34378: every issued key needs an automated, easy way to see pins/
+credits remaining — humans AND agents, no login, no accounts, no PII; the key
+IS the identity. `api/` sits at Vercel Hobby's 12-function hard cap, so the
+page rides the EXISTING `/api/balance` function via content negotiation, the
+`api/fulfill.js` pattern. `npm test` green: 93 -> 104 (11 new,
+`test/balance_endpoint.test.js`).
+
+**1. New `lib/_page.js` — the shared page template.** `pageShell` / `copyBox`
+/ `esc` / `wantsJson` moved VERBATIM out of `api/fulfill.js` (lib/ doesn't
+count toward the function cap); fulfill now imports them, zero behavior
+change to its pages (its own suite still passes untouched). One deliberate
+delta: the input CSS selectors gained `input[name=key]` alongside
+`input[name=prefix]` — additive only, no fulfill page has a key input. Env
+URLs read at call time (the `_welcome_email.js` idiom).
+
+**2. `api/balance.js` grows an HTML mode — JSON contract UNCHANGED.** HTML
+is strictly OPT-IN by the browser's own `Accept: text/html`; the JSON
+default (including a bare curl's `Accept: */*` and headerless SDK fetches)
+takes exactly the pre-page code path — same fields, same Bearer auth, same
+errors, pinned by an exact-field regression test. Browser GET without a key:
+paste-your-key form, `type=password` (no shoulder-surfing), submits by POST
+so the key never lands in any URL or access-log query string (house rule).
+POST with a valid key: credits remaining, free-tier used/remaining, prefix,
+key id, plus a curl one-liner copy-box teaching the agent path (placeholder,
+never the real key — the key is never echoed into any response, success or
+error). Invalid key: the form again, clean inline error, no echo.
+Remember-my-key checkbox: default OFF, localStorage only, client-side only.
+
+**3. Links to the page.** `/api/fulfill` success page and the welcome email
+(HTML + text) each gained one line under the balance sentence: check your
+balance any time at `<base>/api/balance` — a bare link, carries nothing.
+`vercel.json` gained a friendly `/balance -> /api/balance` rewrite, mirroring
+the established `/status` pattern (the form posts to `action=""` so it works
+at both paths).
+
 ## 2026-08-17 — Instant fulfillment: `/api/fulfill` (Stripe session -> key + credits) and the dynamic issued-key store
 
 **STAGED ONLY — working tree, not committed, not deployed. No Stripe config

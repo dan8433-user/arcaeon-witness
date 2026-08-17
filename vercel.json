@@ -9,6 +9,10 @@
       "destination": "/api/status"
     },
     {
+      "source": "/balance",
+      "destination": "/api/balance"
+    },
+    {
       "source": "/api/status.json",
       "destination": "/api/status?format=json"
     }
