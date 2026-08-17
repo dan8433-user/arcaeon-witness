@@ -15,6 +15,7 @@
 "use strict";
 
 const store = require("./_store.js");
+const cors = require("./_cors.js");
 const { gatherStatusData, humanDuration, BLOB, TREE, REPO_URL } = require("./_status_data.js");
 
 function esc(s) {
@@ -38,11 +39,15 @@ function statusBadge(status, overdueSeconds) {
 }
 
 module.exports = async (req, res) => {
+  // GET-only CORS: answers an OPTIONS preflight with 204 and returns. See
+  // _cors.js for scope (read endpoints only).
+  if (cors.applyGetCors(req, res)) return;
+
   // This page is a read. It had no method guard at all, so POST/PUT/DELETE
   // /status each rendered the full page and fired the whole GitHub fan-out
   // behind it — matching the guard the other read endpoints already carry.
   if (req.method !== "GET" && req.method !== "HEAD") {
-    res.setHeader("allow", "GET, HEAD");
+    res.setHeader("allow", "GET, HEAD, OPTIONS");
     return res.status(405).json({ error: "GET or HEAD only" });
   }
 
@@ -52,6 +57,7 @@ module.exports = async (req, res) => {
     obsCount, obsSample, obsErr,
     anchor, anchorErr,
     overdueCount, currentCount, heartbeatCount, ungradeableCount, missedEverCount,
+    retiredCount, retiredNamespaces,
     degraded, indeterminate, overallOk,
     namespaces,
   } = await gatherStatusData();
@@ -78,13 +84,26 @@ module.exports = async (req, res) => {
         const heartbeatDetail = r.heartbeat
           ? `<div class="muted-sm">publisher heartbeat &mdash; head unchanged${unchangedFor ? ` for ${esc(unchangedFor)}` : ""}${r.renewalsSinceAdvance ? `, ${esc(r.renewalsSinceAdvance)} renewal${r.renewalsSinceAdvance === 1 ? "" : "s"} since the last advance` : ""}</div>`
           : "";
-        return `<tr${r.gradeable === false ? ' class="row-ungradeable"' : ""}>
+        // Retirement is a display-and-verdict tag, never a hide: the row
+        // still shows its real underlying status badge (an honest reader can
+        // see it really is "overdue" by cadence math) plus a plain grey
+        // "retired" tag explaining why that badge no longer counts toward
+        // the page's overall verdict. See _status_data.js's
+        // loadRetiredNamespaces() comment for the reasoning.
+        const retiredFlag = r.retired
+          ? `<div class="badge badge-grey" title="excluded from the health verdict via WITNESS_RETIRED_NS — still listed, not hidden">retired</div>`
+          : "";
+        const rowClasses = [
+          r.gradeable === false ? "row-ungradeable" : null,
+          r.retired ? "row-retired" : null,
+        ].filter(Boolean).join(" ");
+        return `<tr${rowClasses ? ` class="${rowClasses}"` : ""}>
           <td><code>${esc(r.ns)}</code> <a class="src" href="${esc(r.historyUrl)}" title="commit history for this namespace">history</a></td>
           <td><a href="${esc(r.recordUrl)}" title="raw witnessed record on GitHub"><code>${esc(shortChain)}</code></a></td>
           <td>${r.rowsWitnessed != null ? esc(r.rowsWitnessed) : "&mdash;"}</td>
           <td><time datetime="${esc(r.pinnedAt || "")}">${esc(r.pinnedAt || "unknown")}</time></td>
           <td>${r.nextDueBy ? `<time datetime="${esc(r.nextDueBy)}">${esc(r.nextDueBy)}</time>` : "<em>none declared &mdash; nothing to grade</em>"}</td>
-          <td>${statusBadge(r.status, r.overdueSeconds)}${heartbeatDetail}${
+          <td>${statusBadge(r.status, r.overdueSeconds)}${retiredFlag}${heartbeatDetail}${
             r.gradeable === false
               ? `<div class="muted-sm">predates the cadence field &mdash; this row is <strong>not</strong> a pass; <code>cadence_gradeable:false</code> in the API</div>`
               : ""
@@ -181,6 +200,12 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     background:repeating-linear-gradient(135deg,var(--amber-bg),var(--amber-bg) 7px,transparent 7px,transparent 14px);
   }
   tr.row-ungradeable td:first-child{border-left:4px solid var(--amber-line)}
+  /* Retired rows keep their real status badge (nothing is hidden) but read
+     visually quieter than a live row — dimmed, not hatched, so it reads
+     "out of scope for the verdict" rather than "problem" the way the
+     ungradeable amber hatch does. */
+  tr.row-retired{opacity:.55}
+  tr.row-retired td:first-child{border-left:4px solid var(--grey-ink)}
   .muted-sm{color:var(--muted);font-size:.78rem;margin-top:.25rem;max-width:22rem}
   .flag-missed{
     margin-top:.3rem;font-size:.75rem;font-weight:600;color:var(--red-ink);
@@ -234,9 +259,11 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
       <div class="stat"><span class="n" style="${ungradeableCount ? "color:var(--amber-ink)" : ""}">${ungradeableCount}</span><span class="l">not gradeable</span></div>
       <div class="stat"><span class="n">${missedEverCount}</span><span class="l">ever missed a deadline</span></div>
       <div class="stat"><span class="n">${obsCount}</span><span class="l">conflicts observed</span></div>
+      ${retiredCount ? `<div class="stat"><span class="n">${retiredCount}</span><span class="l">retired (excluded from verdict)</span></div>` : ""}
     </div>
     ${healthErr ? `<p class="muted">health check error: ${esc(healthErr)}</p>` : ""}
     ${ungradeableCount ? `<p class="muted"><strong>${ungradeableCount} namespace${ungradeableCount === 1 ? " is" : "s are"} not gradeable</strong> &mdash; ${ungradeableCount === 1 ? "its latest record predates" : "their latest records predate"} the cadence field, so no deadline was ever declared and none is being invented now. That is <em>cannot determine</em>, not <em>pass</em>: the API returns <code>cadence_gradeable:false</code> and any consumer gating on cadence must apply its own not-determined policy. ${ungradeableCount === 1 ? "It becomes" : "They become"} gradeable again on the next pin or renewal &mdash; forward only, never retroactively.</p>` : ""}
+    ${retiredCount ? `<p class="muted"><strong>${retiredCount} namespace${retiredCount === 1 ? " is" : "s are"} retired</strong> (<code>${esc(retiredNamespaces.join(", "))}</code>) &mdash; excluded from the overdue/current/gradeable counts above and from the overall OK/DEGRADED verdict, but still listed in the table below with their real status and a <span class="badge badge-grey">retired</span> tag. Nothing is deleted or hidden; set via <code>WITNESS_RETIRED_NS</code>, reversible by removing the name.</p>` : ""}
     ${missedEverCount ? `<p class="muted"><strong>${missedEverCount} namespace${missedEverCount === 1 ? " has" : "s have"} missed a deadline at some point.</strong> A renewal refreshes the deadline; it never erases the miss. The missed window stays in the record permanently and is shown below even for namespaces that are healthy again.</p>` : ""}
   </div>
 

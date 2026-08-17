@@ -4,10 +4,271 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-17 — Instant fulfillment: `/api/fulfill` (Stripe session -> key + credits) and the dynamic issued-key store
+
+**STAGED ONLY — working tree, not committed, not deployed. No Stripe config
+touched, no secrets in code.** Board item 25 (founder-specced, msgs
+12252-12263): the self-serve gap named in
+`RESEARCH_WAVE_MCP_WRAPPER_2026-08-16.md` §8 — "there is no self-serve way
+for a stranger to get a witness key" — now has a mechanism. `npm test`
+green: 61 -> 79 (18 new, `test/fulfill.test.js`, Stripe API fully mocked).
+
+**1. New `api/fulfill.js` — GET/POST `/api/fulfill?session_id=...`.** The
+Checkout success/receipt page. Verifies the session SERVER-side
+(`GET api.stripe.com/v1/checkout/sessions/{id}?expand[]=line_items`, secret
+key from env; must be `status:complete` + `payment_status:paid`; livemode
+gate + the webhook's H1 amount-vs-pack cross-check carried over). First
+valid visit mints `wk_` key + namespace prefix + solo pool and credits the
+pack; every revisit re-shows the SAME key (create-only session binding =
+the idempotency gate; the recovery path via Stripe's receipt email). Faked,
+unpaid, wrong-mode, or amount-mismatched sessions get typed denials — never
+a key. Dual response: HTML for humans (key big, quickstart, support line,
+one-line consent link — default unchecked, stored on the record), JSON
+(`{key, credits, namespace, docs_url, ...}`) on `Accept: application/json`
+or `?format=json` for agent buyers. Credit idempotency key is the SESSION
+id — the same key `stripe-webhook.js` uses — so page and webhook can never
+double-credit one purchase between them. A session carrying
+`client_reference_id = sha256(existing key)` (the webhook top-up
+convention) credits that key and mints nothing. Welcome email is an honest
+STUB (`console.log` + TODO): this app has no mail mechanism and wiring
+creds was out of scope; the receipt-URL revisit is the recovery path
+meanwhile.
+
+**2. New `api/_keys.js` — the dynamic issued-key store.** Keys previously
+existed only as hand-edited `WITNESS_KEYS` env pairs, which a serverless
+function cannot append to — so self-serve required a real store. Same
+primitive as `_meter.js`/`_balance.js` on purpose: JSON files in the
+PRIVATE usage repo, contents-API CAS. `keys/<sha256(key)>.json` (prefix,
+plan, org, pool_id), `fulfillments/<session_id>.json` (binding; stores the
+raw key so revisits can re-show it — the session URL is already a bearer of
+the key by product design), `pools/<pool_id>.json` (org/pool schema baked
+in now, UI later: solo pool's credit account IS the key's own balance file,
+so the live billing path is unchanged; team flow — N keys drawing one pool
+— is commented, not built).
+
+**3. `api/pin.js` + `api/balance.js` — two-tier auth.** Env `WITNESS_KEYS`
+lookup first (free, unchanged for every existing key), then the issued-key
+store on a miss. Store failure is 502, never 401 — "couldn't check" must
+not read as "your key is invalid" to a paying customer. Without this edit a
+minted key would have been a dud — exactly the funnel dead-end §8 warned
+converts curiosity into a bad first impression.
+
+**Deploy needs (env, names only):** `WITNESS_STRIPE_SECRET_KEY` (falls back
+to `STRIPE_SECRET_KEY`; a wrong-account key fails closed as a 404 denial,
+unlike the webhook-secret case), optional `WITNESS_STRIPE_PRICE_MAP` (JSON
+price-id -> pack; preferred mapping, with metadata.pack then exact
+amount_total as fallbacks), existing `GITHUB_PIN_TOKEN` /
+`GITHUB_USAGE_REPO` / `WITNESS_STRIPE_LIVEMODE`, optional
+`WITNESS_DOCS_URL` / `WITNESS_BASE_URL`. Stripe-side human step: point each
+Payment Link's success URL at
+`/api/fulfill?session_id={CHECKOUT_SESSION_ID}`.
+
+## 2026-08-16 — Quad-check remediation: H2 (async payments), H4 (false wedge on first pin), and three undocumented entries this file owed
+
+**Not deployed in this commit — build + local-verify only, per instruction;
+the CEO deploys.** Fixes `QUAD_CHECK_MONEY_PATH_2026-08-16.md`'s two remaining
+open HIGH findings against `arcaeon-witness`, plus the doc-drift the same
+report flagged. `npm test` green throughout: 57 -> 61 (four new regressions,
+one per finding below; H1 and H3's regressions were already in the 57).
+
+**1. H2 — async payment methods (ACH, Klarna) collected money and got
+credited nothing.** `stripe-webhook.js` discarded every
+`checkout.session.async_payment_succeeded` event as "unhandled event type,"
+even though the payment-gate comment two screens up promised "the real
+credit arrives later on the async success event" — that promise was never
+implemented. A buyer paying by ACH got a `200` on both the initial
+`checkout.session.completed` (correctly skipped, `payment_status:"unpaid"`)
+and the later `async_payment_succeeded` delivery (incorrectly discarded),
+with no retry and no record anywhere. Fixed: `CREDITING_TYPES` now covers
+both event types; `checkout.session.async_payment_failed` gets a
+`console.error` and a typed skip (nothing to credit, but a failed clear is
+now visible instead of a silent nothing).
+
+**The subtler half, traced mechanically rather than assumed:** does
+subscribing to a second event type reopen the double-credit bug this repo
+spent all weekend closing? Idempotency lived in `applied_events`, keyed on
+`event.id` — and `checkout.session.completed` and
+`checkout.session.async_payment_succeeded` are, by definition, two different
+events with two different ids. Checked against Stripe's own fulfillment
+guidance (`docs.stripe.com/checkout/fulfillment`) rather than reasoned about
+in isolation: *"your `fulfill_checkout` function might be called multiple
+times, possibly concurrently, for the same Checkout Session"* — Stripe's own
+reference handler dedupes on the **Checkout Session id**, not the event id,
+specifically because more than one event can carry a paid signal for one
+real purchase. This repo's own flow mostly forecloses the two-events-both-
+paid case today (an async method's `completed` delivery arrives `unpaid` and
+returns before crediting ever runs), but keying on `event.id` alone left a
+real gap the moment `completed` is redelivered already-paid, or a future
+change widens which event types are subscribed. Fixed the same way Stripe's
+own docs fix it: the idempotency key passed to `creditPack` is now the
+Checkout **Session** id when the webhook has one (falls back to `event.id`
+if a session somehow lacks one — real Checkout Sessions always have one).
+`api/credit.js`'s admin path is unaffected — it has no session, and keeps
+keying on its caller-supplied `event_id`, unchanged.
+
+**Test:** `test/stripe_webhook.test.js` — an unpaid `completed` followed by a
+paid `async_payment_succeeded` for the same session credits the pack exactly
+once (previously: zero, ever); `async_payment_failed` skips and logs, credits
+nothing; two DIFFERENT event ids (`checkout.session.completed` paid +
+`checkout.session.async_payment_succeeded` paid) for the SAME session id
+credit exactly once, not twice. All three fail against the pre-fix code
+(verified by re-running against a stashed copy of the unfixed file) and pass
+against the fix.
+
+**2. H4 — a namespace's first pin could race into a false "wedged, reconcile
+by hand," and get charged for it.** `pin.js`'s `verifyOrphanSuccessor` opened
+`if (!orphan || typeof orphan !== "object" || !cur) return false;` — on a
+namespace's first-ever pin, `cur` (the `latest.json` read) is legitimately
+`null`, and the old guard treated that as unverifiable rather than as the
+implicit "nothing pinned yet" predecessor it actually is. Two concurrent
+first pins on a brand-new namespace: the winner writes a completely healthy
+`latest.json` at seq 1; the loser's self-heal retry tries to adopt that exact
+record, fails to verify it purely because `cur` was `null`, and returns
+`409 orphaned_seq_record` — "namespace is wedged... compare files by hand in
+a public GitHub repo" — on a namespace that was never wedged, after already
+being billed a meter/credit count for the attempt. Highest-severity pin-side
+finding precisely because a retrying client is the normal way to hit it, on
+the very first interaction a new customer has.
+
+Fixed: `verifyOrphanSuccessor` now treats a `null cur` as the implicit
+`{seq: 0}` predecessor rather than refusing to verify against it — every
+check in the function already degrades correctly against that shape
+(`expectedSeq` resolves to 1, there's no `prev.rows` to violate monotonicity
+against, and a genuine first record's newest interval carries
+`supersedes_due_by: null`, exactly what `prevDue` resolves to here).
+
+**Test:** `test/pin.test.js` — two real concurrent first pins (`Promise.all`,
+no forced conflicts; the mock store's own create-race 422 on the loser's
+seq-record write is what triggers the self-heal path) now both succeed (one
+`201` content-advance, one `200` self-healed idempotent no-op), never a false
+wedge, and `latest.json` settles at seq 1. Verified against a stashed copy of
+the unfixed line: same repro produces the false `409 orphaned_seq_record` and
+a spent meter count on a namespace that was never wedged.
+
+**3. Three items this file owed and never paid, found by the same
+quad-check pass.** None of these are code changes; all are the operator-
+facing surface H1 and H3 exist to protect.
+- **The mini pack had no changelog entry.** `PACKS.mini` ($5/1,000 pins, the
+  CEO's kill-the-$15-wall ruling) shipped into `_balance.js` and is covered
+  by `test/balance.test.js`, but this file's most recent entries before today
+  never mentioned it — the same silence the quad-check named as the real risk
+  multiplier for H1 (a fourth pack means a fourth hand-wired Payment Link,
+  made by duplicating the third one).
+- **The H1 fix (money-verify) had no changelog entry.** `stripe-webhook.js`
+  now cross-checks `amount_total`/`currency` against the declared pack's
+  ratified price before crediting — closing the "a signed $5 event with
+  `pack=bulk` credits 40,000 pins" hole — and normalizes the pack id and
+  `client_reference_id` hash before lookup (H3: `"Mini"` / `" mini"` /
+  uppercase hex used to silently no-op-credit a paid session). Both are live
+  in `stripe-webhook.js` and covered by `test/stripe_webhook.test.js`'s H1/H3
+  REGRESSION tests, and neither ever got a line here.
+- **The `node:test` harness itself had no changelog entry.** 57 tests before
+  today's two additions, zero external dependencies, `test/helpers/mock_store.js`
+  faking the GitHub contents API's CAS contract in memory — covered in
+  README's own "Testing" section but never announced in this file, which is
+  where a reader checking "is this repo tested" would look first.
+
+**4. README correction, same pass.** `README.md`'s credit-balance section
+described idempotency as a **retired** mechanism (a separate ledger
+`applied:true` flag, checked before the balance write) — that was replaced
+2026-08-14 by the `applied_events` in-balance-file CAS this changelog's own
+2026-08-14 entries document, and the README paragraph was never updated to
+match, so the README contradicted the code it was describing. Corrected in
+place, plus `mini` added to both the pack-id wiring instructions
+(`README.md`, `stripe-webhook.js`'s own header comment) and the pack-size
+list — both previously read `starter`/`standard`/`bulk` only, the exact
+byte-exact-typo shape H3 exists to punish, on the one document a human
+actually reads while wiring a new SKU's Payment Link.
+
+**Local verification (no deploy):** `npm test` — 61/61 green
+(`test/*.test.js`), including the four new regressions above. `node --check`
+clean on `api/pin.js` and `api/stripe-webhook.js`. No version bump —
+`api/_balance.js` `PACKS`, `applied_events`'s on-disk shape, and every
+response contract are unchanged; the money-path guard and the wedge-repair
+guard both tighten an existing decision path without adding a field, a route,
+or a schema.
+
+## 2026-08-16 — Ops batch: rate limit on `/api/verify`, GET-CORS on read endpoints, retired-namespace list, CHANGELOG deploy-note corrections
+
+**Not deployed in this commit — build + local-verify only, per instruction;
+the CEO deploys.** All four items below are code + local verification; none
+have been pushed live.
+
+**1. Per-IP rate limit on `/api/verify`.** New `api/_ratelimit.js`: a naive
+in-memory `Map<ip, {windowStart, count}>`, same shape as `api/pin.js`'s
+existing per-key limiter (Stage-0, per-instance, resets on cold start).
+`/api/verify` has no auth by design (board item 20 — no key needed just to
+ask "does this exist?"), so there's no key to bucket on; IP via
+`x-forwarded-for` (leftmost hop) is the only available identity, with a
+`socket.remoteAddress` fallback. ~30 calls/IP/10min; the 31st gets `429` with
+an honest JSON body (explicitly says this is a per-instance, not a global,
+cap) and a `Retry-After` header. Documented, not hidden: a distributed burst
+across multiple warm Vercel instances gets multiple independent buckets —
+real protection against one hot loop, not a guaranteed global ceiling.
+Applied only to `/api/verify` (the read path named for this fix); write
+endpoints are untouched.
+
+**2. GET-only CORS on `verify.js`, `status.js`, `health.js`.** New
+`api/_cors.js`: `Access-Control-Allow-Origin: *` on every GET/HEAD response,
+`OPTIONS` answered `204` with the full preflight header set. Scoped
+deliberately to these three read endpoints — they leak nothing beyond what
+the public pin repo already shows a stranger who clones it. Never applied to
+write endpoints (`pin.js`, `renew.js`, `credit.js`, `balance.js`,
+`distill.js`, `stripe-webhook.js`), which stay Authorization-bearer-gated and
+outside this helper's import graph entirely, on purpose.
+
+**3. `WITNESS_RETIRED_NS` — a honest way to stop grading a namespace without
+hiding it.** Two demo/self-test namespaces (`velouria-cadence-verify`,
+`velouria-canon`, both carrying `deadbeef`-style placeholder chains) have sat
+permanently `overdue` in production, painting the whole public badge red for
+a problem that isn't one — nobody is renewing a demo namespace on purpose.
+`api/_status_data.js` now reads a comma-separated `WITNESS_RETIRED_NS` env
+var and excludes any matching namespace from the counts that drive the
+verdict (`overdueCount`, `currentCount`, `ungradeableCount`,
+`missedEverCount`, and therefore `degraded`/`indeterminate`/`overallOk`) —
+but the namespace's row stays in `rows`/`namespaces` exactly as before, now
+carrying `retired:true` and its real (still-overdue) status. `status.js`
+renders it dimmed with a grey "retired" badge and a summary paragraph naming
+which namespaces and why; `status.json.js` carries `retired` per-namespace
+and `summary.retired` / `summary.retired_namespaces`; `badge.js` needed no
+code change — it already reads the (now-corrected) counts. Reversible:
+removing a name from the env var makes it gradeable again on its next read,
+forward-only, nothing backfilled.
+
+**4. CHANGELOG deploy-note corrections.** The 2026-08-15 `/api/distill` and
+"Two public promises paid" entries both still read "Not deployed in this
+commit" — true when written, stale now. Confirmed live via `OPTIONS
+/api/distill` answering `405` from production (route exists) rather than
+`404` (route absent). Corrected in place with a dated note rather than
+silently rewritten, so the record shows what was true at authoring time.
+
+**Local verification (no deploy):** `node --check` clean on all five
+changed/new files (`_ratelimit.js`, `_cors.js`, `verify.js`, `status.js`,
+`health.js`, `_status_data.js`, `status.json.js`). Stub-invocation harness
+(not committed) ran the ACTUAL handler functions against a mocked
+`global.fetch` standing in for the GitHub contents API: `verify.js` OPTIONS
+-> 204 with the ACAO header; a normal GET -> 200 witnessed with ACAO set;
+31 GETs from one IP -> the 31st gets 429 with `Retry-After` and an honest
+per-instance-limited body; a second IP is unaffected. `_status_data.js`
+reproduced the live bug first (fabricated the same two overdue demo
+namespaces -> `degraded:true`, matching the real red badge), then re-ran the
+identical code path with `WITNESS_RETIRED_NS` set -> `degraded:false`,
+`overallOk:true`, both namespaces still present in `rows`/`namespaces` with
+`retired:true` and their real `overdue` status intact, `retiredCount:2`.
+`status.json.js` and `status.js`'s real handlers, invoked against that same
+data, rendered the `retired` field and the grey tag/summary paragraph
+respectively. `badge.js`, invoked against a single healthy fixture namespace,
+returned `color:"green"`, `message` starting `"ok"`. All checks passed.
+
 ## 2026-08-15 — `POST /api/distill`: hosted try-before-pip demo for arcaeon-distill
 
-**Not deployed in this commit** — ships in the morning batch with live
-verification, same discipline as the entry below.
+**Deployed and live** — shipped in the normal morning batch with live
+verification (`OPTIONS /api/distill` answers `405` from production, i.e. the
+route exists and is being served — a 404 would mean not deployed). *Correction,
+2026-08-16: this entry originally read "Not deployed in this commit — ships in
+the morning batch," written before that batch ran. It ran; the note was never
+updated after. Left here so the record shows what was true when written, not
+edited to look prescient.*
 
 New metered endpoint (`api/distill.js` + `api/_distill_core.js`) so an agent
 can try arcaeon-distill's deterministic tool-output compaction over HTTP with
@@ -75,8 +336,14 @@ round-trip as strings, not numbers, in the JSON response.
 Both halves of the reviewer debt that 4606d62 only half-paid. Nothing on the
 payment/credit path was touched (`api/stripe-webhook.js` and `_balance.js` are
 byte-identical), no stored pin changed shape, and the conflict-observation log
-and monotonic guard are untouched. **Not deployed in this commit** — it ships in
-the morning batch with a live pin-write verification after.
+and monotonic guard are untouched. **Deployed and live** — shipped in the
+normal morning batch. *Correction, 2026-08-16: this entry originally read "Not
+deployed in this commit — it ships in the morning batch," written before that
+batch ran; it ran, and the note was never updated after. Live confirmation:
+`pins/velouria-demo` and `pins/velouria-selftest` are still `legacy_no_deadline`
+on production as of this correction — expected, since the arm-on-bare-repin
+fix only fires on a namespace's NEXT re-pin, and neither has re-pinned since
+this shipped; the code is live, it just hasn't had a trigger yet.*
 
 **1. `legacy_no_deadline` now has an exit (owed to atomic-raven).** Their
 objection was *"a warning that cannot refuse is telemetry, not a control."*

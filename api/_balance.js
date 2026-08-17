@@ -85,6 +85,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // charge once wired) -- this module never talks to Stripe about price,
 // only about which pack id maps to how many pins.
 const PACKS = Object.freeze({
+  mini: Object.freeze({ price_usd: 5, pins: 1000 }),      // entry SKU (CEO ruling 2026-08-16: kills the $15 wall; same $0.005/pin)
   starter: Object.freeze({ price_usd: 15, pins: 3000 }),
   standard: Object.freeze({ price_usd: 50, pins: 12000 }),
   bulk: Object.freeze({ price_usd: 150, pins: 40000 }),
@@ -235,7 +236,15 @@ async function decrementCredit(secret, reason) {
     const seq = cur && Number.isInteger(cur.json.seq) ? cur.json.seq + 1 : 1;
     const next = bal - 1;
     const nowIso = new Date().toISOString();
-    const obj = { key_id: hash.slice(0, 12), key_hash: hash, balance: next, seq, updated_at: nowIso };
+    // CARRY applied_events THROUGH THE REBUILD (fix 2026-08-16, found by the
+    // overhaul scrutiny pass): this object literal previously dropped the
+    // applied Stripe event-id set, so ANY spend wiped the double-credit
+    // idempotency guard — a Stripe retry after one spend re-granted the full
+    // pack ($15 bought 5,999 pins in the mechanical replay) while the grant
+    // ledger silently disagreed with the balance. Spread the prior record's
+    // set forward; grantCredit at :320 stays the only place that ADDS to it.
+    const appliedEvents = (cur && Array.isArray(cur.json.applied_events)) ? cur.json.applied_events : [];
+    const obj = { key_id: hash.slice(0, 12), key_hash: hash, balance: next, seq, updated_at: nowIso, applied_events: appliedEvents };
 
     try {
       await putFile(path, obj, `credit decrement ${hash.slice(0, 12)} seq=${seq} balance=${next}`, cur ? cur.sha : undefined);

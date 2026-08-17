@@ -33,6 +33,7 @@ module.exports = async (req, res) => {
     }
     return {
       namespace: r.ns,
+      retired: r.retired === true,
       rows: r.rowsWitnessed,
       chain: r.chain,
       pinned_at: r.pinnedAt,
@@ -70,6 +71,12 @@ module.exports = async (req, res) => {
       not_gradeable: data.ungradeableCount,
       ever_missed_deadline: data.missedEverCount,
       conflicts_observed: data.obsCount,
+      // retired namespaces are still counted in `namespaces` above (an
+      // honest inventory total) but excluded from current/overdue/
+      // not_gradeable/ever_missed_deadline and from the top-level `status`
+      // verdict — see _status_data.js's loadRetiredNamespaces() comment.
+      retired: data.retiredCount,
+      retired_namespaces: data.retiredNamespaces,
     },
     namespaces,
     conflict_observations: {

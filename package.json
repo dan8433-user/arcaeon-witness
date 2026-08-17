@@ -1,0 +1,12 @@
+{
+  "name": "arcaeon-witness",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Regression harness for the hosted witness's live payment/pin code. No external dependencies on purpose (see README \"Layout\") — node:test is Node's own built-in runner.",
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

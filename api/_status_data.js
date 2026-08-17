@@ -23,6 +23,27 @@
 
 const store = require("./_store.js");
 
+// WITNESS_RETIRED_NS: comma-separated namespace names to exclude from the
+// health VERDICT (overdue/current/ungradeable counts, and therefore
+// degraded/indeterminate/overallOk) while still LISTING them, tagged
+// `retired:true`, in every rendering (status.js's table, status.json.js's
+// namespaces array, and implicitly badge.js via the counts it reads from
+// here). This exists for exactly one honest reason: a namespace can go
+// permanently stale on purpose — a demo/self-test namespace nobody is
+// renewing anymore — and that is not the same failure as a live publisher's
+// feed going dark. Before this, a retired demo namespace sat "overdue"
+// forever and painted the whole public badge red for a problem that isn't
+// one. The fix is not to delete or hide the record (the pin history stays
+// exactly as it is, in the public repo, forever) — it's to stop grading it.
+// Retirement is additive and reversible: remove a name from the env var and
+// its next read is graded again, same as any other namespace.
+function loadRetiredNamespaces() {
+  const raw = process.env.WITNESS_RETIRED_NS || "";
+  return new Set(
+    raw.split(",").map((s) => s.trim()).filter(Boolean)
+  );
+}
+
 const REPO_URL = `https://github.com/${store.REPO}`;
 const BLOB = (path) => `${REPO_URL}/blob/${store.BRANCH}/${path}`;
 const TREE = (path) => `${REPO_URL}/tree/${store.BRANCH}/${path}`;
@@ -63,6 +84,7 @@ async function gatherStatusData() {
   }
 
   // --- namespaces + latest pin per namespace -------------------------
+  const retiredSet = loadRetiredNamespaces();
   let namespaces = [];
   let nsErr = null;
   const rows = [];
@@ -70,10 +92,11 @@ async function gatherStatusData() {
     const entries = await store.listDir("pins");
     namespaces = entries.filter((e) => e.type === "dir").map((e) => e.name).sort();
     for (const ns of namespaces) {
+      const retired = retiredSet.has(ns);
       try {
         const got = await store.getFile(`pins/${ns}/latest.json`);
         if (!got) {
-          rows.push({ ns, error: "no latest.json (namespace directory exists, no pin recorded)" });
+          rows.push({ ns, retired, error: "no latest.json (namespace directory exists, no pin recorded)" });
           continue;
         }
         const pin = got.json;
@@ -81,6 +104,7 @@ async function gatherStatusData() {
         const seqName = Number.isInteger(pin.seq) ? String(pin.seq).padStart(8, "0") : null;
         rows.push({
           ns,
+          retired,
           rowsWitnessed: pin.rows,
           chain: pin.chain,
           pinnedAt: pin.pinned_at,
@@ -99,7 +123,7 @@ async function gatherStatusData() {
           apiUrl: `/api/latest?ns=${encodeURIComponent(ns)}`,
         });
       } catch (err) {
-        rows.push({ ns, error: err.message });
+        rows.push({ ns, retired, error: err.message });
       }
     }
   } catch (err) {
@@ -194,12 +218,18 @@ async function gatherStatusData() {
     anchorStatus = "cannot_determine";
   }
 
-  const overdueCount = rows.filter((r) => r.status === "overdue").length;
-  const currentCount = rows.filter((r) => r.status === "current").length;
-  const heartbeatCount = rows.filter((r) => r.status === "publisher_heartbeat_current").length;
-  const ungradeableCount = rows.filter((r) => r.gradeable === false).length;
-  const missedEverCount = rows.filter((r) => r.everMissed).length;
-  const errCount = rows.filter((r) => r.error).length;
+  // Every count below that feeds the health verdict (degraded/indeterminate/
+  // overallOk) excludes retired namespaces on purpose (see
+  // loadRetiredNamespaces() above) — `rows` itself is untouched, so nothing
+  // is hidden from the listing, only from the pass/fail judgment.
+  const gradedRows = rows.filter((r) => !r.retired);
+  const retiredCount = rows.length - gradedRows.length;
+  const overdueCount = gradedRows.filter((r) => r.status === "overdue").length;
+  const currentCount = gradedRows.filter((r) => r.status === "current").length;
+  const heartbeatCount = gradedRows.filter((r) => r.status === "publisher_heartbeat_current").length;
+  const ungradeableCount = gradedRows.filter((r) => r.gradeable === false).length;
+  const missedEverCount = gradedRows.filter((r) => r.everMissed).length;
+  const errCount = gradedRows.filter((r) => r.error).length;
 
   // Three states, not two. An ungradeable namespace is not a failure — but it
   // is not an OK either. A stale anchor is a real failure (the daily self-
@@ -218,6 +248,7 @@ async function gatherStatusData() {
     obsCount, obsSample, obsErr,
     anchor, anchorErr, anchorStatus, anchorAgeHours,
     overdueCount, currentCount, heartbeatCount, ungradeableCount, missedEverCount, errCount,
+    retiredCount, retiredNamespaces: [...retiredSet],
     degraded, indeterminate, overallOk,
     repoUrl: REPO_URL,
   };

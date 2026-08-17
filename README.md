@@ -105,31 +105,52 @@ Storage: same private `arcaeon-witness-usage` repo the meter already uses
 (`api/_balance.js`), same GitHub-contents-API CAS pattern, plus an
 append-only ledger (`ledger/<key_hash>/...`) for every grant and decrement —
 a balance you can't audit contradicts this repo's own honesty contract.
-Top-up is idempotent on the Stripe event id (or an admin-supplied one): a
-webhook replay reads a `applied:true` ledger entry and returns
-`already_credited:true` without moving the balance twice.
+Top-up idempotency (**corrected 2026-08-16** — this paragraph described a
+mechanism retired 2026-08-14 and had drifted stale): the claim is NOT a
+separate ledger flag. `balance/<key_hash>.json` itself carries an
+`applied_events` set, and "is this id already applied? / add the pins /
+record the id" happen as ONE compare-and-swap against that file's own sha —
+a losing concurrent writer re-reads, sees the id already in
+`applied_events`, and returns `already_credited:true` without moving the
+balance twice. The append-only `ledger/` grant file is still written
+afterward as an audit record, but it is no longer the gate. The idempotency
+key itself is the Checkout **Session** id when the webhook has one (falling
+back to the Stripe event id otherwise) — not the event id alone — because
+Stripe's own fulfillment guidance is explicit that a payment can legitimately
+generate more than one event (`checkout.session.completed` and
+`checkout.session.async_payment_succeeded` for async payment methods like
+ACH/Klarna) and a handler must dedupe per-purchase, not per-delivery.
+`/api/credit`'s admin path has no session, so it keys on the caller-supplied
+`event_id` directly, unchanged.
 
 **POST /api/credit** (Bearer `WITNESS_ADMIN_KEY`) — internal/test top-up path.
 Body `{key or key_hash, pack, event_id}`. This is the stand-in for the real
 Stripe webhook until it's wired (see below) — same `creditPack()` function
 either way.
 
-**POST /api/stripe-webhook** — verifies `checkout.session.completed` against
+**POST /api/stripe-webhook** — verifies `checkout.session.completed` AND
+`checkout.session.async_payment_succeeded` (the delayed-clear signal for ACH,
+Klarna, and other asynchronous payment methods — `checkout.session.completed`
+alone reports `payment_status:"unpaid"` for those and is correctly skipped;
+the async event carries the actual money) against
 `WITNESS_STRIPE_WEBHOOK_SECRET` (Stripe's own HMAC scheme, hand-verified, no
 SDK). **Human steps still owed, not done by this build:** (1) create a Stripe
-webhook endpoint pointed at this path and set its signing secret as
-`WITNESS_STRIPE_WEBHOOK_SECRET` in Vercel env; (2) each pack's Stripe Payment
-Link / Checkout Session needs `client_reference_id` set to the buyer's
-`sha256(witness key)` and `metadata.pack` set to `starter`/`standard`/`bulk`.
-Until both are done, this endpoint fails closed with `501` on every call —
-the crediting logic itself is already built and tested via `/api/credit`.
+webhook endpoint pointed at this path, subscribed to both event types above
+(plus `checkout.session.async_payment_failed`, logged but not credited), and
+set its signing secret as `WITNESS_STRIPE_WEBHOOK_SECRET` in Vercel env;
+(2) each pack's Stripe Payment Link / Checkout Session needs
+`client_reference_id` set to the buyer's `sha256(witness key)` and
+`metadata.pack` set to `mini`/`starter`/`standard`/`bulk`. Until both are
+done, this endpoint fails closed with `501` on every call — the crediting
+logic itself is already built and tested via `/api/credit`.
 
 **GET /api/balance** (Bearer `<your witness key>`) — read-only self-check:
 `{credit_balance, credit_ever_purchased, free_tier:{plan, used, cap, month}}`.
 Never consumes a pin (reads via `meter.peek()`, not `meter.check()`).
 
-Pack sizes (ratified, not yet offered): Starter $15/3,000 pins · Standard
-$50/12,000 pins · Bulk $150/40,000 pins (`api/_balance.js` `PACKS`).
+Pack sizes (ratified, not yet offered): Mini $5/1,000 pins · Starter
+$15/3,000 pins · Standard $50/12,000 pins · Bulk $150/40,000 pins
+(`api/_balance.js` `PACKS`).
 
 ### GET /api/latest?ns=&lt;namespace&gt; (no auth)
 
@@ -594,3 +615,18 @@ repos. `WITNESS_CADENCE` is optional (default cadence is 24h for every
 namespace when unset or malformed) and holds no secrets, but lives with the
 others for one reason: it's operational policy, not code — changing it
 shouldn't require a redeploy.
+
+## Testing
+
+`npm test` (or `node --test "test/*.test.js"`) — a no-framework harness on
+`node:test`, zero external dependencies. `test/helpers/mock_store.js` fakes
+the GitHub contents API's compare-and-swap contract in memory (sha match,
+create-race 422, update-race 409) so every handler runs its real code path
+against a fake store, never the live public/private repos. Covers
+`_balance.js`, `_meter.js`, `_store.js`, `stripe-webhook.js`, `pin.js`, and
+`verify.js`, with named regressions for every bug this weekend's audits
+found (the `applied_events`-dropped-on-decrement money bug, the double-grant
+CAS race, `ddee22a`'s legacy-deadline arming, excelsior's owner-binding
+403) plus contract tests for the pack catalogue, credit exhaustion, and the
+webhook's signature/payment/livemode gates. See
+`test/*.test.js` file headers for what each regression is guarding and why.

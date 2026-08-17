@@ -27,6 +27,8 @@
 "use strict";
 
 const store = require("./_store.js");
+const cors = require("./_cors.js");
+const ratelimit = require("./_ratelimit.js");
 
 const HISTORY_BASE = `https://github.com/${store.REPO}/commits/${store.BRANCH}`;
 const RAW_BASE = `https://raw.githubusercontent.com/${store.REPO}/${store.BRANCH}`;
@@ -42,14 +44,36 @@ function rawRecordUrl(ns, seq) {
 }
 
 module.exports = async (req, res) => {
+  // GET-only CORS: answers an OPTIONS preflight with 204 and returns; every
+  // other method falls through to the guard below with the ACAO header
+  // already set. See _cors.js for why this is scoped to read endpoints only.
+  if (cors.applyGetCors(req, res)) return;
+
   // HEAD is a read and must answer like one. Uptime monitors and link checkers
   // default to HEAD; 405-ing them reports this endpoint as DOWN while it is in
   // fact serving 200. /api/health and /status never had this guard and always
   // answered HEAD correctly — these read endpoints now match them. Node drops
   // the body from a HEAD response on its own, so the handler needs no branch.
   if (req.method !== "GET" && req.method !== "HEAD") {
-    res.setHeader("allow", "GET, HEAD");
+    res.setHeader("allow", "GET, HEAD, OPTIONS");
     return res.status(405).json({ error: "GET or HEAD only" });
+  }
+
+  // Per-IP rate limit — this endpoint is deliberately unauthenticated (board
+  // item 20: a stranger shouldn't need a key just to ask "does this exist?"),
+  // so there is no key to bucket abuse on. See _ratelimit.js for the honest
+  // per-instance limitation. Checked before any store read so an over-limit
+  // caller costs this instance nothing beyond a Map lookup.
+  const rl = ratelimit.check(req);
+  if (rl.limited) {
+    res.setHeader("retry-after", String(rl.retryAfterSeconds));
+    res.setHeader("cache-control", "no-store");
+    return res.status(429).json({
+      ok: false,
+      error: "rate limit exceeded",
+      note: `naive per-instance, per-IP limiter (Stage-0): ~${rl.limit} calls per IP per ${Math.round(rl.windowSeconds / 60)} minutes, enforced per warm serverless instance — not a guaranteed global cap, see the repo's rate-limit note`,
+      retry_after_seconds: rl.retryAfterSeconds,
+    });
   }
 
   const q = req.query || {};

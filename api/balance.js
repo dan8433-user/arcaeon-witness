@@ -13,6 +13,7 @@
 const store = require("./_store.js");
 const meter = require("./_meter.js");
 const balance = require("./_balance.js");
+const issuedKeys = require("./_keys.js");
 
 module.exports = async (req, res) => {
   if (req.method !== "GET") {
@@ -20,9 +21,18 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: "GET only" });
   }
 
+  // Same two-tier auth as api/pin.js: WITNESS_KEYS env first, then the
+  // dynamic issued-key store (self-serve keys from api/fulfill.js).
   const auth = req.headers.authorization || "";
   const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-  const prefix = key ? store.keyPrefixFor(key) : null;
+  let prefix = key ? store.keyPrefixFor(key) : null;
+  if (prefix === null && key) {
+    try {
+      prefix = await issuedKeys.issuedKeyPrefix(key);
+    } catch (err) {
+      return res.status(502).json({ error: `key store error: ${err.message}` });
+    }
+  }
   if (prefix === null) {
     return res.status(401).json({ error: "invalid or missing bearer key" });
   }

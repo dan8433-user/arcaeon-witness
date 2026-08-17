@@ -25,6 +25,7 @@
 const store = require("./_store.js");
 const meter = require("./_meter.js");
 const balance = require("./_balance.js");
+const issuedKeys = require("./_keys.js");
 
 // Naive per-key rate limit (Stage-0): per-instance, resets on cold start.
 const RATE_LIMIT = 60; // pins per key per hour, per warm instance
@@ -171,8 +172,20 @@ function applyHeaders(res, headers) {
 // current head. Everything else keeps failing typed rather than launder a
 // corrupt or unrelated record into the head.
 function verifyOrphanSuccessor(orphan, cur, namespace) {
-  if (!orphan || typeof orphan !== "object" || !cur) return false;
-  const prev = cur.json;
+  if (!orphan || typeof orphan !== "object") return false;
+  // H4 (quad-check 2026-08-16): a namespace's FIRST pin has `cur === null` —
+  // there is no latest.json yet, by definition, not a wedge. The old guard
+  // (`!cur` -> false) treated that as unverifiable, so two concurrent first
+  // pins gave the loser a false "namespace is wedged, reconcile by hand" 409
+  // on a namespace that was actually fine, AND charged it for the privilege
+  // (metering already ran before this self-heal retry). A null `cur` is a
+  // legitimate predecessor — the implicit "nothing pinned yet" state — so
+  // treat it as `{seq: 0}` rather than refusing to verify against it. Every
+  // check below already degrades correctly against that shape: `expectedSeq`
+  // becomes 1, there's no `prev.rows` to violate monotonicity against, and a
+  // genuine first record's newest interval carries `supersedes_due_by: null`,
+  // which is exactly what `prevDue` resolves to here.
+  const prev = cur ? cur.json : { seq: 0 };
   // exactly one seq ahead of the current head
   const expectedSeq = (Number.isInteger(prev.seq) ? prev.seq : 0) + 1;
   if (orphan.seq !== expectedSeq) return false;
@@ -333,9 +346,21 @@ module.exports = async (req, res) => {
   }
 
   // --- auth ---
+  // Env-provisioned keys first (WITNESS_KEYS — free lookup, covers every
+  // hand-issued key), then the dynamic issued-key store (self-serve keys
+  // minted by api/fulfill.js). Only a miss pays the extra store read. A store
+  // FAILURE is 502, never 401 — "we couldn't check" must not read as "your
+  // key is invalid" to a paying customer.
   const auth = req.headers.authorization || "";
   const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-  const prefix = key ? store.keyPrefixFor(key) : null;
+  let prefix = key ? store.keyPrefixFor(key) : null;
+  if (prefix === null && key) {
+    try {
+      prefix = await issuedKeys.issuedKeyPrefix(key);
+    } catch (err) {
+      return res.status(502).json({ error: `key store error: ${err.message}` });
+    }
+  }
   if (prefix === null) {
     return res.status(401).json({ error: "invalid or missing bearer key" });
   }
