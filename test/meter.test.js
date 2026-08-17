@@ -9,7 +9,7 @@ const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 
 const { MockGitHubStore, install } = require("./helpers/mock_store.js");
-const meter = require("../api/_meter.js");
+const meter = require("../lib/_meter.js");
 
 let store;
 let restore;

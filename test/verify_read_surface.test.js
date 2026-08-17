@@ -14,7 +14,7 @@ const assert = require("node:assert/strict");
 
 const { MockGitHubStore, install } = require("./helpers/mock_store.js");
 const { makeReq, makeRes } = require("./helpers/http_mocks.js");
-const ratelimit = require("../api/_ratelimit.js");
+const ratelimit = require("../lib/_ratelimit.js");
 const verifyHandler = require("../api/verify.js");
 
 const PIN_REPO = process.env.GITHUB_PIN_REPO;

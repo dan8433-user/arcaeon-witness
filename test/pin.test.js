@@ -19,7 +19,7 @@ const assert = require("node:assert/strict");
 
 const { MockGitHubStore, install } = require("./helpers/mock_store.js");
 const { makeReq, makeRes } = require("./helpers/http_mocks.js");
-const store = require("../api/_store.js");
+const store = require("../lib/_store.js");
 const pinHandler = require("../api/pin.js");
 
 const PIN_REPO = process.env.GITHUB_PIN_REPO;
@@ -66,7 +66,7 @@ test("CONTRACT: monotonic guard rejects rows going backward, 409, charges nothin
 
   const usagePathBefore = gh.read(
     process.env.GITHUB_USAGE_REPO,
-    `usage/${require("../api/_meter.js").keyHash("testkeyA")}/${require("../api/_meter.js").utcMonth()}.json`
+    `usage/${require("../lib/_meter.js").keyHash("testkeyA")}/${require("../lib/_meter.js").utcMonth()}.json`
   );
   const usedBefore = usagePathBefore ? usagePathBefore.used : 0;
 
@@ -76,7 +76,7 @@ test("CONTRACT: monotonic guard rejects rows going backward, 409, charges nothin
 
   const usagePathAfter = gh.read(
     process.env.GITHUB_USAGE_REPO,
-    `usage/${require("../api/_meter.js").keyHash("testkeyA")}/${require("../api/_meter.js").utcMonth()}.json`
+    `usage/${require("../lib/_meter.js").keyHash("testkeyA")}/${require("../lib/_meter.js").utcMonth()}.json`
   );
   assert.equal(usagePathAfter.used, usedBefore, "a rejected pin must not increment the meter");
 });
@@ -255,7 +255,7 @@ test("REGRESSION (excelsior): a rejected owner-gate renewal (403) charges no met
   await pinHandler(pinReq({ namespace, rows: 1, chain: "33333333", key: "testkeyA" }), makeRes());
   await pinHandler(pinReq({ namespace, rows: 1, chain: "33333333", intent: "renew", key: "testkeyA" }), makeRes());
 
-  const meter = require("../api/_meter.js");
+  const meter = require("../lib/_meter.js");
   const usedBefore = gh.read(
     process.env.GITHUB_USAGE_REPO,
     `usage/${meter.keyHash("testkeyB")}/${meter.utcMonth()}.json`

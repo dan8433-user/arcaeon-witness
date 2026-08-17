@@ -11,7 +11,7 @@
 
 "use strict";
 
-const { gatherStatusData } = require("./_status_data.js");
+const { gatherStatusData } = require("../lib/_status_data.js");
 
 module.exports = async (req, res) => {
   // HEAD is a read and must answer like one. Uptime monitors and link checkers

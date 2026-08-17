@@ -10,10 +10,10 @@
 
 "use strict";
 
-const store = require("./_store.js");
-const meter = require("./_meter.js");
-const balance = require("./_balance.js");
-const issuedKeys = require("./_keys.js");
+const store = require("../lib/_store.js");
+const meter = require("../lib/_meter.js");
+const balance = require("../lib/_balance.js");
+const issuedKeys = require("../lib/_keys.js");
 
 module.exports = async (req, res) => {
   if (req.method !== "GET") {

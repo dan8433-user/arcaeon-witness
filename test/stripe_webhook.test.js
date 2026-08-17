@@ -12,7 +12,7 @@ const assert = require("node:assert/strict");
 const { MockGitHubStore, install } = require("./helpers/mock_store.js");
 const { makeRawReq, makeRes } = require("./helpers/http_mocks.js");
 const { stripeSigHeader } = require("./helpers/stripe_sign.js");
-const balance = require("../api/_balance.js");
+const balance = require("../lib/_balance.js");
 const webhook = require("../api/stripe-webhook.js");
 
 const SECRET = process.env.WITNESS_STRIPE_WEBHOOK_SECRET;

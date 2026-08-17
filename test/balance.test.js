@@ -11,7 +11,7 @@ const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
 
 const { MockGitHubStore, install } = require("./helpers/mock_store.js");
-const balance = require("../api/_balance.js");
+const balance = require("../lib/_balance.js");
 
 const REPO = process.env.GITHUB_USAGE_REPO;
 

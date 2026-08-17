@@ -2,8 +2,8 @@
 
 "use strict";
 
-const store = require("./_store.js");
-const cors = require("./_cors.js");
+const store = require("../lib/_store.js");
+const cors = require("../lib/_cors.js");
 
 module.exports = async (req, res) => {
   // GET-only CORS: answers an OPTIONS preflight with 204 and returns. See

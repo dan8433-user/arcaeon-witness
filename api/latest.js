@@ -9,7 +9,7 @@
 
 "use strict";
 
-const store = require("./_store.js");
+const store = require("../lib/_store.js");
 
 const HISTORY_BASE = `https://github.com/${store.REPO}/commits/${store.BRANCH}`;
 

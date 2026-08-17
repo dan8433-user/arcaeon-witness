@@ -5,7 +5,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
-const ratelimit = require("../api/_ratelimit.js");
+const ratelimit = require("../lib/_ratelimit.js");
 
 // Every test below uses its OWN fake IP so tests never interfere with each
 // other's bucket state (the module holds one process-wide Map on purpose —

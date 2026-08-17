@@ -43,7 +43,7 @@
 "use strict";
 
 const crypto = require("crypto");
-const balance = require("./_balance.js");
+const balance = require("../lib/_balance.js");
 
 // NOTE: the `config` export is attached at the BOTTOM of this file, after the
 // handler is assigned to module.exports. It used to be set here, on line 40 —

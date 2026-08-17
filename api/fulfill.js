@@ -39,9 +39,9 @@
 
 "use strict";
 
-const balance = require("./_balance.js");
-const meter = require("./_meter.js");
-const keys = require("./_keys.js");
+const balance = require("../lib/_balance.js");
+const meter = require("../lib/_meter.js");
+const keys = require("../lib/_keys.js");
 
 const SUPPORT_EMAIL = "support@arcaeon.io";
 const DOCS_URL = process.env.WITNESS_DOCS_URL || "https://arcaeon.io/ai";

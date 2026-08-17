@@ -12,7 +12,7 @@
 
 "use strict";
 
-const { gatherStatusData } = require("./_status_data.js");
+const { gatherStatusData } = require("../lib/_status_data.js");
 
 module.exports = async (req, res) => {
   // HEAD is a read and must answer like one. Uptime monitors and link checkers
@@ -59,8 +59,8 @@ module.exports = async (req, res) => {
     rendered_at: data.renderedAt.toISOString(),
     store: {
       kind: "public-github-repo",
-      repo: require("./_store.js").REPO,
-      branch: require("./_store.js").BRANCH,
+      repo: require("../lib/_store.js").REPO,
+      branch: require("../lib/_store.js").BRANCH,
       reachable: data.reachable,
     },
     summary: {

@@ -14,9 +14,9 @@
 
 "use strict";
 
-const store = require("./_store.js");
-const cors = require("./_cors.js");
-const { gatherStatusData, humanDuration, BLOB, TREE, REPO_URL } = require("./_status_data.js");
+const store = require("../lib/_store.js");
+const cors = require("../lib/_cors.js");
+const { gatherStatusData, humanDuration, BLOB, TREE, REPO_URL } = require("../lib/_status_data.js");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({

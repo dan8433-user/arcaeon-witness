@@ -23,8 +23,8 @@ const assert = require("node:assert/strict");
 
 const { MockGitHubStore } = require("./helpers/mock_store.js");
 const { makeReq, makeRes } = require("./helpers/http_mocks.js");
-const balance = require("../api/_balance.js");
-const keys = require("../api/_keys.js");
+const balance = require("../lib/_balance.js");
+const keys = require("../lib/_keys.js");
 const fulfill = require("../api/fulfill.js");
 const pin = require("../api/pin.js");
 

@@ -18,7 +18,7 @@
 "use strict";
 
 const crypto = require("crypto");
-const balance = require("./_balance.js");
+const balance = require("../lib/_balance.js");
 
 const HASH_RE = /^[0-9a-f]{64}$/;
 

@@ -26,9 +26,9 @@
 
 "use strict";
 
-const store = require("./_store.js");
-const cors = require("./_cors.js");
-const ratelimit = require("./_ratelimit.js");
+const store = require("../lib/_store.js");
+const cors = require("../lib/_cors.js");
+const ratelimit = require("../lib/_ratelimit.js");
 
 const HISTORY_BASE = `https://github.com/${store.REPO}/commits/${store.BRANCH}`;
 const RAW_BASE = `https://raw.githubusercontent.com/${store.REPO}/${store.BRANCH}`;

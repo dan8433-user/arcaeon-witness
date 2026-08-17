@@ -22,10 +22,10 @@
 
 "use strict";
 
-const store = require("./_store.js");
-const meter = require("./_meter.js");
-const balance = require("./_balance.js");
-const issuedKeys = require("./_keys.js");
+const store = require("../lib/_store.js");
+const meter = require("../lib/_meter.js");
+const balance = require("../lib/_balance.js");
+const issuedKeys = require("../lib/_keys.js");
 
 // Naive per-key rate limit (Stage-0): per-instance, resets on cold start.
 const RATE_LIMIT = 60; // pins per key per hour, per warm instance

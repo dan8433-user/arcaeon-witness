@@ -6,7 +6,7 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 
-const { applyGetCors } = require("../api/_cors.js");
+const { applyGetCors } = require("../lib/_cors.js");
 const { makeReq, makeRes } = require("./helpers/http_mocks.js");
 
 test("CONTRACT: a GET request gets Access-Control-Allow-Origin:* and is NOT short-circuited", () => {

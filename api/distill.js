@@ -33,10 +33,10 @@
 
 "use strict";
 
-const core = require("./_distill_core.js");
-const store = require("./_store.js");
-const meter = require("./_meter.js");
-const balance = require("./_balance.js");
+const core = require("../lib/_distill_core.js");
+const store = require("../lib/_store.js");
+const meter = require("../lib/_meter.js");
+const balance = require("../lib/_balance.js");
 
 // Vercel's default body parser runs content through JSON.parse, which loses
 // exactly the two things this endpoint exists to preserve faithfully (the
