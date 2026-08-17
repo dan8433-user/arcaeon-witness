@@ -1,6 +1,16 @@
 {
   "rewrites": [
-    { "source": "/", "destination": "/api/status" },
-    { "source": "/status", "destination": "/api/status" }
+    {
+      "source": "/",
+      "destination": "/api/status"
+    },
+    {
+      "source": "/status",
+      "destination": "/api/status"
+    },
+    {
+      "source": "/api/status.json",
+      "destination": "/api/status?format=json"
+    }
   ]
 }

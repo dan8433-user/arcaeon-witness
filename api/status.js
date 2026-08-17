@@ -39,6 +39,12 @@ function statusBadge(status, overdueSeconds) {
 }
 
 module.exports = async (req, res) => {
+  // Merged twin (Vercel Hobby 12-function cap): /api/status.json now routes
+  // here via vercel.json rewrite (?format=json). Same data, same schema,
+  // rendered by the former api/status.json.js handler now in lib/.
+  const fmt = String((req.query && req.query.format) || "").toLowerCase();
+  if (fmt === "json") return require("../lib/_status_json.js")(req, res);
+
   // GET-only CORS: answers an OPTIONS preflight with 204 and returns. See
   // _cors.js for scope (read endpoints only).
   if (cors.applyGetCors(req, res)) return;
