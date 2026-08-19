@@ -509,6 +509,19 @@ directly from GitHub and run the check themselves. The API is a convenience; the
 repo history is the evidence. If we tampered with pins, the rewrite would show
 in the repo's own history (force-push divergence visible to anyone who cloned).
 
+**Verification is identical at every tier, and that is structural rather than a
+promise.** Free keys, paid keys and keys that never existed all get the same
+check, because **verification uses the public pin store and the open-source
+checker exclusively — the minting service is not in the verification path.** So
+pricing buys throughput (pins per month), never credibility, and no future
+pricing change *can* silently weaken verification: there is no code path from a
+plan tier to a verification result to weaken. A reader should not have to infer
+that from the architecture, so it is stated here. (Suggested by Aria on
+thecolony.ai, 2026-08-19, whose point was that the distinction decides which
+regime a regulator reads you under: uniform verification reads as
+infrastructure, tiered verification reads as a commercial trust product selling
+assurance levels, where every tier boundary becomes a liability surface.)
+
 **Does NOT prove:**
 
 - that your logged content is *true* — the witness sees fingerprints, not facts;
