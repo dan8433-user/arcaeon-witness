@@ -72,13 +72,18 @@ test("CONTRACT: a capped history scan is witnessed:null (scan_bound_reached — 
   // Head at seq 60; target rows sits deeper than the 50-record scan bound.
   // Every historical record has rows ABOVE the target so the scan never hits
   // the conclusive rows<target early-exit — it must run into the cap.
+  // seq padding MUST match api/verify.js seqName() (8 digits). It was 6 here until
+  // 2026-08-22, which meant every historical GET missed and this test hit the cap by
+  // walking 50 NONEXISTENT files -- scanned===50 was satisfied by a walk over nothing.
+  // The reader-side assertion below is what exposed it; no assertion on a
+  // handler-authored field could have.
   const ns = "demo-deep";
   gh.seed(PIN_REPO, `pins/${ns}/latest.json`, {
     namespace: ns, rows: 700, chain: "cafebabe", seq: 60,
     pinned_at: new Date().toISOString(),
   });
   for (let s = 59; s >= 1; s--) {
-    gh.seed(PIN_REPO, `pins/${ns}/${String(s).padStart(6, "0")}.json`, {
+    gh.seed(PIN_REPO, `pins/${ns}/${String(s).padStart(8, "0")}.json`, {
       namespace: ns, rows: 100 + s * 10, chain: "beef" + String(s).padStart(4, "0"), seq: s,
       pinned_at: new Date().toISOString(),
     });
@@ -96,6 +101,24 @@ test("CONTRACT: a capped history scan is witnessed:null (scan_bound_reached — 
   // had never once exercised the class it was named for. scanned === MAX_HISTORY_SCAN
   // is the evidence that the bound is what stopped the walk.
   assert.equal(res._body.scanned, 50);
+
+  // READER-SIDE BOUND (ColonistOne + Rowan Adeyemi, 2026-08-22). Everything above
+  // asserts on fields the HANDLER authors. A handler that halts for an unrelated
+  // reason and prints scanned:50 passes all of them, and nothing in the suite
+  // dissents. So assert on WHICH records the walk actually touched, recorded by the
+  // fixture's own store rather than reported by the code under test.
+  //
+  // The expected set is computed from the fixture's construction, not from the
+  // response: the walk starts at seq-1 (59) and steps down 50 records, so it must
+  // ask for 59..10 and must NOT reach 9.
+  const asked = gh.getLog.filter((p) => p.startsWith(`pins/${ns}/`) && !p.endsWith("latest.json"));
+  const expected = [];
+  for (let s = 59; s >= 10; s--) expected.push(`pins/${ns}/${String(s).padStart(8, "0")}.json`);
+  assert.deepEqual(asked, expected,
+    "the walk must touch exactly seqs 59..10, in order — a handler that stopped for " +
+    "another reason cannot produce this sequence whatever count it prints");
+  assert.ok(!asked.includes(`pins/${ns}/${String(9).padStart(8, "0")}.json`),
+    "seq 9 is past the bound and must never be fetched");
 });
 
 test("CONTRACT: reaching the start of history without a match stays witnessed:false (conclusive)", async () => {
@@ -106,10 +129,10 @@ test("CONTRACT: reaching the start of history without a match stays witnessed:fa
   });
   // seqs 1-2 all have rows ABOVE the target (no rows<target early-exit),
   // history exhausts before the bound → conclusive not_found_in_history.
-  gh.seed(PIN_REPO, `pins/${ns}/000002.json`, {
+  gh.seed(PIN_REPO, `pins/${ns}/${String(2).padStart(8, "0")}.json`, {
     namespace: ns, rows: 40, chain: "beef0002", seq: 2, pinned_at: new Date().toISOString(),
   });
-  gh.seed(PIN_REPO, `pins/${ns}/000001.json`, {
+  gh.seed(PIN_REPO, `pins/${ns}/${String(1).padStart(8, "0")}.json`, {
     namespace: ns, rows: 30, chain: "beef0001", seq: 1, pinned_at: new Date().toISOString(),
   });
   const req = makeReq({ query: { ns, rows: "20", chain: "aaaaaaaa" } });

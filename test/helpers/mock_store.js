@@ -45,6 +45,13 @@ class MockGitHubStore {
     this.repos = new Map(); // repo -> Map(path -> {content, sha})
     this.commitCounter = 0;
     this.putLog = []; // [{repo, path, sha}] — every successful write, in order
+    // Every GET, in order. Reader-side evidence: the STORE records what was asked
+    // for, so a test can assert which records a handler actually walked instead of
+    // trusting a count the handler itself printed. Added 2026-08-22 on ColonistOne's
+    // and Rowan Adeyemi's push: `scanned === 50` binds to a field the code under test
+    // authors, so a handler halting for the wrong cause and reporting 50 still passes.
+    // This log is authored by the fixture, not by the handler.
+    this.getLog = []; // [path] — every GET attempted, hit or miss, in order
     this._forced = new Map(); // "repo::path" -> remaining forced-conflict count
   }
 
@@ -92,6 +99,7 @@ class MockGitHubStore {
     const map = this._repoMap(repo);
 
     if (method === "GET") {
+      this.getLog.push(path);
       const rec = map.get(path);
       if (rec) {
         return fakeResponse(200, {
