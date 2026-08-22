@@ -148,7 +148,7 @@ logic itself is already built and tested via `/api/credit`.
 `{credit_balance, credit_ever_purchased, free_tier:{plan, used, cap, month}}`.
 Never consumes a pin (reads via `meter.peek()`, not `meter.check()`).
 
-Pack sizes (ratified, not yet offered): Mini $5/1,000 pins · Starter
+Pack sizes (LIVE and buyable as of 2026-08-16; credits applied by hand within ~a day. Corrected 2026-08-19: this line still said "not yet offered" while the Stripe links were returning 200 and would take a customer's money): Mini $5/1,000 pins · Starter
 $15/3,000 pins · Standard $50/12,000 pins · Bulk $150/40,000 pins
 (`api/_balance.js` `PACKS`).
 
@@ -405,14 +405,22 @@ shared GitHub API budget per unauthenticated call, not the caller's usage.
 A scan that exhausts the cap without an answer says so honestly
 (`reason:"scan_bound_reached"`) rather than guessing.
 
-Miss reasons: `no_pin_recorded_for_namespace`, `rows_match_chain_mismatch`
-(a record exists at that rows count with a *different* chain — not the
-accepted head), `exceeds_current_head` (rows is ahead of what's been
-witnessed), `rows_never_witnessed` (that rows count was skipped by an
-advance and was never itself a head), `not_found_in_history` /
-`scan_bound_reached` (bounded backward scan exhausted). Every response is
-HTTP `200` — `witnessed:true/false` is the signal, not the status code, the
-same way this is a yes/no question, not a resource fetch.
+**`witnessed` is tri-state** (since 2026-08-22; before that, every miss said
+`false` — an external re-run by ColonistOne caught the gap and the changelog
+records it). `true` = this exact head is in the record. `false` = the record
+actively contradicts it: `rows_match_chain_mismatch` (a record exists at that
+rows count with a *different* chain — not the accepted head),
+`rows_never_witnessed` (that rows count was skipped by an advance and was
+never itself a head), `not_found_in_history` (the scan reached the start of
+history without a match — conclusive). `null` = the witness has **no basis to
+decide** and refuses to assert a negative it didn't check:
+`no_pin_recorded_for_namespace` (nothing to decide against),
+`exceeds_current_head` (ahead of the record — not witnessed *yet*, not
+refuted; `accepted_head` rides in-band), `scan_bound_reached` (the capped
+scan ran out before an answer — older records may exist and were NOT
+checked). Every response is HTTP `200` — `witnessed` is the signal, not the
+status code, the same way this is a yes/no/can't-say question, not a
+resource fetch.
 
 A historical (superseded) match sets `is_current_head:false` and its
 cadence fields describe that old record, not the namespace's live status —

@@ -4,6 +4,25 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-22 — `witnessed` is tri-state: not-checked reasons return `null`, never a conclusive `false`
+
+Forced by **ColonistOne's re-run against the deployed build** (Colony, witness
+thread, 8/22): on 8/18 I said all three not-checked reasons would return
+`witnessed: null` with scope in-band; the scope half shipped (accepted_head /
+history / note) and the null half did not — `no_pin_recorded_for_namespace`
+and `exceeds_current_head` still asserted boolean `false`. ColonistOne also
+corrected their own record in the same comment (they had marked prediction B
+falsified off my stated intention without verifying the deploy — same failure
+class, named on both sides). The repair: `no_pin_recorded_for_namespace`,
+`exceeds_current_head`, and `scan_bound_reached` now return `witnessed: null`
+— an incomplete or inapplicable check may not assert a conclusive negative.
+`false` is reserved for heads the record actively contradicts
+(`rows_match_chain_mismatch`, `rows_never_witnessed`, `not_found_in_history`).
+Two new contract tests plant the null cases (a 60-deep history to force the
+scan cap; a shallow history to prove exhaustion stays a conclusive `false`).
+109/109. README §verify rewritten to document the tri-state and credit the
+catch.
+
 ## 2026-08-17 — Balance page: a human face on `/api/balance` via content negotiation; `lib/_page.js` extracted
 
 **COMMITTED LOCALLY ONLY — not deployed, no Vercel config touched.** Founder

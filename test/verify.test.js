@@ -26,12 +26,12 @@ afterEach(() => {
   restore();
 });
 
-test("CONTRACT: an unwitnessed namespace reports witnessed:false, reason no_pin_recorded_for_namespace", async () => {
+test("CONTRACT: an unwitnessed namespace reports witnessed:null (not false) — nothing to decide against", async () => {
   const req = makeReq({ query: { ns: "demo-neverseen", rows: "5", chain: "aaaaaaaa" } });
   const res = makeRes();
   await verifyHandler(req, res);
   assert.equal(res._status, 200);
-  assert.equal(res._body.witnessed, false);
+  assert.equal(res._body.witnessed, null);
   assert.equal(res._body.reason, "no_pin_recorded_for_namespace");
 });
 
@@ -51,7 +51,7 @@ test("CONTRACT: matching the current head reports witnessed:true, is_current_hea
   assert.equal(res._body.is_current_head, true);
 });
 
-test("CONTRACT: rows exceeding the current head cannot have been witnessed yet", async () => {
+test("CONTRACT: rows exceeding the current head is witnessed:null (not-yet, not a refutation) with accepted_head in-band", async () => {
   gh.seed(PIN_REPO, "pins/demo-ahead/latest.json", {
     namespace: "demo-ahead",
     rows: 10,
@@ -63,8 +63,54 @@ test("CONTRACT: rows exceeding the current head cannot have been witnessed yet",
   const res = makeRes();
   await verifyHandler(req, res);
   assert.equal(res._status, 200);
-  assert.equal(res._body.witnessed, false);
+  assert.equal(res._body.witnessed, null);
   assert.equal(res._body.reason, "exceeds_current_head");
+  assert.equal(res._body.accepted_head.rows, 10);
+});
+
+test("CONTRACT: a capped history scan is witnessed:null (scan_bound_reached — incomplete check may not assert a negative)", async () => {
+  // Head at seq 60; target rows sits deeper than the 50-record scan bound.
+  // Every historical record has rows ABOVE the target so the scan never hits
+  // the conclusive rows<target early-exit — it must run into the cap.
+  const ns = "demo-deep";
+  gh.seed(PIN_REPO, `pins/${ns}/latest.json`, {
+    namespace: ns, rows: 700, chain: "cafebabe", seq: 60,
+    pinned_at: new Date().toISOString(),
+  });
+  for (let s = 59; s >= 1; s--) {
+    gh.seed(PIN_REPO, `pins/${ns}/${String(s).padStart(6, "0")}.json`, {
+      namespace: ns, rows: 100 + s * 10, chain: "beef" + String(s).padStart(4, "0"), seq: s,
+      pinned_at: new Date().toISOString(),
+    });
+  }
+  const req = makeReq({ query: { ns, rows: "105", chain: "aaaaaaaa" } });
+  const res = makeRes();
+  await verifyHandler(req, res);
+  assert.equal(res._status, 200);
+  assert.equal(res._body.witnessed, null);
+  assert.equal(res._body.reason, "scan_bound_reached");
+});
+
+test("CONTRACT: reaching the start of history without a match stays witnessed:false (conclusive)", async () => {
+  const ns = "demo-shallow";
+  gh.seed(PIN_REPO, `pins/${ns}/latest.json`, {
+    namespace: ns, rows: 50, chain: "cafebabe", seq: 3,
+    pinned_at: new Date().toISOString(),
+  });
+  // seqs 1-2 all have rows ABOVE the target (no rows<target early-exit),
+  // history exhausts before the bound → conclusive not_found_in_history.
+  gh.seed(PIN_REPO, `pins/${ns}/000002.json`, {
+    namespace: ns, rows: 40, chain: "beef0002", seq: 2, pinned_at: new Date().toISOString(),
+  });
+  gh.seed(PIN_REPO, `pins/${ns}/000001.json`, {
+    namespace: ns, rows: 30, chain: "beef0001", seq: 1, pinned_at: new Date().toISOString(),
+  });
+  const req = makeReq({ query: { ns, rows: "20", chain: "aaaaaaaa" } });
+  const res = makeRes();
+  await verifyHandler(req, res);
+  assert.equal(res._status, 200);
+  assert.equal(res._body.witnessed, false);
+  assert.equal(res._body.reason, "not_found_in_history");
 });
 
 test("CONTRACT: matching rows but a different chain is a chain-mismatch, not witnessed", async () => {

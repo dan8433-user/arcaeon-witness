@@ -118,10 +118,12 @@ module.exports = async (req, res) => {
   if (!cur) {
     return res.status(200).json({
       ok: true,
-      witnessed: false,
+      // null, not false: there is no record set to decide against. A conclusive
+      // false is reserved for heads the store actively contradicts.
+      witnessed: null,
       pin: null,
       reason: "no_pin_recorded_for_namespace",
-      note: `no pin has ever been recorded for namespace "${ns}"`,
+      note: `no pin has ever been recorded for namespace "${ns}" — the witness has no basis to confirm or refute this head`,
       history: historyUrl,
     });
   }
@@ -167,10 +169,12 @@ module.exports = async (req, res) => {
   if (Number.isInteger(latest.rows) && rows > latest.rows) {
     return res.status(200).json({
       ok: true,
-      witnessed: false,
+      // null, not false: a head ahead of the current pin hasn't been witnessed
+      // YET — the store can't refute it, only report what it has accepted.
+      witnessed: null,
       pin: null,
       reason: "exceeds_current_head",
-      note: `requested rows (${rows}) is ahead of the namespace's current witnessed head (${latest.rows}) — it cannot have been witnessed yet`,
+      note: `requested rows (${rows}) is ahead of the namespace's current witnessed head (${latest.rows}) — it cannot have been witnessed yet; not a refutation`,
       accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
       history: historyUrl,
     });
@@ -232,13 +236,17 @@ module.exports = async (req, res) => {
     return res.status(502).json({ error: `pin store read error during history scan: ${err.message}` });
   }
 
+  const boundReached = scanned >= MAX_HISTORY_SCAN;
   return res.status(200).json({
     ok: true,
-    witnessed: false,
+    // Tri-state: a capped scan is an INCOMPLETE check, so it may not assert a
+    // conclusive negative — witnessed:null. Reaching the start of history
+    // without a match IS conclusive — witnessed:false.
+    witnessed: boundReached ? null : false,
     pin: null,
-    reason: scanned >= MAX_HISTORY_SCAN ? "scan_bound_reached" : "not_found_in_history",
-    note: scanned >= MAX_HISTORY_SCAN
-      ? `not found within a bounded backward scan of ${scanned} historical record(s) — older records may exist; browse the full commit history directly to check further back`
+    reason: boundReached ? "scan_bound_reached" : "not_found_in_history",
+    note: boundReached
+      ? `not found within a bounded backward scan of ${scanned} historical record(s) — older records may exist and were NOT checked; browse the full commit history directly to check further back`
       : "reached the start of this namespace's history without a match",
     scanned,
     history: historyUrl,
