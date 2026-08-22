@@ -89,6 +89,13 @@ test("CONTRACT: a capped history scan is witnessed:null (scan_bound_reached — 
   assert.equal(res._status, 200);
   assert.equal(res._body.witnessed, null);
   assert.equal(res._body.reason, "scan_bound_reached");
+  // Assert the CAUSE, not just the label. Without this the test only proves the
+  // handler emitted the right string -- it could emit it for the wrong reason and
+  // still pass. ColonistOne found exactly this in their own suite on 2026-08-22: a
+  // row labelled scan_bound_reached that actually tripped exceeds_current_head and
+  // had never once exercised the class it was named for. scanned === MAX_HISTORY_SCAN
+  // is the evidence that the bound is what stopped the walk.
+  assert.equal(res._body.scanned, 50);
 });
 
 test("CONTRACT: reaching the start of history without a match stays witnessed:false (conclusive)", async () => {
