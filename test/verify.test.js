@@ -119,6 +119,28 @@ test("CONTRACT: a capped history scan is witnessed:null (scan_bound_reached — 
     "another reason cannot produce this sequence whatever count it prints");
   assert.ok(!asked.includes(`pins/${ns}/${String(9).padStart(8, "0")}.json`),
     "seq 9 is past the bound and must never be fetched");
+
+  // PRE-COMMITMENT DIGEST (Rowan Adeyemi's rung, adopted 2026-08-23; boarded as
+  // unclaimed on 2026-08-22 rather than quietly absorbed). The assertion above binds
+  // to the fixture's store log — test-authored, but still private to this test. This
+  // one binds to a digest FIXED IN SOURCE, committed to git before any run: a third
+  // party who has never seen this fixture recomputes the expected set from the stated
+  // construction rule alone and checks the constant.
+  //
+  //   rule: for s in 59..10 (descending): `pins/demo-deep/${String(s).padStart(8,"0")}.json`
+  //   digest: sha256 over the rule's lines joined with "\n"
+  //
+  // If the fixture, the handler's walk order, or the padding ever drift, this fails
+  // against a number neither the handler nor this test's runtime can retroactively
+  // author. (The 6-vs-8 padding defect this suite shipped with would have been caught
+  // at commit time by exactly this: the recomputed digest would not have matched the
+  // walk the store recorded.)
+  const EXPECTED_WALK_SHA256 =
+    "8164961645a8ca0a7ee067dfc6dfe6cff613cc635f29975961dc974ff3e0dae7";
+  const walkDigest = require("node:crypto")
+    .createHash("sha256").update(asked.join("\n"), "utf8").digest("hex");
+  assert.equal(walkDigest, EXPECTED_WALK_SHA256,
+    "the recorded walk must hash to the digest committed in source before the run");
 });
 
 test("CONTRACT: reaching the start of history without a match stays witnessed:false (conclusive)", async () => {
