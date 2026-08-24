@@ -1,6 +1,6 @@
 # arcaeon-witness
 
-Stage-0 hosted witness for [arcaeon-ledger](https://github.com/dan8433-user/arcaeon-ledger)-style
+Stage-0 hosted witness for [arcaeon-ledger](https://github.com/dan8433-user/ledger)-style
 append-only hash chains. A hash chain alone cannot catch **truncation** — lop off
 the newest rows and the remainder still verifies. The fix is a witness outside
 your control that records your log's head `(rows, chain)` on a cadence. This is
@@ -55,7 +55,7 @@ to the built-in `internal` plan, which is unlimited but still counted) or
 per-key cap that wins over any plan default).
 
 This is a hand-written Node port of
-[arcaeon-meter](https://github.com/dan8433-user/arcaeon-meter)'s behavior
+[arcaeon-meter](https://github.com/Arcaeon-io/arcaeon-meter)'s behavior
 contract (same denial reasons, same header names, same fail-closed
 default) — arcaeon-meter itself is Python + SQLite and can't run inside a
 Vercel Node function, so `api/_meter.js` reimplements just the semantics
@@ -84,9 +84,15 @@ no CAS loop at all.
 Built 2026-08-14 per `COUNCIL_PRICING_REVIEW_2026-08-14.md` §4 decision #5 (the hard
 gate): the free-tier meter above resets monthly and can't honestly back a
 prepaid, non-expiring per-pin credit promise. This is the mechanism that makes
-one real. **Naming the pack sizes here is not the same as selling them** —
-`.well-known/offers.json` remains the single source of truth for what's
-actually for sale; the pricing cutover is a separate, later step.
+one real. **Naming the pack sizes here is not the same as selling them.**
+Nothing described in this section is for sale today — the Stripe path is
+unwired (see `api/stripe-webhook.js`'s own header), so there is no live
+purchase surface and therefore no live source of truth to point at. A
+prior version of this README claimed `.well-known/offers.json` was that
+source of truth; that file has never existed (confirmed live, pre-invite
+audit 2026-08-23) and the claim was deleted rather than left pointing at
+a 404 in a document meant to be checked. When a real purchase path ships,
+its source of truth gets named here, and not before.
 
 - Free 100/mo stays the default and is unaffected: a key that has never
   purchased credits behaves exactly as before this build.
@@ -632,18 +638,32 @@ api/latest.js          GET /api/latest    — public read via raw + cache-bustin
 api/verify.js           GET /api/verify   — one-call public proof-of-inclusion (no auth, no metering)
 api/health.js           GET /api/health   — live store reachability
 api/status.js            GET /status      — public trust-surface page
-api/status.json.js       GET /api/status.json — machine-readable twin of /status
+                          — /api/status.json is a vercel.json REWRITE to /api/status?format=json, not its own file (a prior version of this table listed api/status.json.js, which has never existed — confirmed live, pre-invite audit 2026-08-23)
 api/badge.js             GET /api/badge   — shields.io-compatible uptime badge
 api/balance.js           GET /api/balance — key-holder's own credit + free-tier read (auth'd, read-only)
-api/credit.js           POST /api/credit  — internal/admin credit top-up (Bearer WITNESS_ADMIN_KEY)
+api/credit.js           POST /api/credit  — internal/admin credit top-up (Bearer WITNESS_ADMIN_KEY); test/credit.test.js
 api/stripe-webhook.js   POST /api/stripe-webhook — real top-up path (501 until WITNESS_STRIPE_WEBHOOK_SECRET is set)
-api/_store.js   shared GitHub-contents-API store for the PUBLIC pin repo (not routed); also holds computeCadenceFields, the cadence-grading function api/latest.js and api/verify.js share
-api/_status_data.js shared data-gathering pass behind /status, /api/status.json, and /api/badge (not routed); carries its own deliberately-independent cadence reimplementation, see its module comment
-api/_meter.js   per-key monthly usage caps against the PRIVATE usage repo (not routed)
-api/_balance.js per-key decrementing credit balance + ledger against the PRIVATE usage repo (not routed)
+api/fulfill.js       GET/POST /api/fulfill — Stripe checkout success_url landing page; verifies the session, provisions/re-shows the buyer's key (idempotent on session_id)
+api/distill.js           GET /api/distill — (see the file's own header for current scope)
+lib/_store.js   shared GitHub-contents-API store for the PUBLIC pin repo (not routed); also holds computeCadenceFields, the cadence-grading function api/latest.js and api/verify.js share
+lib/_status_data.js shared data-gathering pass behind /status, /api/status.json, and /api/badge (not routed); carries its own deliberately-independent cadence reimplementation, see its module comment
+lib/_meter.js   per-key monthly usage caps against the PRIVATE usage repo (not routed)
+lib/_balance.js per-key decrementing credit balance + ledger against the PRIVATE usage repo (not routed)
+lib/_cors.js, lib/_keys.js, lib/_page.js, lib/_ratelimit.js, lib/_status_json.js,
+lib/_welcome_email.js  supporting modules, not independently routed (this line
+                        added 2026-08-24 -- a prior version of this table omitted
+                        all six; regenerate this block from `ls api/ lib/` rather
+                        than hand-maintaining it, since that is exactly how it
+                        drifted the first time)
 ```
 
-Plain Node 18+ serverless functions. No dependencies. No tokens in this repo —
+This table was wrong in both directions at once: it named a file that has
+never existed (`api/status.json.js`) and mis-located four real files under
+`api/` when they live in `lib/`. Confirmed against the working tree, not
+memory, before writing this correction.
+
+Plain Node 20+ serverless functions (package.json declares the floor; this line
+said 18+ and disagreed with it). No dependencies. No tokens in this repo —
 `GITHUB_PIN_TOKEN`, `WITNESS_KEYS`, `WITNESS_PLANS`, `WITNESS_CADENCE`,
 `WITNESS_ADMIN_KEY` (set 2026-08-14), and `WITNESS_STRIPE_WEBHOOK_SECRET`
 (**not yet set — human step**) live only in Vercel env vars. `GITHUB_PIN_TOKEN` is reused for both the
