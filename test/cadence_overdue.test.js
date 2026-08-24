@@ -95,3 +95,90 @@ test("the deadline instant itself counts as overdue (>=, not >)", () => {
   assert.equal(out.cadence_status, "overdue");
   assert.equal(out.overdue_by_seconds, 0);
 });
+
+
+// ---------------------------------------------------------------------------
+// THE ZERO FLOOR on the public status board (pre-invite audit, 2026-08-23).
+//
+// A store holding NOTHING rendered overallOk:true and a green badge reading
+// "ok · 0 ns · 0 overdue" — with no namespaces there are no errors, nothing
+// overdue and nothing ungradeable, so every failure counter was zero and zero
+// read as health. That is "0 found" and "0 looked at" printing identically, on
+// the board whose entire job is saying whether the watched thing is fine.
+//
+// Same missing floor as the mutation harness's MIN_CASES, one surface over.
+// ---------------------------------------------------------------------------
+
+const statusData = require("../lib/_status_data.js");
+const realStore = require("../lib/_store.js");
+
+// A FRESH anchor, so anchor freshness cannot be what makes the verdict
+// indeterminate. The first version of this test stubbed the anchors away too,
+// which left anchorStatus="cannot_determine" carrying `indeterminate` by
+// itself — the test passed with the zero-floor REMOVED. Green by construction,
+// in the test written to catch green by construction. The mutation check is
+// the only reason I know that.
+function stubStore(realStore, { namespaces = [], pin = null } = {}) {
+  const saved = {
+    repoReachable: realStore.repoReachable,
+    listDir: realStore.listDir,
+    getFile: realStore.getFile,
+    getRawFile: realStore.getRawFile,
+    getTree: realStore.getTree,
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  const headName = `${today}-head.txt`;
+  realStore.repoReachable = async () => true;
+  realStore.listDir = async (dir) => {
+    if (dir === "anchors") {
+      return [{ type: "file", name: headName },
+              { type: "file", name: `${headName}.ots` }];
+    }
+    return namespaces.map((n) => ({ type: "dir", name: n }));
+  };
+  realStore.getRawFile = async () => ({ text: `deadbeef ${new Date().toISOString()}` });
+  realStore.getFile = async (path) =>
+    (pin && path.endsWith("latest.json")) ? { json: pin } : null;
+  realStore.getTree = async () => [];
+  return () => Object.assign(realStore, saved);
+}
+
+test("an EMPTY but REACHABLE pin store, with a FRESH anchor, is indeterminate not OK", async () => {
+  const restore = stubStore(realStore);
+  try {
+    const d = await statusData.gatherStatusData();
+    assert.equal(d.reachable, true, "precondition: the store must be UP");
+    assert.equal(d.anchorStatus, "current",
+      "precondition: anchor freshness must NOT be what drives the verdict");
+    assert.equal(d.nothingWatched, true);
+    assert.equal(d.degraded, false,
+      "an empty store is not a FAILURE — three states, not two");
+    assert.equal(d.indeterminate, true,
+      "no evidence either way is exactly what indeterminate is for");
+    assert.equal(d.overallOk, false,
+      "a watcher watching nothing reported itself OK");
+  } finally {
+    restore();
+  }
+});
+
+test("GREEN CONTROL: a store with one healthy namespace reports OK", async () => {
+  // Without this the floor could force indeterminate ALWAYS and the test above
+  // would still pass.
+  const future = new Date(Date.now() + 86400 * 1000).toISOString();
+  const restore = stubStore(realStore, {
+    namespaces: ["acme-prod"],
+    pin: { namespace: "acme-prod", rows: 5, chain: "c".repeat(32),
+           pinned_at: new Date().toISOString(), seq: 5, next_pin_due_by: future },
+  });
+  try {
+    const d = await statusData.gatherStatusData();
+    assert.equal(d.nothingWatched, false);
+    assert.equal(d.overdueCount, 0);
+    assert.equal(d.degraded, false);
+    assert.equal(d.indeterminate, false);
+    assert.equal(d.overallOk, true, "a healthy watched namespace must read OK");
+  } finally {
+    restore();
+  }
+});
