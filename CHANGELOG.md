@@ -14,6 +14,21 @@ the observable effect: `summary.overdue: 0`, `retired_namespaces` = cadence-veri
 audit-20260819; badge now `indeterminate · 8 ns · 0 overdue` (indeterminate is correct: there is
 no current cadence namespace; that is the standing Option-1 floor item, not a defect here).
 
+## 2026-08-30 — Test: `WITNESS_RETIRED_NS` end to end through the status computation (S-arcaeon-10c)
+
+The env-var re-set above was fixed at the ops layer with no test ever exercising the
+retirement filter itself end to end — `loadRetiredNamespaces()` (`lib/_status_data.js`) through
+`status.json`'s summary shaping (`lib/_status_json.js`) had zero coverage. Added
+`test/retired_namespaces.test.js`: (a) full three-name var — `summary.retired_namespaces` lists
+all three, `summary.overdue == 0`, each row still `retired:true` with its real (overdue) cadence
+status; (b) the var SHORT one name (`velouria-audit-20260819` missing) — that namespace counts as
+overdue and the verdict reads `degraded`, the exact 8/24→8/30 production failure encoded as a red
+in the harness now; (c) empty string, whitespace-only, and unset — nothing retired in any case.
+Fixture reuses `cadence_overdue.test.js`'s store-monkeypatch seam (no GitHub calls), extended to
+serve one pin per namespace so the three retirement candidates can be overdue while a fourth,
+non-retired namespace stays current — keeps these assertions isolated from the unrelated ZERO
+FLOOR (`nothingWatched`) mechanism. 127 → 132 tests, all green.
+
 ## 2026-08-22 — `witnessed` is tri-state: not-checked reasons return `null`, never a conclusive `false`
 
 Forced by **ColonistOne's re-run against the deployed build** (Colony, witness
