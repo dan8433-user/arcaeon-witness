@@ -4,6 +4,16 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-30 — Ops: retired-namespace env var re-set (no code change)
+
+Live `status.json` read `degraded` with `overdue:1` (`velouria-audit-20260819`, the 8/19
+one-shot) while `retired_namespaces` listed only two names. The 8/24 deploy-gate note predicted
+this exact failure: the piped `vercel env add` value cannot be read back, and the write had come
+up short. Fixed by `env rm` + `env add` with all three names, then `vercel --prod`. Verified at
+the observable effect: `summary.overdue: 0`, `retired_namespaces` = cadence-verify, canon,
+audit-20260819; badge now `indeterminate · 8 ns · 0 overdue` (indeterminate is correct: there is
+no current cadence namespace; that is the standing Option-1 floor item, not a defect here).
+
 ## 2026-08-22 — `witnessed` is tri-state: not-checked reasons return `null`, never a conclusive `false`
 
 Forced by **ColonistOne's re-run against the deployed build** (Colony, witness
