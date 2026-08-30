@@ -60,6 +60,29 @@
 //     CAS only serializes one session); the window is a few hundred ms and
 //     both racers would have had to hand-pick overlapping prefixes inside it.
 //     Accepted as best-effort; revisit if prefix disputes ever actually occur.
+//
+// REV-2b (board item I-daniel-01, Daniel 12288/12291 again: "shouldnt we let
+// our users pick a prefix that isnt selected") — the picker learns to ANSWER:
+//   - This function now also serves `GET /api/prefix-available?prefix=<p>`,
+//     reached by a vercel.json rewrite onto `/api/fulfill?op=prefix-available`
+//     and dispatched to lib/_prefix_check.js at the very top of the handler,
+//     before the session_id gate. It is unauthenticated, takes no session,
+//     and MINTS NOTHING — it reads the prefix list and answers yes/no plus
+//     three verified-free alternatives. Same rewrite trick vercel.json already
+//     uses for /api/status.json; api/ is at the 12-function cap.
+//   - The picker form checks availability LIVE while the buyer types
+//     (debounced, lib/_prefix_ui.js) and previews the namespace + first-pin
+//     command with their prefix already substituted.
+//   - The success page's install and first-pin commands are copy-boxed, not
+//     hand-selectable <pre>.
+//
+// WHAT DID NOT CHANGE, AND MUST NOT: minting. The availability answer is
+// ADVISORY. The authoritative gate is still the un-cached
+// keys.listPrefixes() + keys.prefixConflicts() pair in the first-time-mint
+// branch below, behind server-side Stripe verification — no client-side check
+// can loosen it, and the picker cannot mint a key by itself. (The manual
+// operator path in projects/online_business/FULFILLMENT_RUNBOOK.md is
+// likewise untouched.)
 
 "use strict";
 
@@ -70,7 +93,13 @@ const welcome = require("../lib/_welcome_email.js");
 // Page template (brand shell, copy boxes, escaping, content negotiation)
 // lives in lib/_page.js since the /api/balance human page — extracted from
 // here verbatim so both endpoints render one brand without a 13th function.
-const { SUPPORT_EMAIL, esc, wantsJson, pageShell, copyBox } = require("../lib/_page.js");
+const { SUPPORT_EMAIL, esc, wantsJson, pageShell, copyBox, copyBlock } = require("../lib/_page.js");
+// Rev-2b (board item I-daniel-01): the live availability check that rides
+// this function under ?op=prefix-available, and the buyer-facing commands +
+// picker script. Both are lib/ files — api/ is at Vercel Hobby's 12-function
+// cap and cannot grow a 13th entry.
+const prefixCheck = require("../lib/_prefix_check.js");
+const prefixUi = require("../lib/_prefix_ui.js");
 
 const DOCS_URL = process.env.WITNESS_DOCS_URL || "https://arcaeon.io/ai";
 const BASE_URL = process.env.WITNESS_BASE_URL || "https://arcaeon-witness.vercel.app";
@@ -192,12 +221,10 @@ ${copyBox("key", record.key)}
 <p class="muted">Check your balance any time at <a href="${esc(BASE_URL)}/api/balance">${esc(BASE_URL)}/api/balance</a> — you paste the key on the page; the link itself carries nothing.</p>
 <p class="warn">Save this key now. This page re-shows it any time via your Stripe receipt link — treat that link like the key itself.</p>
 <h2>Install the client</h2>
-${copyBox("pip", "pip install arcaeon-ledger")}
-<h2>Quickstart</h2>
-<pre>curl -X POST ${esc(BASE_URL)}/api/pin \\
-  -H "Authorization: Bearer &lt;YOUR KEY&gt;" \\
-  -H "Content-Type: application/json" \\
-  -d '{"namespace":"${esc(ns)}main","rows":1,"chain":"&lt;16-hex head&gt;"}'</pre>
+${copyBox("pip", prefixUi.PIP_COMMAND)}
+<h2>Your first pin</h2>
+${copyBlock("curl", prefixUi.pinCurlCommand(BASE_URL, ns))}
+<p class="muted">Your prefix is already filled in. Paste your key where <code>&lt;YOUR KEY&gt;</code> is — it is left as a placeholder on purpose so a copied command never carries your key into shell history.</p>
 <p>Verify (public, no key): <code>GET ${esc(BASE_URL)}/api/verify?ns=${esc(ns)}main&amp;rows=1&amp;chain=…</code> · balance: <code>GET /api/balance</code> with your key.</p>
 ${consentLine}`
   );
@@ -205,6 +232,14 @@ ${consentLine}`
 
 // The first-visit picker (HTML only; session verified, NOTHING minted yet).
 // The form POSTs back to this same endpoint; mint happens on the POST.
+//
+// Rev-2b: the field now answers while they type. #prefix-status carries the
+// free/taken/couldn't-check verdict, #prefix-alts the three free alternatives
+// on a taken pick, and #ns-preview / #curl-preview show what they will
+// actually run — all driven by prefixUi.pickerScript(). The submit button is
+// deliberately never disabled by the check: the POST re-validates server-side
+// (authoritatively), and a client check that is itself unsure must not be
+// able to lock a paying buyer out of their key.
 function pickerHtml(sid, pack, packDef, prefill, errorMsg) {
   const errorBlock = errorMsg ? `<p class="error">${esc(errorMsg)}</p>` : "";
   return pageShell(
@@ -216,11 +251,17 @@ ${errorBlock}
   <input type="hidden" name="session_id" value="${esc(sid)}">
   <label for="prefix">Namespace prefix</label>
   <input type="text" id="prefix" name="prefix" value="${esc(prefill)}" spellcheck="false" autocomplete="off" autocapitalize="none" maxlength="48">
-  <p class="muted">Lowercase letters, digits, and dashes; must end in a dash (e.g. <code>${esc(prefill)}</code> → namespaces like <code>${esc(prefill)}main</code>). It cannot be changed after minting.</p>
+  <span id="prefix-status" class="pstat idle"></span>
+  <div id="prefix-alts"></div>
+  <p class="muted">Lowercase letters, digits, and dashes; must end in a dash. You'll pin <code id="ns-preview">${esc(prefill)}main</code> and anything else starting with it. It cannot be changed after minting.</p>
   <label class="muted" style="font-weight:400"><input type="checkbox" name="consent" value="yes"> Email me occasional product updates (off by default — nothing is sent unless you tick this)</label>
   <button type="submit" class="mint">Mint my witness key</button>
 </form>
-<p class="muted">The suggested prefix works as-is — just mint. Agents: request with <code>Accept: application/json</code> (optionally <code>?prefix=</code>) to mint without this form.</p>`
+<h2>What you'll run</h2>
+${copyBox("pip", prefixUi.PIP_COMMAND)}
+${copyBlock("curl-preview", prefixUi.pinCurlCommand(BASE_URL, prefill))}
+<p class="muted">The suggested prefix works as-is — just mint. Agents: request with <code>Accept: application/json</code> (optionally <code>?prefix=</code>) to mint without this form.</p>
+<script>${prefixUi.pickerScript(BASE_URL)}</script>`
   );
 }
 
@@ -234,6 +275,15 @@ function topupHtml(sessionId, pack, credits, balanceAfter) {
 }
 
 module.exports = async (req, res) => {
+  // --- co-hosted route: GET /api/prefix-available?prefix=<p> ---
+  // vercel.json rewrites that public path here with ?op=prefix-available (the
+  // /api/status.json idiom). Dispatched FIRST: it needs no session_id, no
+  // Stripe call, and no auth, and it must not fall through this function's
+  // session gate. It mints nothing — see the REV-2b header note.
+  if (String((req.query || {}).op || "") === "prefix-available") {
+    return prefixCheck.handle(req, res);
+  }
+
   if (req.method !== "GET" && req.method !== "POST") {
     res.setHeader("allow", "GET, POST");
     return res.status(405).json({ error: "GET or POST only" });

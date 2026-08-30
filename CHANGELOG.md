@@ -4,6 +4,74 @@ Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
 
+## 2026-08-30 — Rev-2b: the prefix picker learns to answer (`/api/prefix-available`), and the commands become copyable
+
+**COMMITTED NOWHERE AND DEPLOYED NOWHERE — working tree only; no Vercel action, no
+Stripe action.** Founder design, Daniel 12288/12291: *"shouldnt we let our users pick a
+prefix that isnt selected"*. Rev-2 gave the buyer a prefix FIELD and no way to know
+whether the pick was free — the only feedback was a rejected form POST after the fact.
+`npm test` 132 → 176, all green.
+
+**1. New `GET /api/prefix-available?prefix=<p>` (`lib/_prefix_check.js`).** Validates
+format (the existing `keys.validatePrefix`), then answers `{available}` against the same
+universe the mint path uses — `WITNESS_KEYS` env bindings plus every issued-key record —
+with the same two-way overlap rule (`acme-` and `acme-labs-` reject each other in BOTH
+directions). Free → `200 {available:true}`. Taken → `200 {available:false, reason:"taken"}`
+plus three alternatives that are each format-valid and verified free, and which DIVERGE
+from the taken stem (`acme2-`, not `acme-hq-` — an extension would collide right back).
+Invalid → `400`. The colliding prefix is never echoed: it belongs to another customer.
+Store failure → `503 {available:null}`, never "free" — an unreadable store must not talk a
+buyer into a pick the mint path will refuse. Input is trimmed+lowercased exactly as
+`api/fulfill.js` normalizes an explicit pick, or the endpoint would answer about a
+different string than the one minted.
+
+**Routing, because `api/` is at Vercel Hobby's 12-function hard cap:** the public path is
+a `vercel.json` rewrite onto `/api/fulfill?op=prefix-available`, dispatched at the top of
+that handler before its session gate — the same trick already in use for
+`/api/status.json`, and the same reasoning that put the balance page on the balance
+function. A test asserts both the rewrite rule and that `api/` still holds ≤12 files:
+without the rewrite this endpoint exists in code and 404s in production.
+
+**Cached 20s, per warm instance.** `keys.listPrefixes()` is a directory listing plus one
+read per issued key; a debounced picker asks once per typing pause and would otherwise
+fan that out every time. The cache lives only in this module — the mint path calls
+`listPrefixes()` directly and never sees it, so a stale entry can make the ADVICE briefly
+wrong and can never widen what an actual mint accepts.
+
+**2. The picker checks live (`lib/_prefix_ui.js`).** 400ms debounce with `clearTimeout`
+on each keystroke, a sequence guard so a slow answer for `acm` can't repaint over a fast
+one for `acme-`, three distinct states (free / taken / couldn't-check), and the three
+alternatives as one-click buttons. "Couldn't check" is never painted as free, and the
+submit button is never disabled by the check — the POST re-validates server-side, and a
+client check that is itself unsure must not be able to lock a paying buyer out of a key
+they have already paid for.
+
+**3. The commands are copy boxes with the prefix already in them.** New `copyBlock()` in
+`lib/_page.js` (multi-line sibling of `copyBox`) — the four-line curl was a bare `<pre>`
+the buyer had to select by hand, which is exactly where a half-selected command comes
+from. The picker previews it live as they type; the success page renders the final one.
+`<YOUR KEY>` stays a placeholder on purpose even on the page showing the key: a one-click
+copy of a command carrying a live bearer key lands that key in shell history.
+
+**BOUNDARY, stated in three files and asserted in the suite: none of this mints.** The
+availability answer is advisory. Key issuance stays exactly where it was — behind
+`api/fulfill.js`'s server-side Stripe session verification, with the un-cached
+`listPrefixes()`/`prefixConflicts()` pair as the authoritative gate — or in an operator's
+hands per `projects/online_business/FULFILLMENT_RUNBOOK.md`. Tests assert the picker
+route's `putLog` is empty and that the client script's only `fetch` is the read-only
+availability URL.
+
+**4. Two new test files, 44 tests, mutation-verified** (`test/prefix_available.test.js`,
+`test/prefix_ui.test.js`). Nothing stubs `listPrefixes` — a test that stubs the
+availability source cannot catch the availability source being wrong; these drive the
+real fan-out against the mock GitHub store. The curl command exists twice (server render,
+browser preview) and `test/prefix_ui.test.js` EVALUATES the browser copy out of the
+shipped script source and diffs its output against the server function across a table of
+prefixes, so drift between the preview and the receipt is a red instead of a support
+email. Planted reds, all confirmed: debounce removed → 1 fail; substitution drifted to
+`prefix + "-main"` → 4 fails; availability forced to always-free → 8 fails; the dispatch
+removed → 25 fails; the rewrite dropped from vercel.json → 1 fail.
+
 ## 2026-08-30 — Ops: retired-namespace env var re-set (no code change)
 
 Live `status.json` read `degraded` with `overdue:1` (`velouria-audit-20260819`, the 8/19

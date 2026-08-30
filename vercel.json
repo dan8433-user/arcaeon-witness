@@ -15,6 +15,10 @@
     {
       "source": "/api/status.json",
       "destination": "/api/status?format=json"
+    },
+    {
+      "source": "/api/prefix-available",
+      "destination": "/api/fulfill?op=prefix-available"
     }
   ]
 }
