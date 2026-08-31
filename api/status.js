@@ -254,6 +254,10 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     <code>${esc(store.BRANCH)}</code>. This page reads the same public sources you can read yourself &mdash;
     every number below links to its raw source.
   </p>
+  <p class="muted"><strong>Independence disclosure: k=1.</strong> Every namespace below traces to one
+    operator root &mdash; a count of independent derivation roots, not of signatures. We measured, the
+    answer is one, and the determinate number beats an indeterminate impression. (Vocabulary owed to
+    an external reviewer's critique: eight signatures from one root is k=1, disclosed &mdash; not k=8.)</p>
 
   <div class="panel">
     <div class="stat-row">
@@ -264,6 +268,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
       <div class="stat"><span class="n" style="${overdueCount ? "color:var(--red-ink)" : ""}">${overdueCount}</span><span class="l">overdue</span></div>
       <div class="stat"><span class="n" style="${ungradeableCount ? "color:var(--amber-ink)" : ""}">${ungradeableCount}</span><span class="l">not gradeable</span></div>
       <div class="stat"><span class="n">${missedEverCount}</span><span class="l">ever missed a deadline</span></div>
+      <div class="stat"><span class="n">k=1</span><span class="l">independent roots (disclosed)</span></div>
       <div class="stat"><span class="n">${obsCount}</span><span class="l">conflicts observed</span></div>
       ${retiredCount ? `<div class="stat"><span class="n">${retiredCount}</span><span class="l">retired (excluded from verdict)</span></div>` : ""}
     </div>

@@ -1,5 +1,17 @@
 # Changelog — arcaeon-witness
 
+## 2026-08-30 — independence disclosure: k=1, stated plainly
+
+The status page and its JSON twin now disclose the root count directly: a
+k=1 stat cell + explainer paragraph on /status, and an `independence` block
+(`roots: 1, disclosed: true`) on /api/status.json. Rationale (owed to an
+external reviewer, sram): eight namespaces signed by one operator is k=1,
+a count of derivation roots, not signatures — and the determinate number
+beats an indeterminate impression. The health tri-state (ok/degraded/
+indeterminate) is unchanged; it grades freshness/gradeability, a different
+axis. The k value changes only when a namespace under someone else's root
+actually exists — that claim stays behind the publish gate until real.
+
 Reverse-chronological. Every entry says what changed and why, and names the
 reviewer whose objection forced it where there was one. Public review is the
 reason this thing works; the credit belongs in the record, not in a thank-you.
