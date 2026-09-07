@@ -73,6 +73,15 @@ module.exports = async (req, res) => {
     if (!result.ok) {
       return res.status(400).json({ error: result.reason, ...result });
     }
+    if (result.ledger_write_failed) {
+      // Same gap as api/pin.js's meterAndCharge (2026-09-05 audit): the
+      // balance already moved correctly; only the audit-trail ledger file
+      // failed to write. Surfaced, not swallowed — see pin.js's comment.
+      console.error(
+        `[credit] ledger write failed for a successful grant: key_hash=${hash.slice(0, 12)} ` +
+          `pack=${body.pack} detail=${result.ledger_write_failed}`
+      );
+    }
     return res.status(200).json({
       ok: true,
       key_hash: hash,
@@ -80,6 +89,7 @@ module.exports = async (req, res) => {
       pins_added: balance.PACKS[body.pack].pins,
       already_credited: !!result.already_credited,
       balance_after: result.balance_after,
+      ...(result.ledger_write_failed ? { ledger_write_failed: true } : {}),
     });
   } catch (err) {
     return res.status(502).json({ error: `credit store error: ${err.message}` });

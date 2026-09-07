@@ -12,6 +12,7 @@
 "use strict";
 
 const { gatherStatusData } = require("../lib/_status_data.js");
+const ratelimit = require("../lib/_ratelimit.js");
 
 module.exports = async (req, res) => {
   // HEAD is a read and must answer like one. Uptime monitors and link checkers
@@ -22,6 +23,23 @@ module.exports = async (req, res) => {
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.setHeader("allow", "GET, HEAD");
     return res.status(405).json({ error: "GET or HEAD only" });
+  }
+
+  // Per-IP rate limit (2026-09-05 audit finding — see api/latest.js's
+  // comment for the full reasoning). This calls the same expensive
+  // gatherStatusData() pass as /status — unauthenticated and, until now,
+  // unlimited, on the shared GITHUB_PIN_TOKEN budget.
+  const rl = ratelimit.check(req);
+  if (rl.limited) {
+    res.setHeader("retry-after", String(rl.retryAfterSeconds));
+    res.setHeader("cache-control", "no-store");
+    return res.status(429).json({
+      schemaVersion: 1,
+      label: "witness",
+      message: "rate limited",
+      color: "lightgrey",
+      isError: true,
+    });
   }
 
   const data = await gatherStatusData();

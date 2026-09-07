@@ -6,10 +6,21 @@
 // practice, raw can serve stale content for MINUTES (its CDN largely ignores
 // query-string cache-busters), so the response names which source served it
 // and always points at the commit history as the authoritative record.
+//
+// Per-IP rate limit (2026-09-05 audit finding, same shape as api/verify.js's
+// — see lib/_ratelimit.js for the honest per-instance limitation). This
+// endpoint was unauthenticated AND unlimited: it shares GITHUB_PIN_TOKEN with
+// every paying customer's /api/pin write, and GitHub's contents API rate
+// limit (~5000 authed requests/hour, per README) is a budget the WHOLE
+// service draws from, reads included. A free, unlimited read endpoint that
+// spends the same shared budget as the money path is a way to deny paying
+// customers without ever touching a key — this closes it the same way
+// verify.js already was.
 
 "use strict";
 
 const store = require("../lib/_store.js");
+const ratelimit = require("../lib/_ratelimit.js");
 
 const HISTORY_BASE = `https://github.com/${store.REPO}/commits/${store.BRANCH}`;
 
@@ -22,6 +33,18 @@ module.exports = async (req, res) => {
   if (req.method !== "GET" && req.method !== "HEAD") {
     res.setHeader("allow", "GET, HEAD");
     return res.status(405).json({ error: "GET or HEAD only" });
+  }
+
+  const rl = ratelimit.check(req);
+  if (rl.limited) {
+    res.setHeader("retry-after", String(rl.retryAfterSeconds));
+    res.setHeader("cache-control", "no-store");
+    return res.status(429).json({
+      ok: false,
+      error: "rate limit exceeded",
+      note: `naive per-instance, per-IP limiter (Stage-0): ~${rl.limit} calls per IP per ${Math.round(rl.windowSeconds / 60)} minutes`,
+      retry_after_seconds: rl.retryAfterSeconds,
+    });
   }
 
   const ns = (req.query && req.query.ns) || "";

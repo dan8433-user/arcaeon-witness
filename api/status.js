@@ -16,6 +16,7 @@
 
 const store = require("../lib/_store.js");
 const cors = require("../lib/_cors.js");
+const ratelimit = require("../lib/_ratelimit.js");
 const { gatherStatusData, humanDuration, BLOB, TREE, REPO_URL } = require("../lib/_status_data.js");
 
 function esc(s) {
@@ -39,6 +40,26 @@ function statusBadge(status, overdueSeconds) {
 }
 
 module.exports = async (req, res) => {
+  // Per-IP rate limit (2026-09-05 audit finding — see api/latest.js's
+  // comment for the full reasoning). This runs BEFORE the format dispatch
+  // below so it covers /api/status.json too, not just the HTML page — this
+  // single gathering pass is also the MOST GitHub-API-expensive read
+  // endpoint in the whole service (a directory listing per namespace, a full
+  // recursive tree fetch, an anchors/ listing), which makes it the single
+  // biggest lever for draining the shared GITHUB_PIN_TOKEN budget that
+  // paying customers' /api/pin calls also depend on.
+  const rl = ratelimit.check(req);
+  if (rl.limited) {
+    res.setHeader("retry-after", String(rl.retryAfterSeconds));
+    res.setHeader("cache-control", "no-store");
+    return res.status(429).json({
+      ok: false,
+      error: "rate limit exceeded",
+      note: `naive per-instance, per-IP limiter (Stage-0): ~${rl.limit} calls per IP per ${Math.round(rl.windowSeconds / 60)} minutes`,
+      retry_after_seconds: rl.retryAfterSeconds,
+    });
+  }
+
   // Merged twin (Vercel Hobby 12-function cap): /api/status.json now routes
   // here via vercel.json rewrite (?format=json). Same data, same schema,
   // rendered by the former api/status.json.js handler now in lib/.

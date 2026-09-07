@@ -284,6 +284,15 @@ module.exports = async (req, res) => {
     // always have one).
     const idempotencyKey = (session && session.id) ? String(session.id) : event.id;
     const result = await balance.creditPack(hash, pack, idempotencyKey, "stripe-webhook");
+    if (result.ledger_write_failed) {
+      // Same gap as api/pin.js's meterAndCharge (2026-09-05 audit): the
+      // balance already moved correctly; only the audit-trail ledger file
+      // failed to write. Surfaced, not swallowed — see pin.js's comment.
+      console.error(
+        `[webhook] ledger write failed for a successful grant: key_hash=${hash.slice(0, 12)} ` +
+          `pack=${pack} session=${session && session.id} detail=${result.ledger_write_failed}`
+      );
+    }
     return res.status(200).json({
       ok: true,
       credited: !result.already_credited,
@@ -291,6 +300,7 @@ module.exports = async (req, res) => {
       balance_after: result.balance_after,
       event_id: event.id,
       session_id: session && session.id,
+      ...(result.ledger_write_failed ? { ledger_write_failed: true } : {}),
     });
   } catch (err) {
     // A real store failure — 500 so Stripe retries per its own backoff

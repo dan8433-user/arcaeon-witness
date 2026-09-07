@@ -421,6 +421,15 @@ module.exports = async (req, res) => {
     const cref = String(session.client_reference_id || "").trim().toLowerCase();
     if (/^[0-9a-f]{64}$/.test(cref)) {
       const result = await balance.creditPack(cref, pack, sid, "stripe-fulfill-topup");
+      if (result.ledger_write_failed) {
+        // Same gap as api/pin.js's meterAndCharge / api/stripe-webhook.js
+        // (2026-09-05 audit): the balance already moved correctly; only the
+        // audit-trail ledger file failed to write. Surfaced, not swallowed.
+        console.error(
+          `[fulfill] ledger write failed for a successful topup grant: key_hash=${cref.slice(0, 12)} ` +
+            `pack=${pack} session=${sid.slice(0, 24)}… detail=${result.ledger_write_failed}`
+        );
+      }
       return respond(req, res, 200,
         {
           ok: true,
@@ -431,6 +440,7 @@ module.exports = async (req, res) => {
           already_credited: !!result.already_credited,
           note: "session referenced an existing key (client_reference_id) — credited, no new key minted",
           docs_url: DOCS_URL,
+          ...(result.ledger_write_failed ? { ledger_write_failed: true } : {}),
         },
         () => topupHtml(sid, pack, packDef.pins, result.balance_after));
     }
@@ -576,6 +586,15 @@ module.exports = async (req, res) => {
       created_at: record.created_at,
     });
     const grant = await balance.creditPack(record.key_hash, record.pack, sid, "stripe-fulfill");
+    if (grant.ledger_write_failed) {
+      // Same gap as api/pin.js's meterAndCharge / api/stripe-webhook.js
+      // (2026-09-05 audit): the balance already moved correctly; only the
+      // audit-trail ledger file failed to write. Surfaced, not swallowed.
+      console.error(
+        `[fulfill] ledger write failed for a successful mint grant: key_hash=${record.key_hash.slice(0, 12)} ` +
+          `pack=${record.pack} session=${sid.slice(0, 24)}… detail=${grant.ledger_write_failed}`
+      );
+    }
 
     // Consent capture (one line on the page; stored on the fulfillment
     // record; default stays false unless explicitly asked). Best-effort — a
@@ -615,6 +634,7 @@ module.exports = async (req, res) => {
       credit_balance: grant.balance_after,
       free_tier_monthly_cap: meter.PLAN_CAPS.free,
       already_fulfilled: !firstVisit,
+      ...(grant.ledger_write_failed ? { ledger_write_failed: true } : {}),
       consent_product_updates: consentStored,
       support: SUPPORT_EMAIL,
     };

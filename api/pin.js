@@ -22,6 +22,7 @@
 
 "use strict";
 
+const crypto = require("crypto");
 const store = require("../lib/_store.js");
 const meter = require("../lib/_meter.js");
 const balance = require("../lib/_balance.js");
@@ -112,6 +113,22 @@ async function meterAndCharge(key) {
     if (c.ok) {
       headers["X-Credit-Balance"] = String(c.balance);
       headers["X-Meter-Source"] = "credit";
+      if (c.ledger_write_failed) {
+        // The BALANCE is correct and already moved (c.ok is true) — only the
+        // append-only AUDIT record for this decrement failed to write.
+        // Dropping this silently (2026-09-05 audit finding) contradicted
+        // this repo's own promise that a ledger-write failure is "surfaced
+        // in the return value, not swallowed" (_balance.js's comment) — true
+        // one level down, false at every caller until now, since every
+        // caller read `c.ok`/`result.ok` and discarded the rest of the
+        // object. Logged here so an operator can reconcile the ledger by
+        // hand; the header lets a caller that cares notice too.
+        console.error(
+          `[pin] ledger write failed for a successful credit decrement: ` +
+            `key=${c.key_hash.slice(0, 12)} seq=${c.seq} detail=${c.ledger_write_failed}`
+        );
+        headers["X-Ledger-Write-Failed"] = "true";
+      }
       return { ok: true, source: "credit", headers };
     }
     if (c.ever_purchased) {
@@ -158,6 +175,56 @@ async function meterAndCharge(key) {
 function applyHeaders(res, headers) {
   if (!headers) return;
   for (const k of Object.keys(headers)) res.setHeader(k, headers[k]);
+}
+
+// ---- compensating refund for a charge whose paired write never landed ----
+// (2026-09-05 audit finding.) meterAndCharge above charges BEFORE the write
+// commits, deliberately: that ordering is what makes "every rejection charges
+// nothing" true. It leaves exactly one gap the 2026-08-14 fix didn't close: a
+// charge that SUCCEEDS, immediately followed by a genuine, non-wedged write
+// failure (a transient GitHub 5xx, a dropped connection) — the credit is
+// gone and no pin landed. That is a real instance of "a credit debited
+// without a pin landing," not a hypothetical.
+//
+// The refund id is fresh per call (crypto.randomUUID), NOT derived from
+// {namespace, seq}. A failed write never advances latest.json, so a client
+// retry after the resulting 502 recomputes the SAME next seq — deriving the
+// refund id from {namespace, seq} would make a SECOND real charge (the
+// retry's own decrementCredit call) collide with the FIRST refund's
+// idempotency key in balance.grantCredits' applied_events set, and the
+// second charge's refund would be silently swallowed as "already applied"
+// (caught live by this fix's own regression test before this was corrected).
+// Cross-call idempotency was never actually needed: refundFailedWrite runs
+// at most once per charge, synchronously, immediately before the request
+// that made the charge ends — grantCredits' own internal CAS retry loop
+// already makes THIS SINGLE call idempotent against transient conflicts.
+//
+// Free-tier meter usage has NO symmetric refund: _meter.js has no decrement
+// primitive, and this is a documented, non-money residual, not a hidden one
+// — a customer can lose at most one of their monthly free pins to this same
+// failure shape. Money is what must never be taken for nothing; free-tier
+// count drift is not.
+async function refundFailedWrite(key, chargeSource, namespace, seq, cause) {
+  if (chargeSource !== "credit" || !Number.isInteger(seq)) return;
+  const hash = balance.keyHash(key);
+  const refundId = `refund-write-failure-${namespace}-${seq}-${crypto.randomUUID()}`;
+  try {
+    const r = await balance.grantCredits(hash, 1, "refund", refundId, "pin-write-failure-refund");
+    console.error(
+      `[pin] refunded 1 credit after write failure: ns=${namespace} seq=${seq} ` +
+        `key=${hash.slice(0, 12)} already=${!!r.already_credited} cause=${cause && cause.message}`
+    );
+  } catch (refundErr) {
+    // The write already failed; a failed refund on top of it must not mask
+    // the original error or throw past the caller's response. This IS a real
+    // gap — surfaced loudly server-side (this repo's own honesty discipline)
+    // rather than silently swallowed. Manual reconciliation via /api/credit
+    // is the operator recourse until this line fires never.
+    console.error(
+      `[pin] REFUND FAILED after write failure -- credit lost: ns=${namespace} seq=${seq} ` +
+        `key=${hash.slice(0, 12)} refund_err=${refundErr.message} original_err=${cause && cause.message}`
+    );
+  }
 }
 
 // ---- orphaned-seq self-heal (2026-08-14 repair — the escalation the audit flagged) ----
@@ -398,8 +465,13 @@ module.exports = async (req, res) => {
   // — monotonic, head-conflict, renewal precondition, wedged namespace — and
   // the idempotent no-op re-pin all return BEFORE any charge, so a pin that
   // records nothing burns nothing. `metered` guards against charging twice
-  // across a self-heal retry.
+  // across a self-heal retry. `chargeSource`/`lastAttemptedSeq` back
+  // refundFailedWrite (2026-09-05): once a charge lands, a later genuine
+  // write failure must refund it rather than let the charge stand for
+  // nothing (see that function's header).
   let metered = false;
+  let chargeSource = null;
+  let lastAttemptedSeq = null;
 
   const latestPath = `pins/${namespace}/latest.json`;
   const MAX_PASSES = 4; // 1 normal pass; extra passes only when a wedge self-heals
@@ -494,6 +566,7 @@ module.exports = async (req, res) => {
             applyHeaders(res, charge.headers);
             if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
             metered = true;
+            chargeSource = charge.source;
           }
 
           // --- renewal (excelsior's invariants; see _store.appendInterval) ---
@@ -502,6 +575,7 @@ module.exports = async (req, res) => {
           const cadenceHours = store.resolveCadenceHours(namespace);
           const dueBy = new Date(renewedAt.getTime() + cadenceHours * 3600_000).toISOString();
           const seq = Number.isInteger(prev.seq) ? prev.seq + 1 : 1;
+          lastAttemptedSeq = seq;
           const hist = store.appendInterval(prev, {
             now: renewedAt, seq, cadenceHours, dueBy, kind: "publisher_heartbeat",
           });
@@ -567,6 +641,10 @@ module.exports = async (req, res) => {
               if (reheal.deny) return res.status(reheal.deny.status).json(reheal.deny.body);
               continue;
             }
+            // Reaching here means this request is about to fail (409 wedged-
+            // out-of-budget, or 502 genuine store error) with no write landed
+            // — but the charge above already did. Refund before throwing.
+            await refundFailedWrite(key, chargeSource, namespace, seq, err);
             throw err;
           }
         }
@@ -598,9 +676,11 @@ module.exports = async (req, res) => {
         applyHeaders(res, charge.headers);
         if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
         metered = true;
+        chargeSource = charge.source;
       }
 
       const seq = cur && Number.isInteger(cur.json.seq) ? cur.json.seq + 1 : 1;
+      lastAttemptedSeq = seq;
       const pinnedAt = new Date();
       const cadenceHours = store.resolveCadenceHours(namespace);
       const dueBy = new Date(pinnedAt.getTime() + cadenceHours * 3600_000).toISOString();
@@ -655,12 +735,19 @@ module.exports = async (req, res) => {
           if (reheal.deny) return res.status(reheal.deny.status).json(reheal.deny.body);
           continue;
         }
+        // About to fail with no write landed, but the charge above already
+        // happened — refund it before throwing (see refundFailedWrite header).
+        await refundFailedWrite(key, chargeSource, namespace, seq, err);
         throw err;
       }
     }
 
     // Passes exhausted — the namespace kept re-wedging faster than repair could
     // converge (should be unreachable in practice). Report typed, don't spin.
+    // Charged-but-unwritten residual applies here too — a charge could have
+    // landed on an earlier pass before this fallthrough was ever reached.
+    await refundFailedWrite(key, chargeSource, namespace, lastAttemptedSeq,
+      new Error("namespace repair did not converge within the retry budget"));
     return res.status(409).json({
       error: "namespace is wedged and automatic repair did not converge within the retry budget",
       reason: "orphaned_seq_record",

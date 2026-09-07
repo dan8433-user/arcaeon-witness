@@ -271,3 +271,164 @@ test("REGRESSION (excelsior): a rejected owner-gate renewal (403) charges no met
   );
   assert.equal(usedAfter, usedBefore, "a 403'd renewal must not touch testkeyB's meter at all (still null/unset)");
 });
+
+// ---------------------------------------------------------------------
+// REGRESSION (2026-09-05 audit): a credit charged for a pin must be
+// refunded if the write it paid for never lands. Before this fix,
+// meterAndCharge's own documented ordering (charge, THEN write) had exactly
+// one uncovered failure mode: the charge succeeds and the write fails for a
+// real, non-wedged reason (a transient store 5xx) — the credit was gone and
+// no pin existed. Every prior audit here covered the REJECTION-before-charge
+// case; none covered a genuine post-charge write failure.
+// ---------------------------------------------------------------------
+
+function zeroCapPlan(hash) {
+  return JSON.stringify({ [hash]: { plan: "free", monthly_cap: 0 } });
+}
+
+test("REGRESSION (2026-09-05): a credit debited for a pin is refunded when the write never lands (non-wedged store failure)", async () => {
+  const balanceLib = require("../lib/_balance.js");
+  const hash = balanceLib.keyHash("testkeyA");
+  await balanceLib.grantCredits(hash, 5, "test-seed", "evt-refund-seed-1", "test");
+
+  const savedPlans = process.env.WITNESS_PLANS;
+  process.env.WITNESS_PLANS = zeroCapPlan(hash); // force straight to credit on pin #1
+  try {
+    const ns = "demo-refund-fail1";
+    // The seq-1 record's write fails as a genuine store error (not a
+    // conflict, not a racing writer) — a transient GitHub 5xx.
+    gh.forceFailure(PIN_REPO, `pins/${ns}/00000001.json`, 1, 500);
+
+    const before = await balanceLib.readBalance(hash);
+    assert.equal(before.balance, 5);
+
+    const res = makeRes();
+    await pinHandler(pinReq({ namespace: ns, rows: 1, chain: "aa11bb22" }), res);
+
+    // The write genuinely failed — the caller must see a real error, never a
+    // fabricated 201.
+    assert.equal(res._status, 502);
+    assert.equal(gh.has(PIN_REPO, `pins/${ns}/00000001.json`), false, "no pin record was actually written");
+
+    // And the credit charged for that write must be back.
+    const after = await balanceLib.readBalance(hash);
+    assert.equal(after.balance, 5, "a debited credit must be refunded when its paired write never lands");
+  } finally {
+    if (savedPlans === undefined) delete process.env.WITNESS_PLANS;
+    else process.env.WITNESS_PLANS = savedPlans;
+  }
+});
+
+test("REGRESSION (2026-09-05): each of several independent failed attempts refunds its OWN charge (no drift, no cross-attempt collision)", async () => {
+  const balanceLib = require("../lib/_balance.js");
+  const hash = balanceLib.keyHash("testkeyA");
+  await balanceLib.grantCredits(hash, 5, "test-seed", "evt-refund-seed-2", "test");
+
+  const savedPlans = process.env.WITNESS_PLANS;
+  process.env.WITNESS_PLANS = zeroCapPlan(hash);
+  try {
+    const ns = "demo-refund-fail2";
+    // Two SEPARATE client attempts at the same (never-advancing) namespace,
+    // each of which fails on its own seq-1 write. This is the exact shape
+    // that broke a namespace+seq-derived idempotency key: since the write
+    // never lands, latest.json never advances, so both attempts compute the
+    // identical next seq — a refund id built from {namespace, seq} alone
+    // would make attempt #2's real charge collide with attempt #1's refund.
+    gh.forceFailure(PIN_REPO, `pins/${ns}/00000001.json`, 2, 500);
+
+    const res1 = makeRes();
+    await pinHandler(pinReq({ namespace: ns, rows: 1, chain: "aa11bb22" }), res1);
+    assert.equal(res1._status, 502);
+    const mid = await balanceLib.readBalance(hash);
+    assert.equal(mid.balance, 5, "attempt #1's charge must be refunded before attempt #2 even runs");
+
+    const res2 = makeRes();
+    await pinHandler(pinReq({ namespace: ns, rows: 1, chain: "aa11bb22" }), res2);
+    assert.equal(res2._status, 502);
+    const final = await balanceLib.readBalance(hash);
+    assert.equal(final.balance, 5, "attempt #2's OWN charge must also be refunded, not swallowed by attempt #1's refund id");
+  } finally {
+    if (savedPlans === undefined) delete process.env.WITNESS_PLANS;
+    else process.env.WITNESS_PLANS = savedPlans;
+  }
+});
+
+test("REGRESSION (2026-09-05): a WEDGED write failure that exhausts the repair budget also refunds its charge", async () => {
+  const balanceLib = require("../lib/_balance.js");
+  const hash = balanceLib.keyHash("testkeyA");
+  await balanceLib.grantCredits(hash, 3, "test-seed", "evt-refund-seed-3", "test");
+
+  const savedPlans = process.env.WITNESS_PLANS;
+  process.env.WITNESS_PLANS = zeroCapPlan(hash);
+  try {
+    const ns = "demo-refund-wedge1";
+    // The proactive healIfWedged check on pass 0 finds nothing (no orphan
+    // exists yet), so the charge lands normally. Every actual seq-1 write
+    // attempt after that is then forced to 409 (more times than MAX_PASSES
+    // can self-heal past) — and because the PUT is forced to fail, the
+    // record never actually lands, so each self-heal re-check also finds no
+    // orphan and just retries. The pass budget exhausts with the charge
+    // already taken and nothing ever written.
+    gh.forceConflict(PIN_REPO, `pins/${ns}/00000001.json`, 10);
+
+    const res = makeRes();
+    await pinHandler(pinReq({ namespace: ns, rows: 1, chain: "aa11bb22" }), res);
+    assert.equal(res._status, 409);
+    assert.equal(res._body.reason, "orphaned_seq_record");
+    assert.equal(gh.has(PIN_REPO, `pins/${ns}/00000001.json`), false, "no pin record was actually written");
+
+    const after = await balanceLib.readBalance(hash);
+    assert.equal(after.balance, 3, "a wedge that never resolves (never repairs) must also refund the charge it already took");
+  } finally {
+    if (savedPlans === undefined) delete process.env.WITNESS_PLANS;
+    else process.env.WITNESS_PLANS = savedPlans;
+  }
+});
+
+// ---------------------------------------------------------------------
+// REGRESSION (2026-09-05 audit): a ledger-write failure on an otherwise-
+// successful charge must be surfaced, not silently dropped. _balance.js's
+// decrementCredit already returned `ledger_write_failed` on its own comment's
+// promise ("surfaced in the return value, not swallowed") — but pin.js's
+// meterAndCharge read only `c.ok` and threw the rest of the object away,
+// so the promise was true one file down and false at the only caller.
+// ---------------------------------------------------------------------
+
+test("REGRESSION (2026-09-05): a ledger-write failure on a successful credit decrement is surfaced via a response header, not swallowed", async () => {
+  const balanceLib = require("../lib/_balance.js");
+  const hash = balanceLib.keyHash("testkeyA");
+  await balanceLib.grantCredits(hash, 5, "test-seed", "evt-ledger-seed-1", "test");
+
+  const savedPlans = process.env.WITNESS_PLANS;
+  process.env.WITNESS_PLANS = zeroCapPlan(hash);
+  try {
+    const ns = "demo-ledgerlog1";
+    // The balance file itself writes fine — only its paired append-only
+    // ledger/ audit record (a SEPARATE file) fails to write. The decrement's
+    // seq continues the balance file's own seq counter (already at 1 from
+    // the grantCredits seed above), so the first decrement is seq=2, not
+    // seq=1 — read it back rather than assuming, per this repo's own rule
+    // about not inferring an identifier that can be read from the source.
+    const usageRepo = process.env.GITHUB_USAGE_REPO;
+    const seeded = await balanceLib.readBalance(hash);
+    const decrementSeq = seeded.seq + 1;
+    const ledgerPath = balanceLib.ledgerDecrementPath(hash, decrementSeq);
+    gh.forceFailure(usageRepo, ledgerPath, 1, 500);
+
+    const res = makeRes();
+    await pinHandler(pinReq({ namespace: ns, rows: 1, chain: "aa11bb22" }), res);
+
+    // The pin itself still succeeds — the balance moved correctly.
+    assert.equal(res._status, 201);
+    assert.equal(
+      res._headers["x-ledger-write-failed"], "true",
+      "a ledger-write failure on an otherwise-successful charge must be surfaced, not swallowed"
+    );
+
+    const after = await balanceLib.readBalance(hash);
+    assert.equal(after.balance, 4, "the balance itself is correct even though its own audit record failed to write");
+  } finally {
+    if (savedPlans === undefined) delete process.env.WITNESS_PLANS;
+    else process.env.WITNESS_PLANS = savedPlans;
+  }
+});

@@ -53,6 +53,7 @@ class MockGitHubStore {
     // This log is authored by the fixture, not by the handler.
     this.getLog = []; // [path] — every GET attempted, hit or miss, in order
     this._forced = new Map(); // "repo::path" -> remaining forced-conflict count
+    this._forcedFailure = new Map(); // "repo::path" -> {remaining, status}
   }
 
   _repoMap(repo) {
@@ -86,6 +87,16 @@ class MockGitHubStore {
   // of the sha sent — simulates n-1 losers of a concurrent-write race.
   forceConflict(repo, path, n = 1) {
     this._forced.set(`${repo}::${path}`, n);
+  }
+
+  // Force the next `n` PUTs to `path` to fail as a GENUINE (non-conflict)
+  // store failure — a transient GitHub 5xx, not a racing writer. Distinct
+  // from forceConflict on purpose: `err.conflict` must stay false so callers
+  // exercise their real-failure path (2026-09-05 audit: pin.js charged a
+  // credit/meter count and then hit exactly this shape with no compensating
+  // refund — this fixture is what makes that regression reproducible).
+  forceFailure(repo, path, n = 1, status = 500) {
+    this._forcedFailure.set(`${repo}::${path}`, { remaining: n, status });
   }
 
   async handleFetch(url, opts) {
@@ -131,6 +142,11 @@ class MockGitHubStore {
       if (forced && forced > 0) {
         this._forced.set(forceKey, forced - 1);
         return fakeResponse(409, { message: "mock: forced conflict (simulated racing writer)" });
+      }
+      const forcedFail = this._forcedFailure.get(forceKey);
+      if (forcedFail && forcedFail.remaining > 0) {
+        forcedFail.remaining -= 1;
+        return fakeResponse(forcedFail.status, { message: "mock: forced non-conflict store failure" });
       }
 
       if (body.sha) {

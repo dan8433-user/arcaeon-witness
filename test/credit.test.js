@@ -169,3 +169,23 @@ test("crediting by key_hash and by raw key reach the same account", async () => 
   assert.equal(bal, balance.PACKS.mini.pins * 2,
     "raw key and its hash must not resolve to different accounts");
 });
+
+// REGRESSION (2026-09-05 audit): a ledger-write failure on an otherwise-
+// successful grant must be surfaced in the response, not silently dropped —
+// same gap and same fix as pin.test.js's sibling regression for the decrement
+// side. The balance moves correctly either way; only the audit trail failed.
+test("REGRESSION (2026-09-05): a ledger-write failure on a successful grant is surfaced, not swallowed", async () => {
+  const key = "ledger-fail-key";
+  const hash = balance.keyHash(key);
+  const ledgerPath = balance.ledgerGrantPath(hash, "evt-ledger-fail-1");
+  store.forceFailure(process.env.GITHUB_USAGE_REPO, ledgerPath, 1, 500);
+
+  const res = await call({ body: { pack: "mini", event_id: "evt-ledger-fail-1", key } });
+  assert.equal(res._status, 200, "the grant itself must still succeed — only its audit record failed");
+  assert.equal(res._body.ok, true);
+  assert.equal(res._body.ledger_write_failed, true,
+    "a ledger-write failure on an otherwise-successful grant must be surfaced, not swallowed");
+
+  const bal = await balance.readBalance(hash);
+  assert.equal(bal.balance, balance.PACKS.mini.pins, "the balance itself is correct regardless of the ledger write");
+});
