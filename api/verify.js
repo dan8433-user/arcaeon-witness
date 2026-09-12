@@ -1,4 +1,5 @@
 // GET /api/verify?ns=<namespace>&rows=<n>&chain=<hex>  (&digest= is an alias for chain)
+// POST /api/verify?op=bulk  { "items": [{ns, rows, chain|digest}, ...] }
 //
 // One-call public proof-of-inclusion (board item 20): "does this exact head
 // exist in the witness record?" No auth, no metering — this is a funnel and
@@ -23,6 +24,17 @@
 // public unauthenticated GET, so the cap exists to bound this repo's shared
 // GitHub API budget per call, not to meter the caller. A scan that exhausts
 // the cap without a conclusive answer says so honestly rather than guessing.
+//
+// BULK MODE (K-017/K-018, BATCH_500 lane K, section 8 rule 4; design doc:
+// BULK_VERIFY_DESIGN.md). `?op=bulk` is a MODE on this same function, not a
+// new file — arcaeon-witness/api/ is at the Vercel Hobby 12-function cap
+// (confirmed K-016), and the `?op=` dispatch pattern already exists on
+// api/fulfill.js (`?op=prefix-available`). Bulk mode calls `verifyItem` — the
+// SAME lookup logic the single-item path below calls — once per item, in
+// order, never short-circuiting on the first failure, and emits no verdict
+// word verifyItem doesn't already emit. An oversized batch is refused whole,
+// before any store read, mirroring arcaeon_receipt/cite_batch.py's
+// cap-or-refuse pattern. See BULK_VERIFY_DESIGN.md for the full contract.
 
 "use strict";
 
@@ -35,6 +47,14 @@ const RAW_BASE = `https://raw.githubusercontent.com/${store.REPO}/${store.BRANCH
 
 const MAX_HISTORY_SCAN = 50;
 
+// Bulk-batch cap (BULK_VERIFY_DESIGN.md "The cap, and refusal"): a single
+// verify lookup can cost up to MAX_HISTORY_SCAN store reads in the worst
+// case (a deep historical scan), so a bulk call's worst-case cost is
+// MAX_BULK_ITEMS * MAX_HISTORY_SCAN reads. 20 keeps that bounded while still
+// being a useful batch size; it's a plain constant, not load-bearing enough
+// to need its own config surface yet.
+const MAX_BULK_ITEMS = 20;
+
 function seqName(seq) {
   return String(seq).padStart(8, "0");
 }
@@ -43,11 +63,269 @@ function rawRecordUrl(ns, seq) {
   return `${RAW_BASE}/pins/${ns}/${seqName(seq)}.json`;
 }
 
+// The single-item verify logic, factored out so bulk mode calls the exact
+// same implementation instead of a second hand-copy (section 8 rule 6: never
+// a second implementation of a verdict without a parity mechanism — here the
+// mechanism is "there is only one implementation"). Returns {status, body}
+// instead of writing to a response, so both the single-item path and bulk
+// mode can use it. Never throws — every failure mode returns a body.
+async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
+  const ns = rawNs || "";
+  if (!store.NS_RE.test(ns)) {
+    return { status: 400, body: { error: "ns must match [a-z0-9-]{1,64}" } };
+  }
+
+  const rowsRaw = rawRows;
+  const rows = Number(rowsRaw);
+  if (!Number.isInteger(rows) || rows < 1 || String(rowsRaw).trim() === "") {
+    return { status: 400, body: { error: "rows must be a positive integer" } };
+  }
+
+  // chain and digest are aliases for the same field; both may be given only
+  // if they agree (a caller passing two different fingerprints for one check
+  // almost certainly has a bug, and guessing which one they meant would be
+  // exactly the kind of silent fallthrough this repo's write paths refuse to
+  // do — see api/pin.js's unknown-intent handling).
+  const chainParam = typeof rawChain === "string" ? rawChain : null;
+  const digestParam = typeof rawDigest === "string" ? rawDigest : null;
+  if (chainParam && digestParam && chainParam.toLowerCase() !== digestParam.toLowerCase()) {
+    return { status: 400, body: { error: "chain and digest were both given and disagree — pass one" } };
+  }
+  const chain = chainParam || digestParam || "";
+  if (!store.CHAIN_RE.test(chain)) {
+    return { status: 400, body: { error: "chain (or digest) must be a hex string of 8-64 chars" } };
+  }
+  const chainLower = chain.toLowerCase();
+
+  const historyUrl = `${HISTORY_BASE}/pins/${ns}`;
+
+  let cur;
+  try {
+    cur = await store.getFile(`pins/${ns}/latest.json`);
+  } catch (err) {
+    return { status: 502, body: { error: `pin store read error: ${err.message}` } };
+  }
+
+  if (!cur) {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        // null, not false: there is no record set to decide against. A conclusive
+        // false is reserved for heads the store actively contradicts.
+        witnessed: null,
+        pin: null,
+        reason: "no_pin_recorded_for_namespace",
+        note: `no pin has ever been recorded for namespace "${ns}" — the witness has no basis to confirm or refute this head`,
+        history: historyUrl,
+      },
+    };
+  }
+
+  const latest = cur.json;
+
+  function witnessedResponse(record, isCurrentHead) {
+    const cadenceFields = store.computeCadenceFields(record);
+    return {
+      ok: true,
+      witnessed: true,
+      pin: record,
+      seq: record.seq,
+      pinned_at: record.pinned_at,
+      is_current_head: isCurrentHead,
+      raw_record_url: rawRecordUrl(ns, record.seq),
+      history: historyUrl,
+      note: isCurrentHead
+        ? "this is the namespace's current witnessed head"
+        : "this exact (rows, chain) was witnessed, but the namespace has since advanced past it — this is a superseded historical head, not the current one; cadence fields below describe THIS record, not the namespace's live status",
+      ...cadenceFields,
+    };
+  }
+
+  // --- case 1: matches the current head ---
+  if (Number.isInteger(latest.rows) && rows === latest.rows) {
+    if (String(latest.chain).toLowerCase() === chainLower) {
+      return { status: 200, body: witnessedResponse(latest, true) };
+    }
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        witnessed: false,
+        pin: null,
+        reason: "rows_match_chain_mismatch",
+        note: "a record exists at this rows count, but its witnessed chain differs from the one submitted — this is not the accepted head",
+        accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
+        raw_record_url: rawRecordUrl(ns, latest.seq),
+        history: historyUrl,
+      },
+    };
+  }
+
+  // --- case 2: rows exceeds the current head — cannot have been witnessed yet ---
+  if (Number.isInteger(latest.rows) && rows > latest.rows) {
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        // null, not false: a head ahead of the current pin hasn't been witnessed
+        // YET — the store can't refute it, only report what it has accepted.
+        witnessed: null,
+        pin: null,
+        reason: "exceeds_current_head",
+        note: `requested rows (${rows}) is ahead of the namespace's current witnessed head (${latest.rows}) — it cannot have been witnessed yet; not a refutation`,
+        accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
+        history: historyUrl,
+      },
+    };
+  }
+
+  // --- case 3: rows is behind the current head — bounded backward scan of history ---
+  // Same-rows accepted records have a unique chain (conflicts never land in
+  // pins/, see api/pin.js), so the first record found at rows===target is
+  // conclusive: match its chain, or it's a real mismatch, either way done.
+  let seq = Number.isInteger(latest.seq) ? latest.seq - 1 : 0;
+  let scanned = 0;
+  try {
+    while (seq >= 1 && scanned < MAX_HISTORY_SCAN) {
+      let got;
+      try {
+        got = await store.getFile(`pins/${ns}/${seqName(seq)}.json`);
+      } catch (err) {
+        return { status: 502, body: { error: `pin store read error during history scan: ${err.message}` } };
+      }
+      scanned += 1;
+      if (!got) {
+        // A gap in numbering shouldn't happen, but don't loop forever on one.
+        seq -= 1;
+        continue;
+      }
+      const rec = got.json;
+      if (Number.isInteger(rec.rows) && rec.rows === rows) {
+        if (String(rec.chain).toLowerCase() === chainLower) {
+          return { status: 200, body: witnessedResponse(rec, false) };
+        }
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            witnessed: false,
+            pin: null,
+            reason: "rows_match_chain_mismatch",
+            note: "a historical record exists at this rows count, but its witnessed chain differs from the one submitted",
+            scanned,
+            raw_record_url: rawRecordUrl(ns, rec.seq),
+            history: historyUrl,
+          },
+        };
+      }
+      if (Number.isInteger(rec.rows) && rec.rows < rows) {
+        // Rows only ever advance forward across records; once we've stepped
+        // below the target without an exact hit, that rows count was never
+        // pinned (an advance can skip past values) — conclusively not found.
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            witnessed: false,
+            pin: null,
+            reason: "rows_never_witnessed",
+            note: `rows=${rows} falls between two witnessed heads and was never itself the head — it was skipped by an advance`,
+            scanned,
+            history: historyUrl,
+          },
+        };
+      }
+      seq -= 1;
+    }
+  } catch (err) {
+    return { status: 502, body: { error: `pin store read error during history scan: ${err.message}` } };
+  }
+
+  const boundReached = scanned >= MAX_HISTORY_SCAN;
+  return {
+    status: 200,
+    body: {
+      ok: true,
+      // Tri-state: a capped scan is an INCOMPLETE check, so it may not assert a
+      // conclusive negative — witnessed:null. Reaching the start of history
+      // without a match IS conclusive — witnessed:false.
+      witnessed: boundReached ? null : false,
+      pin: null,
+      reason: boundReached ? "scan_bound_reached" : "not_found_in_history",
+      note: boundReached
+        ? `not found within a bounded backward scan of ${scanned} historical record(s) — older records may exist and were NOT checked; browse the full commit history directly to check further back`
+        : "reached the start of this namespace's history without a match",
+      scanned,
+      history: historyUrl,
+    },
+  };
+}
+
+// POST /api/verify?op=bulk — see BULK_VERIFY_DESIGN.md for the full contract.
+async function handleBulk(req, res) {
+  if (req.method !== "POST") {
+    res.setHeader("allow", "POST");
+    return res.status(405).json({ error: "bulk verify is POST only" });
+  }
+
+  res.setHeader("cache-control", "no-store");
+
+  const body = typeof req.body === "object" && req.body ? req.body : {};
+  const items = body.items;
+
+  if (!Array.isArray(items)) {
+    return res.status(400).json({ ok: false, error: "items must be a non-empty array" });
+  }
+  if (items.length === 0) {
+    return res.status(400).json({ ok: false, error: "items must be a non-empty array" });
+  }
+  // Cap check BEFORE any store read — an oversized batch is refused whole,
+  // never truncated and never partially processed (BULK_VERIFY_DESIGN.md,
+  // mirroring arcaeon_receipt/cite_batch.py's cap-or-refuse pattern).
+  if (items.length > MAX_BULK_ITEMS) {
+    return res.status(400).json({
+      ok: false,
+      error: `batch exceeds cap of ${MAX_BULK_ITEMS} items`,
+      count: items.length,
+      cap: MAX_BULK_ITEMS,
+    });
+  }
+
+  const results = [];
+  // Plain sequential loop, never Promise.all: one item's rejection must not
+  // take down the batch, and results must land in request order.
+  for (const raw of items) {
+    const item = typeof raw === "object" && raw ? raw : {};
+    const { status, body: itemBody } = await verifyItem(item.ns, item.rows, item.chain, item.digest);
+    results.push({
+      ns: item.ns,
+      rows: item.rows,
+      chain: item.chain,
+      digest: item.digest,
+      http_status: status,
+      ...itemBody,
+    });
+  }
+
+  return res.status(200).json({ ok: true, count: results.length, results });
+}
+
 module.exports = async (req, res) => {
   // GET-only CORS: answers an OPTIONS preflight with 204 and returns; every
   // other method falls through to the guard below with the ACAO header
   // already set. See _cors.js for why this is scoped to read endpoints only.
   if (cors.applyGetCors(req, res)) return;
+
+  const q = req.query || {};
+
+  // --- co-hosted mode: POST /api/verify?op=bulk ---
+  // Dispatched before the single-item method/ratelimit gates below — bulk
+  // mode has its own method requirement (POST, not GET/HEAD) and its own
+  // shape entirely. See BULK_VERIFY_DESIGN.md.
+  if (String(q.op || "") === "bulk") {
+    return handleBulk(req, res);
+  }
 
   // HEAD is a read and must answer like one. Uptime monitors and link checkers
   // default to HEAD; 405-ing them reports this endpoint as DOWN while it is in
@@ -76,179 +354,8 @@ module.exports = async (req, res) => {
     });
   }
 
-  const q = req.query || {};
-  const ns = q.ns || "";
-  if (!store.NS_RE.test(ns)) {
-    return res.status(400).json({ error: "ns must match [a-z0-9-]{1,64}" });
-  }
-
-  const rowsRaw = q.rows;
-  const rows = Number(rowsRaw);
-  if (!Number.isInteger(rows) || rows < 1 || String(rowsRaw).trim() === "") {
-    return res.status(400).json({ error: "rows must be a positive integer" });
-  }
-
-  // chain and digest are aliases for the same query parameter; both may be
-  // given only if they agree (a caller passing two different fingerprints
-  // for one check almost certainly has a bug, and guessing which one they
-  // meant would be exactly the kind of silent fallthrough this repo's write
-  // paths refuse to do — see api/pin.js's unknown-intent handling).
-  const chainParam = typeof q.chain === "string" ? q.chain : null;
-  const digestParam = typeof q.digest === "string" ? q.digest : null;
-  if (chainParam && digestParam && chainParam.toLowerCase() !== digestParam.toLowerCase()) {
-    return res.status(400).json({ error: "chain and digest were both given and disagree — pass one" });
-  }
-  const chain = chainParam || digestParam || "";
-  if (!store.CHAIN_RE.test(chain)) {
-    return res.status(400).json({ error: "chain (or digest) must be a hex string of 8-64 chars" });
-  }
-  const chainLower = chain.toLowerCase();
-
   res.setHeader("cache-control", "no-store");
 
-  let cur;
-  try {
-    cur = await store.getFile(`pins/${ns}/latest.json`);
-  } catch (err) {
-    return res.status(502).json({ error: `pin store read error: ${err.message}` });
-  }
-
-  const historyUrl = `${HISTORY_BASE}/pins/${ns}`;
-
-  if (!cur) {
-    return res.status(200).json({
-      ok: true,
-      // null, not false: there is no record set to decide against. A conclusive
-      // false is reserved for heads the store actively contradicts.
-      witnessed: null,
-      pin: null,
-      reason: "no_pin_recorded_for_namespace",
-      note: `no pin has ever been recorded for namespace "${ns}" — the witness has no basis to confirm or refute this head`,
-      history: historyUrl,
-    });
-  }
-
-  const latest = cur.json;
-
-  function witnessedResponse(record, isCurrentHead) {
-    const cadenceFields = store.computeCadenceFields(record);
-    return {
-      ok: true,
-      witnessed: true,
-      pin: record,
-      seq: record.seq,
-      pinned_at: record.pinned_at,
-      is_current_head: isCurrentHead,
-      raw_record_url: rawRecordUrl(ns, record.seq),
-      history: historyUrl,
-      note: isCurrentHead
-        ? "this is the namespace's current witnessed head"
-        : "this exact (rows, chain) was witnessed, but the namespace has since advanced past it — this is a superseded historical head, not the current one; cadence fields below describe THIS record, not the namespace's live status",
-      ...cadenceFields,
-    };
-  }
-
-  // --- case 1: matches the current head ---
-  if (Number.isInteger(latest.rows) && rows === latest.rows) {
-    if (String(latest.chain).toLowerCase() === chainLower) {
-      return res.status(200).json(witnessedResponse(latest, true));
-    }
-    return res.status(200).json({
-      ok: true,
-      witnessed: false,
-      pin: null,
-      reason: "rows_match_chain_mismatch",
-      note: "a record exists at this rows count, but its witnessed chain differs from the one submitted — this is not the accepted head",
-      accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
-      raw_record_url: rawRecordUrl(ns, latest.seq),
-      history: historyUrl,
-    });
-  }
-
-  // --- case 2: rows exceeds the current head — cannot have been witnessed yet ---
-  if (Number.isInteger(latest.rows) && rows > latest.rows) {
-    return res.status(200).json({
-      ok: true,
-      // null, not false: a head ahead of the current pin hasn't been witnessed
-      // YET — the store can't refute it, only report what it has accepted.
-      witnessed: null,
-      pin: null,
-      reason: "exceeds_current_head",
-      note: `requested rows (${rows}) is ahead of the namespace's current witnessed head (${latest.rows}) — it cannot have been witnessed yet; not a refutation`,
-      accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
-      history: historyUrl,
-    });
-  }
-
-  // --- case 3: rows is behind the current head — bounded backward scan of history ---
-  // Same-rows accepted records have a unique chain (conflicts never land in
-  // pins/, see api/pin.js), so the first record found at rows===target is
-  // conclusive: match its chain, or it's a real mismatch, either way done.
-  let seq = Number.isInteger(latest.seq) ? latest.seq - 1 : 0;
-  let scanned = 0;
-  try {
-    while (seq >= 1 && scanned < MAX_HISTORY_SCAN) {
-      let got;
-      try {
-        got = await store.getFile(`pins/${ns}/${seqName(seq)}.json`);
-      } catch (err) {
-        return res.status(502).json({ error: `pin store read error during history scan: ${err.message}` });
-      }
-      scanned += 1;
-      if (!got) {
-        // A gap in numbering shouldn't happen, but don't loop forever on one.
-        seq -= 1;
-        continue;
-      }
-      const rec = got.json;
-      if (Number.isInteger(rec.rows) && rec.rows === rows) {
-        if (String(rec.chain).toLowerCase() === chainLower) {
-          return res.status(200).json(witnessedResponse(rec, false));
-        }
-        return res.status(200).json({
-          ok: true,
-          witnessed: false,
-          pin: null,
-          reason: "rows_match_chain_mismatch",
-          note: "a historical record exists at this rows count, but its witnessed chain differs from the one submitted",
-          scanned,
-          raw_record_url: rawRecordUrl(ns, rec.seq),
-          history: historyUrl,
-        });
-      }
-      if (Number.isInteger(rec.rows) && rec.rows < rows) {
-        // Rows only ever advance forward across records; once we've stepped
-        // below the target without an exact hit, that rows count was never
-        // pinned (an advance can skip past values) — conclusively not found.
-        return res.status(200).json({
-          ok: true,
-          witnessed: false,
-          pin: null,
-          reason: "rows_never_witnessed",
-          note: `rows=${rows} falls between two witnessed heads and was never itself the head — it was skipped by an advance`,
-          scanned,
-          history: historyUrl,
-        });
-      }
-      seq -= 1;
-    }
-  } catch (err) {
-    return res.status(502).json({ error: `pin store read error during history scan: ${err.message}` });
-  }
-
-  const boundReached = scanned >= MAX_HISTORY_SCAN;
-  return res.status(200).json({
-    ok: true,
-    // Tri-state: a capped scan is an INCOMPLETE check, so it may not assert a
-    // conclusive negative — witnessed:null. Reaching the start of history
-    // without a match IS conclusive — witnessed:false.
-    witnessed: boundReached ? null : false,
-    pin: null,
-    reason: boundReached ? "scan_bound_reached" : "not_found_in_history",
-    note: boundReached
-      ? `not found within a bounded backward scan of ${scanned} historical record(s) — older records may exist and were NOT checked; browse the full commit history directly to check further back`
-      : "reached the start of this namespace's history without a match",
-    scanned,
-    history: historyUrl,
-  });
+  const { status, body } = await verifyItem(q.ns, q.rows, q.chain, q.digest);
+  return res.status(status).json(body);
 };

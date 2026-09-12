@@ -1,5 +1,50 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-12 — bulk verify: `POST /api/verify?op=bulk` (K-017/K-018/K-019, BATCH_500 lane K)
+
+No 13th function — `api/` is at the Vercel Hobby cap of 12 (confirmed by direct
+listing before this shipped: badge/balance/credit/distill/fulfill/health/latest/
+pin/renew/status/stripe-webhook/verify). Bulk verify is a MODE on the existing
+`api/verify.js`, dispatched on `?op=bulk` the same way `api/fulfill.js` already
+dispatches `?op=prefix-available` — no new vercel.json rewrite required for the
+internal call shape. Design: `BULK_VERIFY_DESIGN.md`.
+
+- **Request:** `POST /api/verify?op=bulk` with `{items: [{ns, rows, chain|digest}, ...]}`
+  — the same three fields the single-item `GET /api/verify` already takes, per item.
+- **Cap:** fixed at 20 items. An over-cap batch (or a non-array/empty `items`) is
+  refused WHOLE with a 400, before any store read — zero partial processing, mirroring
+  `arcaeon_receipt/cite_batch.py`'s cap-or-refuse pattern. Chosen because a single
+  verify lookup can already cost up to `MAX_HISTORY_SCAN` (50) store reads in the
+  worst case; 20 bounds a batch's worst case to 1,000 reads rather than leaving it
+  unbounded.
+- **Response:** `{ok, count, results: [...]}`, one result per input item, in request
+  order, each carrying `http_status` plus exactly the body the single-item endpoint
+  would have returned for that input. **No new verdict word** — `witnessed`
+  (`true`/`false`/`null`) and every `reason` string are the identical set
+  `api/verify.js` already emitted, because bulk mode calls the SAME `verifyItem`
+  function the single-item path calls, once per item — not a second hand-copy of the
+  lookup logic.
+- **Never short-circuits:** a malformed item (bad `ns`/`rows`/`chain`) or a store-read
+  error on one item produces that item's own error-shaped result and processing
+  continues to the next item; the loop is a plain sequential `for`/`await`, never a
+  `Promise.all` that would let one rejection take down the whole response.
+- `api/verify.js`'s existing single-item logic was refactored (not rewritten) into
+  `verifyItem()` returning `{status, body}` instead of writing to `res` directly, so
+  both the GET single-item path and the new bulk path share one implementation.
+  Existing single-item behavior is byte-identical; the full pre-existing suite
+  (`test/verify.test.js`, 6 tests) still passes unchanged.
+- New `test/verify_bulk.test.js` (9 tests): mixed valid/invalid/never-witnessed batch
+  with per-item verdicts in order, the `digest` alias inside a bulk item, over-cap
+  refusal with zero store reads, exactly-at-cap acceptance, malformed `items` shapes,
+  and a mid-batch miss not aborting its neighbors.
+- `npm test`: 186 → 195, all green.
+- **What's still open, not decided here:** whether the per-IP rate limiter should
+  scale with batch size (currently counts a bulk call as one hit, same as any other
+  request — see BULK_VERIFY_DESIGN.md's "Rate limiting" section for the reasoning and
+  the flagged trade-off) and whether a public `/api/verify-bulk` alias is worth adding
+  via a vercel.json rewrite. Neither blocks this pass; both are named for whoever
+  picks this lane up next.
+
 ## 2026-08-30 — independence disclosure: k=1, stated plainly
 
 The status page and its JSON twin now disclose the root count directly: a
