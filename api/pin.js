@@ -65,6 +65,33 @@ async function putSeqRecord(namespace, seqName, record, message) {
   }
 }
 
+// ---- the merge rule for latest.json when it moves under a write (task 093) ----
+//
+// lib/_store.js retries a 409, and distinguishes "the branch ref moved" (re-PUT
+// verbatim, nothing was overwritten) from "this path moved" (another writer owns
+// it now). For the SECOND case it refuses to guess and asks the caller, because
+// only the caller knows whether its object is still the right thing to write.
+//
+// latest.json is the one path in this handler where that second case is real,
+// and the answer is short: latest.json is a POINTER, not a row. The rows are the
+// numbered seq records under pins/<ns>/, which are created and never rewritten —
+// so a pin can never overwrite another pin's row by racing here. What it CAN do
+// is rewind the pointer over a newer record, and that is the thing forbidden: a
+// witness never goes backward.
+//
+// So — if the fresh latest is at a seq >= ours, another writer already published
+// a pointer at or past our record (in practice its own healIfWedged adopted our
+// orphan and then advanced past it), and our write is abandoned. Our record is
+// still recorded at its own numbered path; nothing is lost and nothing is
+// clobbered. Only a strictly-behind latest is advanced.
+function latestPointerRebuild(record) {
+  return (freshJson) => {
+    const freshSeq = freshJson && Number.isInteger(freshJson.seq) ? freshJson.seq : 0;
+    if (freshSeq >= record.seq) return null; // abandon — never rewind the pointer
+    return record;
+  };
+}
+
 function rateLimited(key) {
   const now = Date.now();
   const b = rateBuckets.get(key);
@@ -610,12 +637,17 @@ module.exports = async (req, res) => {
                 ? `arm ${namespace} rows=${rows} seq=${seq} (first cadence deadline on a legacy head, content unchanged)`
                 : `renew ${namespace} rows=${rows} seq=${seq} (publisher heartbeat, content unchanged)`
             );
-            await store.putFile(latestPath, renewal,
-              `latest ${namespace} rows=${rows} seq=${seq} (heartbeat)`, cur.sha);
+            const latestPut = await store.putFile(latestPath, renewal,
+              `latest ${namespace} rows=${rows} seq=${seq} (heartbeat)`, cur.sha,
+              { rebuild: latestPointerRebuild(renewal) });
 
             return res.status(201).json({
               ok: true,
               renewed: true,
+              // How many contents-API PUT attempts this record actually cost.
+              // >2 means a 409 was retried rather than lost (task 093).
+              write_attempts: (put.attempts || 1) + (latestPut.attempts || 1),
+              latest_pointer_advanced: !latestPut.abandoned,
               armed_cadence: armLegacy,
               record_kind: "publisher_heartbeat",
               note: armLegacy
@@ -715,12 +747,18 @@ module.exports = async (req, res) => {
       const msg = `pin ${namespace} rows=${rows} seq=${seq}`;
       try {
         const put = await putSeqRecord(namespace, seqName, pin, msg);
-        await store.putFile(latestPath, pin, `latest ${namespace} rows=${rows} seq=${seq}`,
-          cur ? cur.sha : undefined);
+        const latestPut = await store.putFile(latestPath, pin,
+          `latest ${namespace} rows=${rows} seq=${seq}`,
+          cur ? cur.sha : undefined,
+          { rebuild: latestPointerRebuild(pin) });
 
         return res.status(201).json({
           ok: true,
           record_kind: "content_head_advance",
+          // How many contents-API PUT attempts this record actually cost.
+          // >2 means a 409 was retried rather than lost (task 093).
+          write_attempts: (put.attempts || 1) + (latestPut.attempts || 1),
+          latest_pointer_advanced: !latestPut.abandoned,
           auth_level: store.AUTH_LEVEL,
           auth_note: store.AUTH_LEVEL_NOTE,
           pin,

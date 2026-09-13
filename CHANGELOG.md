@@ -1,5 +1,53 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-13 — `putFile` retries the 409 that was losing concurrent pins (task 093)
+
+The ceiling probe measured the defect on its way to measuring something else: ten
+concurrent writers on one branch issued 532 requests and took **465 409s**. Every one of
+those writers was creating its own distinct file, so nothing raced for a path — the
+**branch ref** moved under each PUT. `lib/_store.js:putFile` did not retry, so a pin that
+raced another pin simply failed. Production pins run on serverless instances that
+overlap, so this was live, not a lab curiosity. This is not the batching design; it is
+the correctness floor under it.
+
+- **`putFile` now retries a 409**, and only a 409 — the 422 create-race keeps its
+  existing one-shot `err.conflict` contract, and a 5xx is still a plain failure. Four
+  attempts, ~1 s base, doubling, jittered 0.5x–1.5x. The backoff is ours to invent
+  because the probe found the secondary limit carries **no `Retry-After`** and refills in
+  ~16 s, so there is no server hint to honour.
+- **It re-reads before it re-writes, and the two 409s are not the same event.** If the
+  path is *unchanged* since the caller read it, the 409 was branch-ref contention and the
+  caller's object is re-PUT verbatim — nothing was overwritten because nothing moved.
+  If the path *moved*, another writer owns it now, and a blind re-PUT would erase that
+  writer's row, so it is never done: the caller's optional `rebuild` hook is handed the
+  fresh json and decides, and with no hook the call fails typed (`err.stale`, with
+  `err.conflict` still true so every pre-existing caller behaves exactly as before).
+- **The result carries `attempts`.** A pin that took three tries says so instead of
+  reporting a clean single write; `POST /api/pin` surfaces it as `write_attempts`. A
+  budget that runs out throws — there is no fabricated success anywhere on this path.
+- **`api/pin.js` supplies the one rebuild that is actually needed**, for `latest.json`.
+  The merge rule is short because `latest.json` is a *pointer*, not a row: the rows are
+  the numbered seq records, which are created and never rewritten, so racing here can
+  never overwrite another pin's row. What it could do is rewind the pointer over a newer
+  record, and that is forbidden — a witness never goes backward. So a fresh `latest` at a
+  seq >= ours abandons the write (`latest_pointer_advanced:false`); only a
+  strictly-behind pointer is advanced. Our record stays recorded at its own numbered path
+  either way.
+- **Tests** (`test/store_put_retry.test.js`, 9 new): 409-twice-then-201 lands on attempt 3
+  with the *fresh* sha on the wire (bound to a sha the fixture authored, not one the code
+  reported about itself); 409 five times gives up with a plain typed error and an
+  untouched file; and — the one that matters — after a genuine race the merged content
+  contains **both** writers' rows, with a paired no-rebuild case proving the racer's row
+  survives rather than being clobbered. Sabotage check: replacing the retry branch with an
+  unconditional `break` turns 6 of the 9 red (`attempts: 1`, `Error: github PUT
+  race/t1.json -> 409`); restoring turns them green.
+- `test/pin.test.js`'s wedge-refund regression had its forced-conflict budget raised
+  10 → 40. `putFile` now spends up to four PUTs per call, so four passes issue up to 16,
+  and a budget of 10 would have let the 11th **succeed** — turning that regression green
+  for the wrong reason. The test's intent is unchanged.
+
+Suite: **195 → 204**, all green.
+
 ## 2026-09-13 — the GitHub write ceiling, measured (task 083, open question 1 closed)
 
 `MERKLE_BATCHING_DESIGN.md` §1 had said "we have not measured GitHub's secondary rate

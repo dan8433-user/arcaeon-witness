@@ -27,12 +27,19 @@ const PIN_REPO = process.env.GITHUB_PIN_REPO;
 let gh;
 let restore;
 
+// lib/_store.js putFile now retries a 409 with a ~1s jittered backoff (task
+// 093). The waiting is swapped out here so the conflict regressions below run
+// in milliseconds; the retry LOGIC is untouched and still exercised.
+const realPutSleep = store._putRetry.sleep;
+
 beforeEach(() => {
   gh = new MockGitHubStore();
   restore = install(gh);
+  store._putRetry.sleep = async () => {};
 });
 
 afterEach(() => {
+  store._putRetry.sleep = realPutSleep;
   restore();
 });
 
@@ -369,7 +376,14 @@ test("REGRESSION (2026-09-05): a WEDGED write failure that exhausts the repair b
     // record never actually lands, so each self-heal re-check also finds no
     // orphan and just retries. The pass budget exhausts with the charge
     // already taken and nothing ever written.
-    gh.forceConflict(PIN_REPO, `pins/${ns}/00000001.json`, 10);
+    //
+    // The count was 10 until task 093 (2026-09-13): putFile now spends up to
+    // FOUR PUTs of its own per call retrying a 409, so MAX_PASSES(4) passes
+    // issue up to 16 PUTs, and a budget of 10 would let the 11th one SUCCEED
+    // — turning this regression green for the wrong reason. 40 keeps the
+    // test's actual intent ("every seq-1 write attempt is forced to 409")
+    // true with headroom.
+    gh.forceConflict(PIN_REPO, `pins/${ns}/00000001.json`, 40);
 
     const res = makeRes();
     await pinHandler(pinReq({ namespace: ns, rows: 1, chain: "aa11bb22" }), res);
