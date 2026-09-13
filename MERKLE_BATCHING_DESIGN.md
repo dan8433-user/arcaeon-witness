@@ -50,11 +50,46 @@ approximately zero, and the ceiling stops being a function of customer volume. T
 the entire motivation, and it is a real one: the current design cannot take a customer
 who pins every minute without eating the whole shared budget.
 
-**Note on the exact GitHub numbers.** We have not measured GitHub's secondary rate limits
-for sustained contents-API writes to one branch, and the published primary limit is not
-the binding constraint for write bursts. Do not put a specific pins-per-hour figure in
-customer-facing material until it has been measured on the real token. The *shape* of the
-win (O(N) → O(1)) does not depend on that measurement; any specific ceiling claim does.
+**Note on the exact GitHub numbers — MEASURED 2026-09-13.** This paragraph said
+"unmeasured" from August until now. It has been measured, with `tools/ceiling_probe.js`,
+against two throwaway private repos created and deleted for the purpose — never the live
+pin repo, because GitHub enforces secondary limits **per authenticated identity, not per
+repository**, so tripping the limit anywhere puts the serving token in cooldown. Account:
+personal **User** account, plan `free`, classic PAT.
+
+- **Sequential, one writer, one branch: no ceiling found.** 577 writes accepted in 360 s
+  (**96/min**) with zero refusals; the run ended on the probe's own six-minute cap, not on
+  a GitHub limit.
+- **Payload size does not move it.** A second sequential run at a 4 KB payload accepted
+  279 writes in 180 s (**93/min**), also with zero refusals. Median per-write latency was
+  603 ms at 64 bytes and 626 ms at 4 KB. A single sequential writer is **latency-bound at
+  ~95 writes/min, not limit-bound** — the round trip is the constraint, not the quota.
+- **Concurrency trips it, and quickly recovers.** Ten concurrent writers on one branch
+  accepted 65 writes in 49 s and then took a **429** carrying GitHub's "You have exceeded
+  a secondary rate limit" page, with **no `Retry-After` header**. Recovery was **~16 s**
+  (polls at +5 s and +10 s refused, +16 s accepted). So the secondary limit is a **short
+  burst allowance that refills in seconds, not an hourly ban** — which is the form of the
+  answer that actually constrains a batch interval, and it constrains it barely.
+- **The limiter counts requests, not accepted writes — and branch contention bites
+  first.** Of the 532 requests that burst issued, only 65 were accepted and **465 were
+  409s**: ten writers committing to one branch move the ref under each other, and
+  `lib/_store.js:putFile` has no retry. Ten-way concurrency therefore produced *less*
+  accepted throughput (80/min) than one sequential writer (96/min) while spending eight
+  times the request budget. **Adding write concurrency to a single branch does not buy
+  throughput.**
+- **The primary limit was never the constraint**, as this paragraph originally suspected:
+  5,000/hr authenticated, and the whole probe (~1,400 requests, 409s included) never took
+  remaining below 3,600.
+
+GitHub does not publish secondary limits and can change them without notice, so the above
+is a **dated observation, not a contract**. The standing rule is unchanged and now has a
+date attached to it: **do not put a specific pins-per-hour figure in customer-facing
+material** — a measurement this old is quotable internally and stale externally. What it
+licenses is an internal planning figure (~95 writes/min ≈ **~47 pins/min** at today's two
+writes per pin) and one design conclusion that matters more than the number: since
+parallelizing writes on one branch makes throughput *worse*, **removing writes is the only
+lever that works**, which is exactly what batching does. The *shape* of the win
+(O(N) → O(1)) never depended on this measurement; the specific ceiling claim did.
 
 ---
 
@@ -582,8 +617,16 @@ is measured and near, not because it is the more interesting design.
 
 ## 11. Open questions
 
-1. **Actual GitHub write ceiling.** Unmeasured (§1). Measure before committing to a batch
-   interval, and before any customer-facing throughput claim.
+1. **Actual GitHub write ceiling. MEASURED 2026-09-13 — closed** (numbers and method in
+   §1, probe in `tools/ceiling_probe.js`). Summary: ~95 sequential writes/min on one
+   branch, insensitive to payload size up to 4 KB; the secondary limit is a
+   seconds-refilling burst allowance (429, no `Retry-After`, ~16 s recovery) that only
+   concurrency trips — and concurrency is worthless here anyway, because ten writers on
+   one branch spent their requests on 409 ref-contention and moved *less* data than one
+   sequential writer. Re-measure before relying on it again: GitHub publishes none of this
+   and can change it silently. **The standing rule survives the measurement** — no
+   customer-facing pins-per-hour figure without a dated measurement, and the date is the
+   load-bearing half of that sentence.
 2. **Where pending state lives.** The meter and balance stores are already required per
    request (`api/pin.js:80`, `api/pin.js:98`); reuse is the obvious answer, but the
    consistency guarantees of that store need checking against §6.1, which needs

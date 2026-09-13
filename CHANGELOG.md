@@ -1,5 +1,43 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-13 — the GitHub write ceiling, measured (task 083, open question 1 closed)
+
+`MERKLE_BATCHING_DESIGN.md` §1 had said "we have not measured GitHub's secondary rate
+limits for sustained contents-API writes to one branch" since August, and §11 carried it
+as open question 1. It blocked any customer-facing throughput claim by its own standing
+rule. Measured now; §1 and §11 rewritten with the numbers and the date.
+
+- **New `tools/ceiling_probe.js`** — sustained contents-API PUTs until GitHub refuses.
+  **Scratch-repo only**: it refuses to run unless the target repo name contains "probe",
+  and refuses outright if the target is the live pin repo. The reason is not squeamishness
+  about junk commits (though the pin log's whole value is that its history is meaningful)
+  — GitHub enforces secondary limits **per authenticated identity, not per repository**,
+  so tripping the limit on any repo puts the *serving* token into cooldown. The scratch
+  repo avoids the junk history; only running in a quiet window avoids the cooldown. The
+  token is read from `GITHUB_PIN_TOKEN` (the same var `lib/_store.js` reads) and every
+  string leaving the process goes through a redactor.
+- **Numbers** (personal User account, plan `free`, classic PAT, 2026-09-13): 577
+  sequential writes accepted in 360 s (96/min) with **zero** refusals — the sequential run
+  never found a ceiling, it hit the probe's own time cap. A 4 KB payload gave 279 in 180 s
+  (93/min), median latency 626 ms vs 603 ms at 64 bytes: **payload size does not move it**,
+  a single writer is latency-bound at ~95/min.
+- **What actually trips it is concurrency, and the recovery is fast.** Ten concurrent
+  writers took a 429 ("You have exceeded a secondary rate limit", **no `Retry-After`**)
+  after 65 accepted writes in 49 s, and recovered in **~16 s**. So it is a burst allowance
+  that refills in seconds, not an hourly ban.
+- **The finding with teeth, which a sequential-only probe would have missed:** the limiter
+  counts *requests*, not accepted writes, and **branch contention bites before the rate
+  limit does**. Of that burst's 532 requests, 465 were **409s** — ten writers committing to
+  one branch move the ref under each other and `lib/_store.js:putFile` has no retry. Ten-way
+  concurrency moved *less* (80/min accepted) than one sequential writer (96/min) for eight
+  times the request budget. Adding write concurrency to a single branch is not a throughput
+  lever; removing writes is, which is the batching case.
+- **Two scratch repos created and deleted** (`arcaeon-ceiling-probe-2026-09-13`, `…-13b`),
+  each `DELETE -> 204` with a confirming `GET -> 404`. The live pin repo was never written
+  to. The primary hourly limit was never approached (5,000/hr; never below 3,600 remaining).
+- Standing rule kept, not weakened: **no customer-facing pins-per-hour figure without a
+  dated measurement.** ~47 pins/min (two writes per pin) is an internal planning figure.
+
 ## 2026-09-12 — bulk verify: `POST /api/verify?op=bulk` (K-017/K-018/K-019, BATCH_500 lane K)
 
 No 13th function — `api/` is at the Vercel Hobby cap of 12 (confirmed by direct
