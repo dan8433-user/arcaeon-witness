@@ -73,7 +73,11 @@ personal **User** account, plan `free`, classic PAT.
 - **The limiter counts requests, not accepted writes — and branch contention bites
   first.** Of the 532 requests that burst issued, only 65 were accepted and **465 were
   409s**: ten writers committing to one branch move the ref under each other, and
-  `lib/_store.js:putFile` has no retry. Ten-way concurrency therefore produced *less*
+  `lib/_store.js:putFile` has no retry. **Fixed in `aaa1378` (task 093, 2026-09-13):
+  `putFile` now retries that 409 — bounded, jittered, re-reading to tell branch-ref
+  contention from a path that actually moved — so contention costs latency instead of a
+  lost pin; batching remains the throughput lever, because a retry buys correctness and
+  not one extra accepted write per minute.** Ten-way concurrency therefore produced *less*
   accepted throughput (80/min) than one sequential writer (96/min) while spending eight
   times the request budget. **Adding write concurrency to a single branch does not buy
   throughput.**
