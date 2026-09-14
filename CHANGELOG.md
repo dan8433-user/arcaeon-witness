@@ -1,5 +1,79 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-13 — Merkle batching, the caller: the sealer exists, and the batch does not seal early
+
+`6c0bb93` left one sentence in `MERKLE_BATCHING_DESIGN.md`: *"Until the sealer exists,
+nothing calls `sealBatch` in production. The library is complete and the caller is not."*
+This is the caller. Suite 236 → 258.
+
+- **`lib/_pending.js` — the state a serverless function cannot hold.** §11 Q3's premise is
+  that "a serverless request cannot reliably close a batch it did not open," and the reason
+  is that nothing in `_batch.js` or `_merkle.js` survives an invocation. One JSON document
+  under CAS in the private usage repo holds the open batch's leaves in acceptance order and
+  §6.1's pending head per namespace. **A read that fails throws; a 404 returns null** —
+  "I cannot see it" and "there is nothing there" stay different answers, which is the whole
+  fail-closed hinge.
+- **The trigger is `lib/_batch.js`'s, quoted and called, not restated.** §3.4: *"Seal when
+  any of these fires, whichever comes first: 1. `batch_interval_seconds` elapsed since the
+  batch opened (default proposal: 60s). 2. `max_leaves` reached... 3. A deadline forces it
+  — any pending leaf whose `next_pin_due_by` is within `seal_safety_margin` of expiring."*
+  `lib/_sealer.js` asks `sealTrigger` and does **nothing, not one write anywhere**, when the
+  answer is null. One addition, a carry and not a cadence: leaves left behind by a seal that
+  already failed seal on the next run regardless of the interval (§10 T4).
+- **Fail closed, and it is the sealer that refuses.** A sealer that cannot read the pending
+  head returns `pending_head_unreadable`, writes nothing — no root, not even an orphan leaf
+  list — and never seals a batch it cannot prove complete. Every read that can refuse (the
+  pending head, the chain tip, the leaf shapes) happens **before any write**. Sabotaged both
+  ways before shipping: collapsing the unreadable case into `no_open_batch` turns both
+  fail-closed tests red; making the trigger always fire turns "does not seal before the
+  interval" and "a deadline forces it" red.
+- **The close is the boundary, and it is before the seal, never after.** A leaf appended
+  after a root is computed would claim membership in a tree it is not in. Closing first
+  freezes the leaf set; the close and `api/pin.js`'s append contend for the same document
+  sha, so a pin racing a seal either wins (its leaf is inside the sealed batch — the close
+  409s, re-reads, and absorbs it) or loses (its append 409s, re-reads, and lands in the next
+  batch). Both directions are tested from the *published* leaf list, not from the sealer's
+  own report.
+- **A published root is never re-sealed.** The hazard: a root that commits and then fails to
+  clear its bookkeeping slot looks exactly like a seal that failed, and re-sealing would put
+  the same leaves under a second root. The sealer asks the **pin repo** whether a root exists
+  at that batch id rather than trusting its own note-to-self — a question about our memory
+  turned into a question about the published record.
+- **§6.3 is finally a backstop.** §6.1's pending head refuses a same-rows/different-chain
+  leaf into the tree at accept time. The seal-time re-check stays, and is not redundant: the
+  contents API gives no read-your-writes across instances, so a stale cross-instance read can
+  still admit a conflicting leaf, and a test seats exactly that shape and proves the later
+  leaf is still dropped and the observation still written.
+- **`api/pin.js` gains nine lines that cannot fail a pin.** The accumulation hook runs after
+  the record is committed, on both the advance and the heartbeat path (§11 Q4, decided:
+  heartbeats stay in the tree), and swallows every error to a loud log. §9 Phase 1 is "Keep
+  per-pin commits exactly as they are" — a shadow-run bookkeeping failure must not turn a
+  committed pin into a 502 after the fact. The dropped leaf is exactly what Phase 1's week of
+  reconciliation exists to catch.
+- **`tools/seal_batch.js` — §11 Q3 decided: an operator command, not a 13th function.** `api/`
+  is at the Vercel Hobby 12-function cap (`9e8b060`); opportunistic sealing is refused by the
+  design's own parenthesis ("starves a quiet witness"); a seal mode on a public endpoint would
+  need a new operator-auth surface built before the first seal, and a command needs none —
+  running it already requires the token the seal spends. Exit 1 means **refused, nothing
+  written**, so a scheduler can alert on fail-closed specifically.
+- **Phase 1 is off until someone starts it.** Accumulation requires `WITNESS_BATCH_SHADOW`.
+  §9 Phase 1 is "Run it until a full week reconciles clean" — an operator act with a start
+  date and a week of watching, not a state that arrives with the next unrelated deploy. The
+  start procedure and the reconciliation check are written into §9.
+- **The one that matters, re-proved against the caller.** With the accumulator live on every
+  pin and a root committed by the sealer, an old-style pin verifies through the real
+  `api/verify` handler with a byte-identical body — and the claim "by exactly the path it does
+  today" is checked against the mock store's own **read log**: the verifier read
+  `pins/<ns>/latest.json` and nothing under `batches/`. A frozen hand-written pre-batching
+  record still verifies `witnessed:true` the same way.
+- **Two corrections written into the design.** §6.1 called the meter/balance store "a durable
+  non-GitHub store"; it is a private GitHub repo (`lib/_meter.js:22-24`, `lib/_balance.js:64`),
+  so §11 Q2's read-your-writes requirement is **not** satisfied and the honest statement is
+  first-guard-plus-backstop. And §6.1's pin-refusing 502 is deliberately **not** built: its
+  premise is "if `latest.json` is only written at seal time," which is Phase 4, not Phase 1 —
+  adding a 502 class to a live money path for a window that is not yet open would be paying a
+  real availability cost for a hypothetical one.
+
 ## 2026-09-13 — Merkle batching, the mechanism: N pins, one tree, one root, a proof each (`6c0bb93`)
 
 `MERKLE_BATCHING_DESIGN.md` §3 and §5 implemented, plus §6.3. Its own statement of the

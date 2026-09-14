@@ -1,28 +1,44 @@
 # Merkle batching for the Arcaeon hosted witness — design
 
-**Status: PARTLY IMPLEMENTED (2026-09-13, `6c0bb93`).** Written 2026-08-14 against the
-working tree at that date. This document proposes batching N pins into a Merkle tree,
-committing only the root per interval, and serving per-pin inclusion proofs.
+**Status: PARTLY IMPLEMENTED (2026-09-13, `6c0bb93` then the sealer).** Written 2026-08-14
+against the working tree at that date. This document proposes batching N pins into a Merkle
+tree, committing only the root per interval, and serving per-pin inclusion proofs.
 
-**What is built, and what is not.** `6c0bb93` implements the *mechanism*: §3 (tree
+**What is built, and what is not.** `6c0bb93` implemented the *mechanism*: §3 (tree
 construction, root record, seal triggers) in `lib/_batch.js`, §5's proof object and
-verification algorithm in `lib/_merkle.js`, and §6.3's same-batch conflict re-check. 32
-tests, suite 204 → 236. It does **not** change publication: `api/pin.js` still writes its
-seq record and its `latest.json` pointer per pin, and `api/latest.js` / `api/verify.js` are
+verification algorithm in `lib/_merkle.js`, and §6.3's same-batch conflict re-check.
+
+**The caller now exists.** The gap that commit left — "Until the sealer exists, nothing
+calls `sealBatch` in production: the library is complete and the caller is not" — is closed
+by `lib/_pending.js` (the open batch and §6.1's pending head), `lib/_sealer.js` (the §3.4
+trigger, the close boundary, the fail-closed refusal), `tools/seal_batch.js` (the operator
+command, §11 Q3 decided below), and a nine-line accumulation hook in `api/pin.js` that runs
+*after* a record is committed and can never change a pin's outcome. 22 tests, suite
+236 → 258.
+
+It still does **not** change publication: `api/pin.js` writes its seq record and its
+`latest.json` pointer per pin exactly as before, and `api/latest.js` / `api/verify.js` are
 untouched. That is §9 Phase 1 on purpose — "Keep per-pin commits exactly as they are.
 Additionally build batches and commit roots." A receipt issued before any of this verifies
-by exactly the path it always did, and two tests hold that line by running the real
-`api/verify` handler against a pre-batching record with batch roots sitting in the same repo.
+by exactly the path it always did; `test/sealer.test.js` holds that line by running the
+real `api/verify` handler with the accumulator live and a sealer-committed root in the same
+repo, and asserting from the store's own read log that the verifier read
+`pins/<ns>/latest.json` and nothing under `batches/`.
 
-Still unbuilt, and named here rather than left to be discovered: the pending-head store and
-its fail-closed refusal (§6.1), `inclusion_due_by` / `inclusion_state` / the
-`cannot_determine` pending grade on `/api/latest` (§4.3, §4.4), the self-grading counters on
-`/status` (§7), the `GET /api/proof` endpoint (§5) — `api/` is at the Vercel Hobby
-12-function cap, confirmed at `9e8b060`, so serving proofs needs an `?op=` mode on an
-existing function the way `api/verify.js?op=bulk` already does — the client-side
-`verify_inclusion` / `verify_root_published` surface (§8, a different repo), and the
-scheduled sealer (§11 Q3). Until the sealer exists, nothing calls `sealBatch` in
-production: the library is complete and the caller is not.
+**Phase 1 is a run, and it has not started.** Accumulation is off unless
+`WITNESS_BATCH_SHADOW` is on. §9 Phase 1 is "Run it until a full week reconciles clean" —
+an operator act with a start date and a week of watching, not a code state that arrives
+with the next unrelated deploy. Turning it on starts the shadow run; turning it off is §9's
+own rollback ("stop batching, resume per-pin"). Nothing has been deployed.
+
+Still unbuilt, and named here rather than left to be discovered: §6.1's *pin-refusing*
+fail-closed branch (the sealer-side refusal is built; see §6.1 for why the 502 is a Phase
+3/4 change), `inclusion_due_by` / `inclusion_state` / the `cannot_determine` pending grade
+on `/api/latest` (§4.3, §4.4), the self-grading counters on `/status` (§7), the
+`GET /api/proof` endpoint (§5) — `api/` is at the Vercel Hobby 12-function cap, confirmed
+at `9e8b060`, so serving proofs needs an `?op=` mode on an existing function the way
+`api/verify.js?op=bulk` already does — and the client-side `verify_inclusion` /
+`verify_root_published` surface (§8, a different repo).
 
 **Measured write cost (2026-09-13, `6c0bb93`), counted from the code path under the mock
 store, not estimated.** The counts come from the test fixture's own `putLog`, which records
@@ -292,6 +308,13 @@ Seal when **any** of these fires, whichever comes first:
 3. **A deadline forces it** — any pending leaf whose `next_pin_due_by` is within
    `seal_safety_margin` of expiring. Section 4 is why.
 
+**IMPLEMENTED, and now CALLED.** All three live in `lib/_batch.js sealTrigger`, and
+`lib/_sealer.js` is what asks it — it holds no copy of the rule and does nothing at all
+when the answer is null. One addition, a carry and not a cadence: a leaf set left behind by
+a seal that already failed seals on the next run regardless of the interval (trigger
+`unsealed_carry_over`), because §10 T4's "next batch absorbing the unsealed leaves" must not
+make those leaves wait a second interval.
+
 ---
 
 ## 4. Deadlines: the part that must not break
@@ -501,6 +524,33 @@ so pending-head state lives in the same store those use.
 (`api/pin.js:137-144`). Accepting a pin we cannot conflict-check is worse than not
 accepting it, because it enters the record looking checked.
 
+**IMPLEMENTED 2026-09-13 as the pending head + the SEALER-SIDE refusal; the pin-side 502 is
+NOT built, deliberately.** `lib/_pending.js` holds the pending head per namespace and
+refuses a conflicting leaf into the tree before it can reach §6.3's re-check, which is what
+finally makes that re-check a backstop rather than the only guard. `lib/_sealer.js` fails
+closed on the read: a sealer that cannot read the pending head refuses, writes nothing, and
+reports `pending_head_unreadable` — never `no_open_batch`, because "I cannot see it" and
+"there is nothing there" are different answers and collapsing them is the fail-open bug
+this paragraph exists to prevent.
+
+What is not built is the 502 on the pin path, and the reason is that **the window this
+section describes is not open in Phase 1.** The window's premise is its own first sentence:
+"If `latest.json` is only written at seal time, then between accept and seal `cur` is
+stale." In Phase 1 `latest.json` is still written per pin (`api/pin.js`, the content-advance
+path's second `store.putFile`), so `cur` is committed, fresh, and exactly as authoritative
+as it is today. Adding a new 502 class to a live money path to defend a window that only
+**Phase 4** opens ("the `latest.json` write joins the batch") would be paying a real
+availability cost for a hypothetical one. The 502 lands with Phase 4, in the same change
+that makes the pending head load-bearing for the accept decision. Until then the accept-time
+guard is the committed read it has always been, and the pending head guards entry into the
+tree.
+
+The residual, stated rather than discovered: `api/pin.js`'s accumulation hook cannot fail a
+pin, so a pending-store outage drops leaves silently from the operator's side. That is
+survivable only because Phase 1 has an auditor by construction — "every batch root must be
+recomputable from the individually-committed pins" is precisely the check that catches a
+dropped leaf, and it is the reason Phase 1 runs for a week before anything reads a root.
+
 ### 6.2 Observations are never batched
 
 **Decision: observation writes stay immediate and unbatched** — `api/pin.js:264` behavior
@@ -524,9 +574,16 @@ re-check at the top of `sealBatch`, which runs *before* the tree is built. The L
 the one dropped, never the earlier: `api/pin.js:183-184`'s rule is that a conflict "never
 advances accepted state," so accepted state is whichever leaf arrived first and the
 challenger is the one that must not ride into a root. The observation write goes out
-immediately and unbatched, through the same `store.putFile` the 409 retry governs. §6.1's
-pending-head store, which is what would make this re-check a backstop rather than the only
-guard, is **not built**.
+immediately and unbatched, through the same `store.putFile` the 409 retry governs.
+
+**It is now a backstop, as designed (2026-09-13).** §6.1's pending-head store is built and
+sits in front of it, so the re-check is no longer the only guard. It is not redundant and
+will not become so: the pending head lives on the GitHub contents API, which does not give
+read-your-writes across instances (§11 Q2 below), so a second instance reading a stale
+pending document can still admit a conflicting leaf. That is exactly the "store outage or a
+race" this section names, and it is a live shape rather than a courtesy — `test/sealer.test.js`
+seats two conflicting leaves in one pending document and proves the seal-time re-check still
+drops the later one and writes the observation.
 
 Even with §6.1, a store outage or a race could land two conflicting leaves in one batch.
 **Decision: the sealer re-checks.** Before sealing, scan the batch for duplicate
@@ -615,12 +672,37 @@ migration. That is the property that makes this safe to do incrementally.
 
 **Phase 0 — today.** Per-pin, two commits (`api/pin.js:303-307`).
 
-**Phase 1 — shadow trees. LIBRARY BUILT 2026-09-13 (`6c0bb93`); THE SHADOW RUN HAS NOT
-STARTED.** Everything needed to build a batch and commit a root exists and is tested; what
-does not exist is the caller (§11 Q3, the sealer) and therefore the week of reconciliation
-this phase is *for*. The correctness proof this phase names — "every batch root must be
-recomputable from the individually-committed pins" — is proven in the harness against
-fixtures, not yet against a week of live pins, and those are different claims.
+**Phase 1 — shadow trees. LIBRARY AND CALLER BUILT 2026-09-13; THE SHADOW RUN HAS NOT
+STARTED.** Everything needed to build a batch, accumulate into it, and commit a root exists
+and is tested — including the caller (`lib/_pending.js`, `lib/_sealer.js`,
+`tools/seal_batch.js`) whose absence was the gap through `6c0bb93`. What has not happened is
+the run: the week of reconciliation this phase is *for*. The correctness proof this phase
+names — "every batch root must be recomputable from the individually-committed pins" — is
+proven in the harness against fixtures, not yet against a week of live pins, and those are
+different claims.
+
+**To start it** (deliberately, not as a deploy side effect):
+
+1. Set `WITNESS_BATCH_SHADOW=on` in the Vercel project. Every accepted pin — advance and
+   heartbeat both, §11 Q4 — then appends its leaf to the open batch in the private usage
+   repo. The pin's own two commits are unchanged, and a pending-store failure cannot fail a
+   pin.
+2. Schedule the sealer at or below `batch_interval_seconds` from a scheduler this repo does
+   not host (§11 Q3):
+   ```
+   GITHUB_PIN_TOKEN=...  GITHUB_PIN_REPO=dan8433-user/arcaeon-witness-pins \
+   GITHUB_USAGE_REPO=dan8433-user/arcaeon-witness-usage \
+   node tools/seal_batch.js
+   ```
+   Exit 0 = sealed or a legitimate no-op; **1 = refused, nothing written** (fail-closed
+   fired — alert on this); 2 = the seal failed after the close, no root published, leaves
+   held for the next run.
+3. Reconcile daily for a week: every leaf in every `batches/*/leaves.json` must match a
+   committed record under `pins/`, and every committed record in the interval must appear in
+   exactly one leaf list.
+
+Rollback is the same switch: unset `WITNESS_BATCH_SHADOW`, stop running the command. Roots
+already committed stay valid.
 
 Keep per-pin commits exactly as they are. Additionally build
 batches and commit roots. Nothing reads the roots. This is the correctness proof: every
@@ -725,16 +807,51 @@ is measured and near, not because it is the more interesting design.
    and can change it silently. **The standing rule survives the measurement** — no
    customer-facing pins-per-hour figure without a dated measurement, and the date is the
    load-bearing half of that sentence.
-2. **Where pending state lives.** The meter and balance stores are already required per
-   request (`api/pin.js:80`, `api/pin.js:98`); reuse is the obvious answer, but the
-   consistency guarantees of that store need checking against §6.1, which needs
-   read-your-writes across instances to be correct.
-3. **Who runs the sealer.** A serverless request cannot reliably close a batch it did not
-   open. Options: scheduled function, an external cron poking a seal endpoint, or
-   opportunistic sealing on the next inbound pin (which starves a quiet witness — a batch
-   with no following pin would never seal, and that is the failure mode `inclusion_due_by`
-   would catch loudly and repeatedly). Leaning scheduled.
-4. **Do heartbeats need to be in the tree at all?** They are cheap and they are records,
-   but a heartbeat's whole content is "nothing changed." Keeping them in is the
-   conservative call and §3.1 assumes it; excluding them would cut leaf volume
-   significantly for idle namespaces. Wants a decision before Phase 1, not after.
+2. **Where pending state lives. DECIDED 2026-09-13, and the question's own premise was
+   wrong.** The answer is reuse: `lib/_pending.js` writes `pending/open_batch.json` into the
+   same private repo the meter and balance use. But §6.1 called that "a durable non-GitHub
+   store," and it is not one — `lib/_meter.js:22-24` ("Storage: one JSON file per key-hash
+   per month, in a PRIVATE GitHub repo") and `lib/_balance.js:64`
+   (`const USAGE_REPO = process.env.GITHUB_USAGE_REPO || ...`) are both the GitHub contents
+   API. So "reuse the store the meter uses" and "use a durable non-GitHub store" were never
+   the same instruction, and only the first is available without adding a dependency this
+   repo does not have.
+
+   The consequence this question asked about is real and is **not** satisfied: the contents
+   API does not give read-your-writes across instances (`api/pin.js` carries the scar —
+   `// A wedge the proactive check missed (contents-API read lag)`). So the pending head is a
+   strong first guard, not a perfect one, and §6.3's seal-time re-check is what makes that
+   survivable rather than a hole. A store with a real atomic primitive (Vercel KV / Upstash,
+   the same Stage-2 fix `lib/_meter.js` already names for its own CAS loop) would close it;
+   until then the honest statement is *first guard plus backstop*, not *guaranteed*.
+3. **Who runs the sealer. DECIDED 2026-09-13: an operator command, `tools/seal_batch.js`,
+   driven by a scheduler outside this repo.** Not a scheduled function: `api/` is at the
+   Vercel Hobby 12-function cap (`9e8b060`, "the witness app is at the Hobby cap of 12
+   functions and the deploy with 14 was refused"), so a scheduled function is a 13th file and
+   is not available. Not opportunistic sealing either — this question's own parenthesis
+   refuses it ("starves a quiet witness").
+
+   That left a mode on an existing entry point, or a command, and it is the command. A seal
+   spends a write against the *public* pin repo, so a seal mode on a public endpoint needs a
+   new operator-auth surface designed and defended before the first seal ships; a command
+   needs none, because running it already requires the `GITHUB_PIN_TOKEN` the seal spends.
+   And Phase 1 is a watched run with a start date, not a background daemon: the smallest
+   thing a stranger cannot trigger, and that stops the moment the operator stops running it,
+   is the right shape for it. `tools/` is not routed as functions — `tools/ceiling_probe.js`
+   sat there across the deploy that was capped at 12, which is the evidence rather than the
+   assumption. The operator command and its exit codes are in §9 Phase 1.
+
+   **Not checked:** whether Vercel's own cron would serve a 60-second interval on the Hobby
+   plan. It is moot — the cron would still need the 13th function — but it is stated rather
+   than implied, because the argument above rests on the function cap and on the auth
+   surface, not on a cron-frequency limit nobody here measured.
+4. **Do heartbeats need to be in the tree at all? DECIDED 2026-09-13: they stay in.** The
+   conservative call, which is this question's own reading of it, and §3.1 assumes it.
+   The deciding reason is §3.1's on `record_kind` — "a proof that omits it would let a
+   heartbeat be presented as an advance" — read the other way round: the leaf already carries
+   the distinction, so including heartbeats costs a leaf and no ambiguity, while excluding
+   them would make the published `leaves.json` an incomplete account of what the witness
+   accepted in that interval. T3 sells `leaves.json` as the thing that makes a proof
+   recomputable "by anyone, forever, with us gone"; a leaf list that silently omits a class
+   of accepted record is not that. The leaf-volume saving for idle namespaces is real and is
+   the price.

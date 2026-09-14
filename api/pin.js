@@ -27,6 +27,12 @@ const store = require("../lib/_store.js");
 const meter = require("../lib/_meter.js");
 const balance = require("../lib/_balance.js");
 const issuedKeys = require("../lib/_keys.js");
+// The accumulator half of Merkle batching (MERKLE_BATCHING_DESIGN.md §9 Phase
+// 1, §6.1). It runs AFTER a record is committed, it can never throw, and it can
+// never change a pin's outcome — Phase 1 is "Keep per-pin commits exactly as
+// they are. Additionally build batches and commit roots. Nothing reads the
+// roots." Off unless WITNESS_BATCH_SHADOW is on; see lib/_pending.js.
+const pending = require("../lib/_pending.js");
 
 // Naive per-key rate limit (Stage-0): per-instance, resets on cold start.
 const RATE_LIMIT = 60; // pins per key per hour, per warm instance
@@ -641,6 +647,15 @@ module.exports = async (req, res) => {
               `latest ${namespace} rows=${rows} seq=${seq} (heartbeat)`, cur.sha,
               { rebuild: latestPointerRebuild(renewal) });
 
+            // §11 Q4, decided rather than left open: heartbeats go IN the tree.
+            // The design's own words — "Keeping them in is the conservative
+            // call and §3.1 assumes it" — and §3.1's leaf carries `record_kind`
+            // precisely so "a proof that omits it would let a heartbeat be
+            // presented as an advance." A leaf that names itself a heartbeat is
+            // not a cost; a tree that silently omits heartbeats would make the
+            // published leaf list an incomplete account of what was accepted.
+            await pending.recordAcceptedSafe(renewal);
+
             return res.status(201).json({
               ok: true,
               renewed: true,
@@ -751,6 +766,10 @@ module.exports = async (req, res) => {
           `latest ${namespace} rows=${rows} seq=${seq}`,
           cur ? cur.sha : undefined,
           { rebuild: latestPointerRebuild(pin) });
+
+        // The record is committed. This appends its leaf to the open batch and
+        // cannot un-commit it — see lib/_pending.js recordAcceptedSafe.
+        await pending.recordAcceptedSafe(pin);
 
         return res.status(201).json({
           ok: true,
