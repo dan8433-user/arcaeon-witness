@@ -1,8 +1,45 @@
 # Merkle batching for the Arcaeon hosted witness — design
 
-**Status: DESIGN ONLY. Nothing here is implemented.** Written 2026-08-14 against the
+**Status: PARTLY IMPLEMENTED (2026-09-13, `6c0bb93`).** Written 2026-08-14 against the
 working tree at that date. This document proposes batching N pins into a Merkle tree,
 committing only the root per interval, and serving per-pin inclusion proofs.
+
+**What is built, and what is not.** `6c0bb93` implements the *mechanism*: §3 (tree
+construction, root record, seal triggers) in `lib/_batch.js`, §5's proof object and
+verification algorithm in `lib/_merkle.js`, and §6.3's same-batch conflict re-check. 32
+tests, suite 204 → 236. It does **not** change publication: `api/pin.js` still writes its
+seq record and its `latest.json` pointer per pin, and `api/latest.js` / `api/verify.js` are
+untouched. That is §9 Phase 1 on purpose — "Keep per-pin commits exactly as they are.
+Additionally build batches and commit roots." A receipt issued before any of this verifies
+by exactly the path it always did, and two tests hold that line by running the real
+`api/verify` handler against a pre-batching record with batch roots sitting in the same repo.
+
+Still unbuilt, and named here rather than left to be discovered: the pending-head store and
+its fail-closed refusal (§6.1), `inclusion_due_by` / `inclusion_state` / the
+`cannot_determine` pending grade on `/api/latest` (§4.3, §4.4), the self-grading counters on
+`/status` (§7), the `GET /api/proof` endpoint (§5) — `api/` is at the Vercel Hobby
+12-function cap, confirmed at `9e8b060`, so serving proofs needs an `?op=` mode on an
+existing function the way `api/verify.js?op=bulk` already does — the client-side
+`verify_inclusion` / `verify_root_published` surface (§8, a different repo), and the
+scheduled sealer (§11 Q3). Until the sealer exists, nothing calls `sealBatch` in
+production: the library is complete and the caller is not.
+
+**Measured write cost (2026-09-13, `6c0bb93`), counted from the code path under the mock
+store, not estimated.** The counts come from the test fixture's own `putLog`, which records
+every successful PUT, so they are not numbers the code under test reports about itself.
+There is no network in the harness, so these count contents-API write *calls*; the mapping
+to commits is one-to-one (`lib/_store.js:103`, `// PUT (create or update) a file via the
+contents API — one commit per call.`).
+
+| | writes into the pin repo | per pin |
+|---|---|---|
+| 10 pins through `api/pin.js` today | 20 | **2.0** |
+| one sealed batch of 10 leaves | 2 | **0.2** |
+| one sealed batch of 100 leaves | 2 | 0.02 |
+
+A batch costs two writes — `leaves.json` then `root.json` — regardless of leaf count, plus
+one unbatched observation write per §6.3 conflict, which §6.2 refuses to batch. The §1
+projection of O(2N) → O(1) per interval holds at the measured numbers.
 
 **Citation rule.** Every claim this document makes about *current* behavior cites the
 file and line it was read from, and quotes enough of the line to survive renumbering.
@@ -125,6 +162,27 @@ Batching is a change to *publication*, and it must not quietly become a change t
 ---
 
 ## 3. Tree construction
+
+**IMPLEMENTED 2026-09-13 in `6c0bb93`** — `lib/_merkle.js` (§3.1, §3.2) and `lib/_batch.js`
+(§3.3, §3.4). Three notes where the build had to decide something this section left open:
+
+- **The canonicalizer already existed.** §3.1 requires `json-c14n:v1` and forbids a second
+  implementation. `lib/_distill_core.js` already carries the JS side of exactly that recipe
+  (`jdump(value, /* sortKeys */ true)`, the bytes its own `digestJsonC14n` hashes), so
+  `lib/_merkle.js` calls that function rather than writing a sorted-key stringify. The one
+  residual, documented at the call site: JS cannot tell `24.0` from `24`, so an integral
+  `cadence_hours` canonicalizes as `"24"` while a Python client holding a genuine float
+  would produce `"24.0"` and a different leaf hash.
+- **A batch id is CONSUMED, not reused.** A seal that dies before its root write leaves an
+  orphan `leaves.json` under that id, and §9's "nothing is ever rewritten" means the
+  replacement batch takes the *next* id. So gaps in the id sequence are normal, and
+  `batch_id > 1` stopped being the same question as "something came before me."
+  `readPrevRoot` therefore walks back over the gaps, and refuses to *claim* a chain start it
+  did not establish — an exhausted lookback is a typed `chain_break`, never a null
+  `prev_root` that quietly starts a second chain.
+- **No pointer file.** The chain tip is recovered by reading the previous published
+  `root.json`, which already carries its own root (§3.3). A `batches/latest.json` pointer
+  would be a third write per batch and a thing that can rewind; there is neither.
 
 ### 3.1 Leaf definition
 
@@ -323,6 +381,26 @@ paying for latency and should get it.
 
 ## 5. Proof format
 
+**PROOF OBJECT AND VERIFIER IMPLEMENTED 2026-09-13 in `6c0bb93`; THE ENDPOINT IS NOT.**
+`lib/_batch.js buildProof` mints the object below and `lib/_merkle.js verifyInclusion`
+implements the algorithm in this section verbatim, including the derived path direction.
+Two build notes:
+
+- **The verifier returns a typed reason, not a boolean.** This section requires inclusion
+  and publication to stay "Two separate claims, never merged into one boolean," and a
+  reason string is what keeps a caller able to hold them apart. `ok` is the inclusion claim
+  alone and says nothing about publication. Unknown recipe labels return
+  `unknown_recipe` — they never pass with a warning.
+- **`buildProof` refuses on an unsealed batch, and that refusal is the enforcement.** A pin
+  cannot be handed a proof citing a root that was never published, because the mint path
+  throws rather than because the ordering happens to be right. It is the property the
+  failure-atom test binds to.
+
+The endpoint is not built: `api/` is at the Vercel Hobby 12-function cap (confirmed at
+`9e8b060`, where the OAuth functions had to move to their own project), so serving proofs
+means an `?op=proof` mode on an existing function — the pattern `api/verify.js?op=bulk` and
+`api/fulfill.js?op=prefix-available` already use — not a 13th file.
+
 Served by a new `GET /api/proof?ns=<ns>&seq=<seq>` (no auth — pins are public by design,
 same posture as `api/latest.js:3`, `// No auth: pins are public by design (that's the
 point of a public witness).`).
@@ -441,6 +519,15 @@ keeping observations unbatched also means that count keeps working with no chang
 
 ### 6.3 Same-batch conflicts
 
+**IMPLEMENTED 2026-09-13 in `6c0bb93`** — `lib/_batch.js findSameBatchConflicts` and the
+re-check at the top of `sealBatch`, which runs *before* the tree is built. The LATER leaf is
+the one dropped, never the earlier: `api/pin.js:183-184`'s rule is that a conflict "never
+advances accepted state," so accepted state is whichever leaf arrived first and the
+challenger is the one that must not ride into a root. The observation write goes out
+immediately and unbatched, through the same `store.putFile` the 409 retry governs. §6.1's
+pending-head store, which is what would make this re-check a backstop rather than the only
+guard, is **not built**.
+
 Even with §6.1, a store outage or a race could land two conflicting leaves in one batch.
 **Decision: the sealer re-checks.** Before sealing, scan the batch for duplicate
 `(namespace, rows)` leaves with differing `chain`. On a hit: drop the later leaf from the
@@ -528,7 +615,14 @@ migration. That is the property that makes this safe to do incrementally.
 
 **Phase 0 — today.** Per-pin, two commits (`api/pin.js:303-307`).
 
-**Phase 1 — shadow trees.** Keep per-pin commits exactly as they are. Additionally build
+**Phase 1 — shadow trees. LIBRARY BUILT 2026-09-13 (`6c0bb93`); THE SHADOW RUN HAS NOT
+STARTED.** Everything needed to build a batch and commit a root exists and is tested; what
+does not exist is the caller (§11 Q3, the sealer) and therefore the week of reconciliation
+this phase is *for*. The correctness proof this phase names — "every batch root must be
+recomputable from the individually-committed pins" — is proven in the harness against
+fixtures, not yet against a week of live pins, and those are different claims.
+
+Keep per-pin commits exactly as they are. Additionally build
 batches and commit roots. Nothing reads the roots. This is the correctness proof: every
 batch root must be recomputable from the individually-committed pins, which is only
 checkable while both exist. Run it until a full week reconciles clean.

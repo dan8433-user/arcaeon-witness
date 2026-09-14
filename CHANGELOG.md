@@ -1,5 +1,69 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-13 — Merkle batching, the mechanism: N pins, one tree, one root, a proof each (`6c0bb93`)
+
+`MERKLE_BATCHING_DESIGN.md` §3 and §5 implemented, plus §6.3. Its own statement of the
+contract, §1: *"Group every pin accepted in an interval into one Merkle tree and commit
+only the root. Write cost becomes O(1) per interval — a fixed small number of commits
+regardless of whether the interval held 1 pin or 10,000."* Suite 204 → 236.
+
+- **`lib/_merkle.js` — the tree, and nothing else.** No store, no clock, no network,
+  because §8 requires `verify_inclusion` to be "pure and dependency-free. If proving
+  inclusion requires calling us, the proof is not a proof," and a require list is how a
+  stranger checks that. Leaf = `SHA256(0x00 || json_c14n_v1(leaf_object))` over §3.1's
+  nine fields; node = `SHA256(0x01 || left || right)`; **odd node PROMOTED, not
+  duplicated** (§3.2 — the Bitcoin shape makes distinct trees collide, CVE-2012-2459
+  lineage, and a test asserts the two roots differ); leaf order is acceptance order and is
+  part of the commitment.
+- **The canonicalizer was already here.** §3.1 forbids a second one. `lib/_distill_core.js`
+  already carries the JS side of `json-c14n:v1` (`jdump(value, true)`), so `_merkle.js`
+  calls it. Residual, documented at the call site rather than discovered later: JS cannot
+  tell `24.0` from `24`, so an integral `cadence_hours` canonicalizes as `"24"`.
+- **`verifyInclusion` is §5's published algorithm verbatim**, including the derived path
+  direction — no left/right flags, because "a verifier that trusts the flags over the index
+  is exploitable." It returns a **typed reason, not a boolean**: §5 requires inclusion and
+  publication to stay "two separate claims, never merged into one boolean," and an unknown
+  recipe label returns `unknown_recipe` rather than passing with a warning.
+- **`lib/_batch.js` — two writes per batch, whatever the leaf count.** `leaves.json` then
+  `root.json`. **The failure atom is the single `root.json` write**, and it is enforced
+  structurally, not described: `buildProof` throws on an unsealed batch, so no pin can be
+  handed a proof citing a root that was never published. A failed seal leaves no root, no
+  proof, an unmoved chain tip, and a leaf set handed back for the next batch to absorb
+  (§10 T4, which is honest that correlated failure is a real cost of batching).
+- **`prev_root` is the equivocation fence and it costs no extra write.** The chain tip is
+  read off the previous published `root.json`, which already carries its own root — no
+  pointer file, so no third write per batch and nothing that can rewind.
+- **§6.3's seal-time conflict re-check drops the LATER leaf** — `api/pin.js:183-184`'s rule
+  is that a conflict "never advances accepted state" — and writes its observation
+  immediately and unbatched, per §6.2: "the one write in this system with a live adversary
+  attached."
+- **The 409 retry from `aaa1378` governs every write here and is not reimplemented.** Every
+  write is a `store.putFile`; a test greps `lib/_batch.js` for `fetch(`, for
+  `maxAttempts|PUT_RETRY|putOnce`, and counts the `store.putFile` call sites, so the absence
+  claim names its searches instead of asserting itself.
+- **Nothing about publication changed, and that is the point.** `api/pin.js`,
+  `api/latest.js` and `api/verify.js` are untouched — §9 Phase 1, "Keep per-pin commits
+  exactly as they are." Two tests hold the line the hard way: one runs the real pin handler,
+  snapshots the real `api/verify` response, seals that pin into a batch, and asserts the
+  response is unchanged; the other verifies a frozen hand-written pre-batching record with a
+  batch root sitting in the same repo.
+- **MEASURED, not estimated.** Counted from the fixture's own `putLog`, not a number the
+  code reports about itself: 10 pins through `api/pin.js` cost **20** pin-repo writes
+  (**2.0 per pin**); one sealed batch of 10 leaves costs **2** (**0.2 per pin**); 1 leaf and
+  100 leaves both cost 2.
+- **Found while building.** A seal that dies before its root write **retires** its batch id
+  — the orphan `leaves.json` is still there and §9 promises nothing is ever rewritten — so
+  id gaps are normal and `batch_id > 1` stopped being the same question as "something came
+  before me." `readPrevRoot` now walks back over the gaps and refuses to *claim* a chain
+  start it did not establish: an exhausted lookback is a typed `chain_break`, not a null.
+- **Deliberately not built, listed in the design's status block rather than left to be
+  discovered:** the pending-head store (§6.1), `inclusion_due_by` / `inclusion_state` / the
+  `cannot_determine` pending grade (§4), the `/status` self-grading counters (§7), the
+  `GET /api/proof` endpoint (§5 — `api/` is at the Vercel Hobby 12-function cap, confirmed
+  at `9e8b060`, so it needs an `?op=` mode, not a 13th file), the client verifier (§8,
+  another repo), and the scheduled sealer (§11 Q3). Until the sealer exists nothing calls
+  `sealBatch` in production: the library is complete and the caller is not.
+
 ## 2026-09-13 — `putFile` retries the 409 that was losing concurrent pins (task 093)
 
 The ceiling probe measured the defect on its way to measuring something else: ten
