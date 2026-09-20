@@ -19,6 +19,10 @@
     {
       "source": "/api/prefix-available",
       "destination": "/api/fulfill?op=prefix-available"
+    },
+    {
+      "source": "/api/stamp",
+      "destination": "/api/verify?op=stamp"
     }
   ]
 }

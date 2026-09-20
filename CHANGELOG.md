@@ -1,5 +1,18 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-19 — /api/stamp: fingerprint-only file stamps (branch `stamp-endpoint`, NOT deployed)
+
+Daniel's ask: a person should not have to write code to get a tamper-evident receipt. `POST /api/stamp {sha256, size?}` records one public commit per fingerprint under `stamps/<2 hex>/<sha256>.json`; `GET /api/stamp?sha256=` looks one up. The browser hashes the file, so the file never leaves the person's machine.
+
+- **First write wins, forever.** A repeat stamp returns the original record and writes nothing; a lost create race returns the winner's. There is no update path. "No later than" is only true if the earliest record cannot be replaced.
+- **No filename, no label.** Extra fields are refused with a 400, not dropped: the store is public and a filename is content.
+- **Every response carries `scope.does_not_prove`**, including the 404. A thing called a stamp gets read as an endorsement.
+- **Two abuse fences from day one, both fail closed:** 10 stamps per IP per 10 minutes, and a global daily cap (`STAMP_DAILY_CAP`, default 500) kept in the store so it holds across instances. If the counter cannot be written, no stamp is recorded.
+- **Routing:** this deployment is at the Vercel Hobby 12-function cap, so the handler lives in `lib/_stamp.js` and is dispatched from `api/verify.js` on `?op=stamp` via a `vercel.json` rewrite. The dispatch says in a comment that a write is riding on a read endpoint.
+- A store outage on lookup is a 503 "this is not a no", never a 404.
+- Tests: 12 new, suite 270/270.
+- **Not done:** no chain across stamps yet (the existing Merkle batch sealer is the intended path), no receipt page, no deploy. Pushing this branch would create a preview that writes to the REAL public pins repo, so that waits for his go.
+
 ## 2026-09-13 — Merkle batching, the caller: the sealer exists, and the batch does not seal early
 
 `6c0bb93` left one sentence in `MERKLE_BATCHING_DESIGN.md`: *"Until the sealer exists,
