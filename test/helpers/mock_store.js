@@ -123,11 +123,22 @@ class MockGitHubStore {
       // lib/_keys.js listDir() consumes exactly this for prefix validation.
       const dirPrefix = path.endsWith("/") ? path : `${path}/`;
       const entries = [];
+      const seenDirs = new Set();
       for (const [p, r] of map) {
         if (!p.startsWith(dirPrefix)) continue;
         const rest = p.slice(dirPrefix.length);
         if (rest && !rest.includes("/")) {
           entries.push({ name: rest, path: p, sha: r.sha, type: "file" });
+        } else if (rest) {
+          // 2026-09-19: the real contents API lists immediate SUBDIRECTORIES
+          // too (type "dir"). Without this the mock could not represent
+          // pins/<namespace>/latest.json at all, so nothing that walks the
+          // namespace tree (the status page) could be tested against it.
+          const seg = rest.split("/")[0];
+          if (!seenDirs.has(seg)) {
+            seenDirs.add(seg);
+            entries.push({ name: seg, path: dirPrefix + seg, sha: null, type: "dir" });
+          }
         }
       }
       if (entries.length) return fakeResponse(200, entries);
