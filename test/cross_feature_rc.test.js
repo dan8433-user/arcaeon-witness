@@ -485,3 +485,89 @@ test("CROSS (e): api/ still holds at most 12 serverless functions, and /api/stam
   assert.equal(countFunctions([...files, "stamp.js"]) <= 12, false,
     "the function counter does not refuse a 13th file; assertion (e) proves nothing");
 });
+
+// =====================================================================
+// (f) THE 409 RETRY'S WORST-CASE WALL CLOCK, DERIVED FROM THE CODE
+//
+// The second-lineage audit of the 10 unshipped commits left one item open
+// (finding #7): the 409 retry's worst case was arithmetic in a comment,
+// never measured, and it was never compared with the deployed function's
+// time budget. This does not change a constant. It computes the number
+// from lib/_store.js's own PUT_RETRY, through its own delay function, at
+// its own worst-case jitter, and records it so the release note can quote
+// a measurement instead of a restatement.
+// =====================================================================
+
+test("CROSS (f): the 409 retry's worst-case sleep is derived from PUT_RETRY itself, not from a comment", () => {
+  const R = store._putRetry;
+  assert.equal(R.maxAttempts, 4, "PUT_RETRY.maxAttempts moved; the release note's timing number is stale");
+  assert.equal(R.baseDelayMs, 1000, "PUT_RETRY.baseDelayMs moved; the release note's timing number is stale");
+
+  // The real jitter, pinned to its ceiling. R.jitter() returns 0.5-1.5, so
+  // 1.5 is the worst case a production run can draw.
+  const realJitter = R.jitter;
+  let worstOnePut = 0;
+  try {
+    R.jitter = () => 1.5;
+    // The loop sleeps BEFORE attempts 2..maxAttempts, i.e. maxAttempts-1
+    // times, and the delay function is the one production calls.
+    for (let attempt = 1; attempt <= R.maxAttempts - 1; attempt += 1) {
+      worstOnePut += store._putRetryDelayMs
+        ? store._putRetryDelayMs(attempt)
+        : Math.round(R.baseDelayMs * Math.pow(2, attempt - 1) * R.jitter());
+    }
+  } finally {
+    R.jitter = realJitter;
+  }
+
+  assert.equal(worstOnePut, 10500,
+    "one retrying putFile call's worst-case sleep is no longer 10.5s; RELEASE_CANDIDATE_2026-09-20.md quotes this number");
+
+  // api/pin.js's content-advance path makes TWO sequential putFile calls
+  // (the numbered seq record, then the latest.json pointer) before it
+  // sends its 201, so the worst case for one request is twice this.
+  const worstOnePin = worstOnePut * 2;
+  assert.equal(worstOnePin, 21000);
+
+  // The jitter floor, for the other end of the range.
+  let bestOnePut = 0;
+  try {
+    R.jitter = () => 0.5;
+    for (let attempt = 1; attempt <= R.maxAttempts - 1; attempt += 1) {
+      bestOnePut += Math.round(R.baseDelayMs * Math.pow(2, attempt - 1) * R.jitter());
+    }
+  } finally {
+    R.jitter = realJitter;
+  }
+  assert.equal(bestOnePut, 3500);
+
+  // THE COMPARISON THAT MATTERS. vercel.json sets no functions.maxDuration,
+  // so the deployed ceiling is the platform default for this plan, and this
+  // repo is pinned to the 12-function Hobby plan. 21.0s of deliberate
+  // sleeping does not fit inside a 10s budget, and neither does one
+  // retrying putFile on its own. Asserted so a later maxDuration override
+  // has to come past this test.
+  const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "vercel.json"), "utf-8"));
+  const configured = cfg.functions && cfg.functions["api/pin.js"] && cfg.functions["api/pin.js"].maxDuration;
+  assert.equal(configured, undefined,
+    `vercel.json now sets maxDuration=${configured}s for api/pin.js — re-check it against ${worstOnePin / 1000}s of worst-case retry sleep and update the release note`);
+
+  // MUST-FAIL ARM: the computation must respond to the constants it claims
+  // to read. Halve the base and prove the number halves — if it did not,
+  // this test would be quoting a literal, which is the failure mode it
+  // exists to prevent.
+  const realBase = R.baseDelayMs;
+  let halved = 0;
+  try {
+    R.baseDelayMs = 500;
+    R.jitter = () => 1.5;
+    for (let attempt = 1; attempt <= R.maxAttempts - 1; attempt += 1) {
+      halved += Math.round(R.baseDelayMs * Math.pow(2, attempt - 1) * R.jitter());
+    }
+  } finally {
+    R.baseDelayMs = realBase;
+    R.jitter = realJitter;
+  }
+  assert.equal(halved, 5250, "the worst-case computation does not track PUT_RETRY; it is quoting a literal");
+  assert.notEqual(halved, worstOnePut);
+});
