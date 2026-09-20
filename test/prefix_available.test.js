@@ -180,6 +180,39 @@ test("CONTRACT: the reserved wk- stem is a 400 with reason 'reserved', not merel
 });
 
 // ---------------------------------------------------------------------
+// The operator's brand stems (2026-09-20, second-model review) — a customer
+// picking "velouria-x" or "arcaeon-x" would both squat the operator's brand
+// AND get mislabelled "our own log" on the public status page. This
+// endpoint must agree with the claim path (api/fulfill.js) on every one of
+// these, since both go through keys.validatePrefix().
+// ---------------------------------------------------------------------
+
+for (const bad of ["velouria-mine-", "arcaeon-x-", "velouria-", "arcaeon-"]) {
+  test(`CONTRACT: the reserved brand stem '${bad}' is a 400 with reason 'reserved'`, async () => {
+    const res = await ask(bad);
+    assert.equal(res._status, 400);
+    assert.equal(res._body.available, false);
+    assert.equal(res._body.reason, "reserved");
+    assert.match(res._body.detail, /operator/);
+  });
+}
+
+test("CASE: an upper-cased brand stem is normalized (H3) before the reserved check, same as any other prefix", async () => {
+  const res = await ask("  ARCAEON-Mine-  ");
+  assert.equal(res._body.prefix, "arcaeon-mine-");
+  assert.equal(res._status, 400);
+  assert.equal(res._body.reason, "reserved");
+});
+
+for (const ok of ["acme-velouria-mirror-", "myarcaeon-x-"]) {
+  test(`a brand stem merely APPEARING inside a longer, differently-rooted prefix stays available: '${ok}'`, async () => {
+    const res = await ask(ok);
+    assert.equal(res._status, 200);
+    assert.equal(res._body.available, true, JSON.stringify(res._body));
+  });
+}
+
+// ---------------------------------------------------------------------
 // Suggestions
 // ---------------------------------------------------------------------
 

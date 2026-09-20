@@ -529,6 +529,70 @@ test("rev-2: illegal prefixes rejected 400 bad_prefix (chars, no trailing dash, 
   }
 });
 
+// ---------------------------------------------------------------------
+// 2026-09-20, second-model review: the operator's own brand stems must be
+// reserved the SAME as "wk-" — a customer who claimed "velouria-x" or
+// "arcaeon-x" would both squat the operator's brand AND get mislabelled
+// "our own log" on the public status page (lib/_status_data.js). This is
+// the actual paid claim path (JSON ?prefix= and the HTML form POST), not
+// just the advisory /api/prefix-available check.
+// ---------------------------------------------------------------------
+
+test("BRAND STEMS RESERVED: 'velouria-…' and 'arcaeon-…' claims are rejected 400 bad_prefix, same as wk-", async () => {
+  for (const bad of ["velouria-mine-", "arcaeon-x-", "velouria-", "arcaeon-", "ARCAEON-caps-"]) {
+    const id = sid();
+    stripe.seed(paidSession({ id, _pack: "mini" }));
+    const res = await call({ query: { session_id: id, prefix: bad }, headers: JSON_HDR });
+    assert.equal(res._status, 400, `prefix ${JSON.stringify(bad)} must be rejected`);
+    assert.equal(res._body.reason, "bad_prefix");
+    assert.match(res._body.error, /reserved/, "the error text should say why, not just that it failed");
+    assert.equal(gh.read(USAGE, `fulfillments/${id}.json`), null, "nothing minted on a reserved-stem attempt");
+  }
+});
+
+test("BRAND STEMS RESERVED: the HTML form POST re-renders with a clear message too, mints nothing", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const res = await call({ method: "POST", body: { session_id: id, prefix: "velouria-mine-" } });
+  assert.equal(res._status, 400);
+  const html = String(res._body);
+  assert.ok(html.includes('<form method="post"'));
+  assert.ok(html.includes("reserved"));
+  assert.equal(gh.read(USAGE, `fulfillments/${id}.json`), null);
+});
+
+test("BRAND STEMS: a lookalike that does not START with the stem still mints normally — 'acme-velouria-mirror-'", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const res = await call({ query: { session_id: id, prefix: "acme-velouria-mirror-" }, headers: JSON_HDR });
+  assert.equal(res._status, 200);
+  assert.equal(res._body.namespace, "acme-velouria-mirror-");
+});
+
+test("GRANDFATHERING: a key issued under a brand stem BEFORE this fix keeps pinning after it (existing keys are validated by lookup, not re-run through validatePrefix)", async () => {
+  // Simulate an already-issued key that (for whatever historical reason —
+  // hand-provisioned, or minted before this fix shipped) carries a
+  // "velouria-" namespace prefix, then confirm the live pin path still
+  // authorizes it. This is the reservation applying to NEW claims only.
+  const secret = "wk_legacy_velouria_key_predating_the_reservation_fix";
+  const hash = keys.keyHash(secret);
+  gh.seed(USAGE, `keys/${hash}.json`, {
+    key_hash: hash, key_id: hash.slice(0, 12), namespace_prefix: "velouria-legacy-",
+    plan: "free", org: null, pool_id: "pool_seedseedseedseed",
+    source: "test-legacy", created_at: new Date().toISOString(),
+  });
+
+  // issuedKeyPrefix is a pure READ of the stored record — the same lookup
+  // api/pin.js's auth check calls. It must authorize the legacy prefix even
+  // though keys.validatePrefix("velouria-legacy-") would now refuse that
+  // same string as a NEW claim.
+  const prefix = await keys.issuedKeyPrefix(secret);
+  assert.equal(prefix, "velouria-legacy-",
+    "a key issued before this fix must keep authorizing its stored prefix");
+  assert.equal(keys.validatePrefix("velouria-legacy-").ok, false,
+    "the same string is correctly refused as a brand-new customer claim — the gate is on new claims only");
+});
+
 test("rev-2: JSON with ?prefix= mints under the chosen prefix and the key really pins there", async () => {
   const id = sid();
   stripe.seed(paidSession({ id, _pack: "mini" }));

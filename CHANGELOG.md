@@ -1,5 +1,60 @@
 # Changelog — arcaeon-witness
 
+
+## 2026-09-20 — brand stems reserved at claim time (branch `reserve-brand-stems`, NOT deployed, touches the paid claim path)
+
+Second-model review, 2026-09-20: `lib/_status_data.js`'s `isReferenceNamespace()`
+tags any `velouria-`/`arcaeon-` namespace as "our own log" on the **public**
+status page, but `lib/_keys.js`'s `validatePrefix()` only ever reserved the
+`wk-` stem. A paying customer could pick a namespace prefix like
+`velouria-something` or `arcaeon-x` at checkout and get two bad outcomes at
+once: mislabelled as the operator on the public status page, and sitting on
+the operator's own brand namespace outright — the exact class of harm the
+existing `wk-` reservation exists to prevent, just left open for the two
+stems that actually matter for brand.
+
+- **Reserved at claim time, same shape as `wk-`.** `lib/_keys.js` gets
+  `RESERVED_BRAND_STEMS = ["velouria", "arcaeon"]`. `validatePrefix()` refuses
+  a customer-chosen prefix that starts with (or is exactly) `velouria-` or
+  `arcaeon-` with `{ok:false, reason:"reserved", detail:"the <stem>- stem is
+  reserved for the operator's own namespaces"}` — the identical shape the
+  `wk-` refusal already used. A stem merely *appearing* inside a longer,
+  differently-rooted prefix (`acme-velouria-mirror-`, `myarcaeon-x-`) is
+  untouched and still claimable.
+- **One source of truth, not two lists that happened to agree.**
+  `lib/_status_data.js`'s `REFERENCE_PREFIXES` is now *derived* from
+  `keys.RESERVED_BRAND_STEMS` (`.map(stem => \`${stem}-\`)`) instead of
+  carrying its own literal default. `api/fulfill.js`'s claim path and
+  `GET /api/prefix-available` both already routed through the same
+  `keys.validatePrefix()` (fulfill.js directly; `lib/_prefix_check.js`'s
+  `decide()` calls it too) — that plumbing was already correct and needed no
+  change, only the reservation itself was missing.
+- **`WITNESS_REFERENCE_NS_PREFIXES` env override REMOVED, not kept.** It let
+  an operator tag an *unreserved* stem as "ours" on the status page without
+  also reserving it at claim time — precisely the drift that produced this
+  bug in the first place, since the default value happened to match
+  `validatePrefix`'s hardcoded `wk-`-style reservations by coincidence, not
+  by construction. Awkward to reconcile with "single source of truth" any
+  other way (an env var cannot safely widen a security-relevant reservation
+  at runtime), so it is gone; `REFERENCE_EXACT` / `WITNESS_REFERENCE_NS_EXACT`
+  (unrelated — exact operator log names with no brand stem, e.g.
+  `test-freeplan-smoke`) is untouched.
+- **Grandfathered.** The reservation gates *new* customer claims only.
+  `keys.issuedKeyPrefix()` (the live `/api/pin` auth lookup) and
+  `keys.listPrefixes()` both read stored records as-is and never re-run
+  `validatePrefix` against history, so a key already issued on a brand-stem
+  prefix — before this fix, or hand-provisioned for the operator's own use
+  via `WITNESS_KEYS`, which never touches `validatePrefix` at all — keeps
+  authorizing pins unchanged. Test: `test/reserve_brand_stems.test.js` and
+  `test/fulfill.test.js` each seed a pre-existing `velouria-legacy-` key
+  record and confirm it still authorizes while the identical string is
+  refused as a fresh claim.
+- Tests: new `test/reserve_brand_stems.test.js` (17 tests: refusal shape,
+  case normalization, lookalikes stay allowed, the two-list single-source
+  check in both directions, grandfathering). Additions to
+  `test/prefix_available.test.js` (7) and `test/fulfill.test.js` (4, covering
+  the JSON claim path, the HTML form POST, a lookalike mint, and
+  grandfathering end-to-end). Suite 265 -> 293, all passing.
 ## 2026-09-20 — bulk verify is now rate limited, weighted by items.length (branch `bulk-ratelimit`, NOT deployed)
 
 Audit finding (`WITNESS_UNSHIPPED_COMMITS_AUDIT_2026-09-20.md`, Unit B):
