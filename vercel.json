@@ -24,5 +24,13 @@
       "source": "/api/stamp",
       "destination": "/api/verify?op=stamp"
     }
-  ]
+  ],
+  "functions": {
+    "api/pin.js": {
+      "maxDuration": 30
+    },
+    "api/verify.js": {
+      "maxDuration": 30
+    }
+  }
 }
