@@ -35,6 +35,12 @@
 // word verifyItem doesn't already emit. An oversized batch is refused whole,
 // before any store read, mirroring arcaeon_receipt/cite_batch.py's
 // cap-or-refuse pattern. See BULK_VERIFY_DESIGN.md for the full contract.
+//
+// RATE LIMIT (2026-09-20 fix, see BULK_VERIFY_DESIGN.md "Rate limiting"):
+// bulk mode runs its own weighted ratelimit.check(req, items.length) after
+// the cheap shape/cap validation and before any store read — it does NOT
+// fall through to the single-item GET/HEAD path's own (unweighted, cost=1)
+// check below, since bulk is dispatched away from that path entirely.
 
 "use strict";
 
@@ -292,6 +298,35 @@ async function handleBulk(req, res) {
     });
   }
 
+  // Per-IP rate limit, WEIGHTED by items.length (2026-09-20 fix — see
+  // BULK_VERIFY_DESIGN.md "Rate limiting"). A single verify costs at most
+  // MAX_HISTORY_SCAN store reads; a bulk call of N items costs up to N times
+  // that, from the SAME shared GitHub token /api/pin's paid writes depend
+  // on. Spending only one rate-limit unit per bulk call regardless of size
+  // (the original design) let one HTTP request buy up to MAX_BULK_ITEMS
+  // times the intended per-call budget in store reads. Charging
+  // items.length units against the SAME bucket the single-item path uses
+  // (ratelimit.js's `cost` param) closes that without a second bucket to
+  // keep in sync — a caller mixing single and bulk calls draws from one
+  // shared budget, matching how the two paths already share one GitHub
+  // token. Checked here: AFTER the shape/cap validation above (which
+  // touches no store and must stay free to refuse garbage), and BEFORE the
+  // store-reading loop below — so an over-limit caller costs this instance
+  // nothing beyond the checks already run, and a malformed/over-cap batch
+  // (refused above) never reaches this check at all and so never spends a
+  // rate-limit unit either — it was already refused for a cheaper reason
+  // and shouldn't also be charged for one it never got the chance to incur.
+  const rl = ratelimit.check(req, items.length);
+  if (rl.limited) {
+    res.setHeader("retry-after", String(rl.retryAfterSeconds));
+    return res.status(429).json({
+      ok: false,
+      error: "rate limit exceeded",
+      note: `naive per-instance, per-IP limiter (Stage-0): ~${rl.limit} calls per IP per ${Math.round(rl.windowSeconds / 60)} minutes, enforced per warm serverless instance — not a guaranteed global cap; a bulk call of N items spends N of those units from the same budget, see the repo's rate-limit note`,
+      retry_after_seconds: rl.retryAfterSeconds,
+    });
+  }
+
   const results = [];
   // Plain sequential loop, never Promise.all: one item's rejection must not
   // take down the batch, and results must land in request order.
@@ -321,8 +356,10 @@ module.exports = async (req, res) => {
 
   // --- co-hosted mode: POST /api/verify?op=bulk ---
   // Dispatched before the single-item method/ratelimit gates below — bulk
-  // mode has its own method requirement (POST, not GET/HEAD) and its own
-  // shape entirely. See BULK_VERIFY_DESIGN.md.
+  // mode has its own method requirement (POST, not GET/HEAD), its own shape
+  // entirely, and (2026-09-20) its own WEIGHTED rate-limit check inside
+  // handleBulk itself — it is never exempt from rate limiting, it is gated
+  // by a different call shaped for its own cost. See BULK_VERIFY_DESIGN.md.
   if (String(q.op || "") === "bulk") {
     return handleBulk(req, res);
   }

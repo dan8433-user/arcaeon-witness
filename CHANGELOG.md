@@ -1,5 +1,58 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-20 — bulk verify is now rate limited, weighted by items.length (branch `bulk-ratelimit`, NOT deployed)
+
+Audit finding (`WITNESS_UNSHIPPED_COMMITS_AUDIT_2026-09-20.md`, Unit B):
+`api/verify.js`'s `module.exports` dispatched `?op=bulk` to `handleBulk`
+*before* the single-item path's `ratelimit.check(req)` call, and
+`handleBulk` never called the rate limiter at all. One unauthenticated
+POST could carry up to `MAX_BULK_ITEMS` (20) items, each costing up to
+`MAX_HISTORY_SCAN` (50) history-scan reads plus 1 for `latest.json` — up
+to 1020 GitHub API reads from one HTTP request, against the same token
+`/api/pin`'s paid writes depend on, with zero rate limiting. This existed
+because bulk mode (K-018, `34c0655`) was added after the per-IP limiter
+(`14308a0`) and the bulk dispatch was wired in front of, not through, it.
+
+**Why.** GitHub's contents API budget is shared across the whole service,
+not metered per endpoint (`test/free_endpoints_ratelimit.test.js`'s own
+header explains this same class of bug on four other endpoints, fixed
+2026-09-05). Bulk mode reopened it on a fifth surface at up to 34x the
+per-call cost of a single unauthenticated GET.
+
+**What.** `lib/_ratelimit.js`'s `check(req)` gained an optional `cost`
+parameter (default 1 — every existing caller is unaffected). `handleBulk`
+now calls `ratelimit.check(req, items.length)` against the SAME per-IP
+bucket the single-item GET/HEAD path uses, after the cheap shape/cap
+validation (which touches no store and stays free to refuse garbage) and
+before any store read. Chosen over a second, bulk-only bucket: it needed
+no new machinery beyond the `cost` parameter, and it's genuinely one
+shared resource (one GitHub token) being protected either way — two
+buckets would let single and bulk traffic each separately max it out.
+Design decision, tested: a malformed/over-cap batch spends zero rate-limit
+units (it never reaches the check), because it already costs zero store
+reads and charging it would let cheap junk grief a legitimate caller's
+shared budget for free.
+
+**Corrected in the same pass:** `BULK_VERIFY_DESIGN.md`'s "Rate limiting"
+section previously claimed the limiter "still applies to the bulk request
+as one call" — false; and its worst-case arithmetic ("20 × 50 = 1,000")
+undercounted by one read per item (the `latest.json` read the history scan
+is entered from). Measured worst case, directly against the mock store's
+own read log: **1020**, not 1000. The caps themselves (20 items,
+50-record scan) are unchanged; only the arithmetic describing them was
+wrong, and it was wrong low.
+
+`test/verify_bulk_ratelimit.test.js`, 6 tests: the crossing-the-limit case
+makes zero store reads; a different IP is unaffected; single verifies plus
+one bulk call share one budget and cross it exactly at the summed weight;
+the 1020-read worst case is measured, not asserted against a
+self-reported number; malformed/over-cap batches cost zero units by
+design; a must-fail arm re-creates the pre-fix dispatch (bulk's path never
+calling `ratelimit.check()` anywhere) and proves the weighted-limit
+assertion fails against it. Existing single-item rate-limit and CORS
+behavior unchanged (`test/verify_read_surface.test.js`, untouched, still
+green). `npm test`: 265 → 271, all green.
+
 ## 2026-09-19 — the status page reports the service (branch `status-posture`, NOT deployed)
 
 The page opened with "Independence disclosure: k=1. Every namespace below traces to one operator root... We measured, the answer is one", plus a `k=1` stat tile, and `status.json` carried "all namespaces trace to one operator root". That wording came out of a forum reviewer's critique and was right for the forum. On a product surface it read as an announcement that nobody else uses the service. Owner's call, 2026-09-19: a status page says what the service is doing; it does not editorialise about adoption.

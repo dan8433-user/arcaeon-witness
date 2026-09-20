@@ -55,14 +55,16 @@ const MAX_BULK_ITEMS = 20;
 Rationale: the single-item path's own comment already names the reason a
 cap exists at all — "this is a public unauthenticated GET, so the cap
 exists to bound this repo's shared GitHub API budget per call, not to
-meter the caller." A single verify call can cost up to `MAX_HISTORY_SCAN`
-(50) GitHub reads when the requested rows sits behind the current head. A
-bulk call multiplies that: 20 items × 50 worst-case reads = 1,000 GitHub
-API calls from one HTTP request. 20 is chosen as a batch size useful enough
-to be worth building (a real caller checking a day's worth of pins in one
-round trip) while keeping that worst case bounded to something the shared
-budget can absorb; it is a config constant, trivially revisited if real
-usage says otherwise.
+meter the caller." A single verify call reads `pins/<ns>/latest.json`
+first (1 read) and, when the requested rows sits behind the current head,
+can cost up to `MAX_HISTORY_SCAN` (50) more walking history — 51 reads
+worst case, not 50 (see "Rate limiting" below for the correction and how
+it was measured). A bulk call multiplies that: 20 items × 51 worst-case
+reads = **1020** GitHub API calls from one HTTP request. 20 is chosen as a
+batch size useful enough to be worth building (a real caller checking a
+day's worth of pins in one round trip) while keeping that worst case
+bounded to something the shared budget can absorb; it is a config
+constant, trivially revisited if real usage says otherwise.
 
 An oversized batch is a **whole-request refusal**, not a truncation and
 not a partial run:
@@ -160,15 +162,66 @@ Checked in this order, each a hard stop before the next:
 
 ## Rate limiting
 
-The existing per-IP limiter (`lib/_ratelimit.js`, 30 calls/10min/warm
-instance) still applies to the bulk request as **one call**, the same as
-any other hit to this endpoint — it is not scaled by `items.length`. This
-is an accepted, named trade-off, not an oversight: the `MAX_BULK_ITEMS`
-cap is what bounds per-request cost; the per-IP limiter bounds request
-*frequency*. A caller who wants to check more than 20×30=600 records in 10
-minutes is already past what this Stage-0 limiter was sized for on the
-single-item path too. Revisit together if real bulk traffic makes this the
-binding constraint — not decided here.
+**Corrected 2026-09-20 — the paragraph this replaced was wrong on the
+facts, not just on the design.** It claimed the existing per-IP limiter
+"still applies to the bulk request as one call." It did not apply at all:
+`module.exports` dispatched `?op=bulk` straight to `handleBulk` *before*
+the single-item path's `ratelimit.check(req)` call, and `handleBulk` never
+called the limiter itself. One unauthenticated POST could walk up to
+`MAX_BULK_ITEMS x MAX_HISTORY_SCAN` (measured: 20 x 51 = 1020 — see below)
+GitHub reads against the same token `/api/pin`'s paid writes depend on,
+with no rate limiting whatsoever. Full audit:
+`WITNESS_UNSHIPPED_COMMITS_AUDIT_2026-09-20.md`, Unit B. Fixed on branch
+`bulk-ratelimit` (NOT deployed as of this writing).
+
+**The fix.** `handleBulk` now calls `ratelimit.check(req, items.length)` —
+`lib/_ratelimit.js`'s `check()` gained an optional `cost` parameter
+(default 1, so every other caller of `check()` is unaffected) — against
+the SAME per-IP bucket the single-item GET/HEAD path uses. A bulk call of
+N items spends N units from that one shared budget instead of 1, so a
+caller mixing single verifies and bulk verifies from one IP draws down one
+pool, not two independent ones that would each need their own sizing and
+could each be exhausted separately. This was picked over giving bulk mode
+its own stricter bucket because it needed no new machinery beyond the
+`cost` parameter, and because the thing being protected — the shared
+GitHub API budget behind one token — is genuinely the same resource for
+both paths; two buckets would let single-verify traffic and bulk traffic
+each separately max out that one shared resource.
+
+**Where the check runs.** After the cheap shape/cap validation (`items`
+is an array, non-empty, `<= MAX_BULK_ITEMS`) and before the per-item
+loop's store reads. This is deliberate: a malformed or over-cap batch is
+refused for free — zero rate-limit units spent — because that validation
+touches no store either, so there's nothing to protect by charging it, and
+charging it would let an attacker grief a legitimate caller's shared
+budget with cheap junk. The trade-off accepted: an attacker can send
+unlimited malformed/over-cap batches without ever being rate limited *for
+those specific calls* — but each one costs the instance only a Map lookup
+and a JSON parse, never a GitHub read, so the resource this limiter exists
+to protect is unaffected either way. Tested:
+`test/verify_bulk_ratelimit.test.js`'s `DESIGN:` case.
+
+**The measured worst case, corrected.** This section previously said "20
+items x 50 worst-case reads = 1,000 GitHub API calls," undercounting by
+one read per item: `verifyItem` always reads `pins/<ns>/latest.json`
+first (1 read) *before* it can even enter the history-scan branch, which
+then costs up to `MAX_HISTORY_SCAN` (50) more. Worst case per item is 51,
+not 50. Twenty items at 51 each is **1020**, not 1000 — measured directly
+in `test/verify_bulk_ratelimit.test.js`'s `BOUND:` test (seeds a namespace
+whose head is far ahead of every requested `rows`, with 50 historical
+records in between that never match and never drop below target, forcing
+every item through the full scan) against the mock store's own read log,
+not a count the handler reports about itself. The caps (`MAX_BULK_ITEMS`
+20, `MAX_HISTORY_SCAN` 50) are unchanged — only the earlier arithmetic was
+wrong, and it undercounted the real cost, which is the direction this
+document would rather never be wrong in.
+
+**Frequency, still bounded the same way as before.** A caller who wants
+to check more than 20x30=600 records in 10 minutes across many bulk calls
+is already past what this Stage-0 limiter was sized for on the
+single-item path too (30 calls/10min/warm instance, same honest
+per-instance limitation `_ratelimit.js` documents). Revisit together if
+real bulk traffic makes this the binding constraint — not decided here.
 
 ## Implementation note (for K-018, not decided further by this file)
 
@@ -194,3 +247,22 @@ lane would otherwise have to build.
 - A non-array `items` and a missing `items` — both 400, zero store reads.
 - Confirms no new `reason`/`witnessed` value appears anywhere that isn't
   already emitted by the existing single-item test suite (`test/verify.test.js`).
+
+## Test coverage (2026-09-20, `test/verify_bulk_ratelimit.test.js`)
+
+- A bulk call whose weight (`items.length`) crosses the shared per-IP
+  limit is 429, with the same honest body/`Retry-After` shape as the
+  single-item path, and makes **zero** store reads.
+- A different IP's budget is untouched by a hot IP's bulk usage.
+- Single verifies and one bulk call sharing the SAME bucket cross the
+  limit exactly where the weights say — at the shared total, not rounded
+  up or batched separately per call shape.
+- The documented worst case (1020 store reads for a 20-item bulk call
+  where every item forces a full history scan) is measured directly
+  against the mock store's read log, not asserted against a number the
+  handler reports about itself.
+- Malformed/over-cap batches consume zero rate-limit units, by design —
+  they never reach `ratelimit.check()` (see "Rate limiting" above).
+- A must-fail arm re-creates the pre-fix dispatch (bulk's path never calls
+  `ratelimit.check()` anywhere) and proves the weighted-limit assertion
+  fails against it, not just that it passes against the fixed code.
