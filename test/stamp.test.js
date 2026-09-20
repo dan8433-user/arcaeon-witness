@@ -142,6 +142,13 @@ test("VALIDATION: bad fingerprints and bad sizes are 400 and write nothing", asy
 });
 
 test("DAILY CAP: the global allowance holds across callers and refuses at the cap (cap=3 here)", async () => {
+  // 2026-09-20: free stamps now stop at a SHARE of the cap so they cannot
+  // spend the day out from under a paying customer (lib/_stamp.js
+  // freeCeiling; test/stamp_free_cannot_starve_paid.test.js owns that
+  // behaviour, with a must-fail arm). This test is about the GLOBAL cap, so
+  // the share is pinned to the whole cap here and the original assertion —
+  // three through, the fourth refused, counter at 3 — is unchanged.
+  process.env.STAMP_FREE_SHARE_OF_CAP = "1";
   const shas = ["1", "2", "3", "4"].map((c) => c.repeat(64));
   const codes = [];
   for (let i = 0; i < shas.length; i += 1) {
@@ -151,6 +158,7 @@ test("DAILY CAP: the global allowance holds across callers and refuses at the ca
   assert.deepEqual(codes, [201, 201, 201, 429]);
   assert.equal(gh.read(REPO, today()).count, 3);
   assert.equal(gh.has(REPO, pathOf(shas[3])), false, "the refused stamp must not exist");
+  delete process.env.STAMP_FREE_SHARE_OF_CAP;
 });
 
 test("FAIL CLOSED: if the budget counter cannot be written, NO stamp is recorded", async () => {
