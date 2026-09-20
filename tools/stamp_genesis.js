@@ -54,7 +54,9 @@
 
 "use strict";
 
-const GENESIS_DIR = "observations/stamp-log-genesis";
+// NOT under observations/: lib/_status_data.js counts every observations/*.json as a
+// CONFLICT observation on the public status page (review catch, 2026-09-20).
+const GENESIS_DIR = "genesis/stamp-log";
 
 // The claim, worded to the public-claim gate: a change "would show"; nothing
 // about being impossible to alter, nothing about independent or multiple

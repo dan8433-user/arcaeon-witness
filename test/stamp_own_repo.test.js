@@ -499,7 +499,8 @@ test("GENESIS: the record it would write names the stamps repo's first commit an
   );
   assert.equal(res.ok, true);
   assert.equal(res.plan.target_repo, PINS_REPO, "the OLD log is what dates the new one");
-  assert.equal(res.plan.path, `observations/stamp-log-genesis/${FIRST_SHA}.json`);
+  assert.equal(res.plan.path, `genesis/stamp-log/${FIRST_SHA}.json`);
+  assert.ok(!res.plan.path.startsWith("observations/"), "a birth record must never be counted as a conflict observation on the status page");
   assert.equal(res.plan.create_only, true);
   assert.equal(res.plan.record.first_commit_sha, FIRST_SHA);
   assert.equal(res.plan.record.repo, STAMPS_REPO);
