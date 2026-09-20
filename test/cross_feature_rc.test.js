@@ -549,8 +549,13 @@ test("CROSS (f): the 409 retry's worst-case sleep is derived from PUT_RETRY itse
   // has to come past this test.
   const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "vercel.json"), "utf-8"));
   const configured = cfg.functions && cfg.functions["api/pin.js"] && cfg.functions["api/pin.js"].maxDuration;
-  assert.equal(configured, undefined,
-    `vercel.json now sets maxDuration=${configured}s for api/pin.js — re-check it against ${worstOnePin / 1000}s of worst-case retry sleep and update the release note`);
+  // REVIEWED 2026-09-20: vercel.json now sets maxDuration for the writing
+  // functions. The override came past this test as intended; the assertion is
+  // now that the configured ceiling EXCEEDS the worst case, with margin for
+  // the round trips the sleep figure does not include.
+  assert.ok(Number.isFinite(configured), "api/pin.js must carry an explicit maxDuration");
+  assert.ok(configured * 1000 >= worstOnePin + 5000,
+    `maxDuration ${configured}s leaves under 5 s of margin over ${worstOnePin / 1000}s of worst-case retry sleep`);
 
   // MUST-FAIL ARM: the computation must respond to the constants it claims
   // to read. Halve the base and prove the number halves — if it did not,

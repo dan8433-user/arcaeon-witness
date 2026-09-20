@@ -222,7 +222,9 @@ so the number cannot drift away from the constants silently.
 | Per-request timeout in the code | **none** — no `AbortSignal`, no `signal:`, anywhere |
 | `functions.maxDuration` in `vercel.json` | **not set** — asserted by the test |
 
-**Verdict: the worst case does not fit.** `vercel.json` sets no
+**UPDATE, reviewer, 2026-09-20: `vercel.json` now sets `functions.maxDuration = 30` for `api/pin.js` and `api/verify.js` (the two functions that write through the retry). 30 s exceeds the 21.0 s worst-case sleep with 9 s of margin for round trips; `test/max_duration.test.js` and cross-feature test (f) pin it. Still a deploy-day check: confirm the plan accepts 30 s (if it refuses, the deploy fails loudly, which is the safe direction). The original finding follows unchanged.**
+
+**Verdict at the time of assembly: the worst case does not fit.** `vercel.json` sets no
 `maxDuration`, so the ceiling is the platform default for the plan this
 repository is pinned to by its own 12-function cap, which is the Hobby plan —
 documented at 10 s for Node functions. 21.0 s of deliberate sleeping does not
