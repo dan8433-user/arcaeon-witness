@@ -121,7 +121,7 @@ module.exports = async (req, res) => {
           ? `<div class="badge badge-grey" title="excluded from the health verdict via WITNESS_RETIRED_NS — still listed, not hidden">retired</div>`
           : "";
         const referenceFlag = r.reference
-          ? `<div class="badge badge-grey" title="the operator's own log, pinned continuously as a public reference for the cadence">reference</div>`
+          ? `<div class="badge badge-grey" title="the operator's own log, pinned continuously as a public reference for the cadence">our own log</div>`
           : "";
         const rowClasses = [
           r.gradeable === false ? "row-ungradeable" : null,
@@ -280,7 +280,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   </p>
   <p class="muted"><strong>Check it yourself.</strong> Every pin below is a public, third-party-timestamped
     commit, and every number links to its raw source, so nothing on this page has to be taken on trust.
-    Rows tagged <em>reference</em> are the operator's own logs, pinned continuously so that anyone can
+    Rows tagged <em>our own log</em> are ours, not a customer's, pinned continuously so that anyone can
     watch the cadence hold.</p>
 
   <div class="panel">
