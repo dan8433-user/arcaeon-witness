@@ -54,6 +54,13 @@ class MockGitHubStore {
     this.getLog = []; // [path] — every GET attempted, hit or miss, in order
     this._forced = new Map(); // "repo::path" -> remaining forced-conflict count
     this._forcedFailure = new Map(); // "repo::path" -> {remaining, status}
+    // GET /repos/<repo>/git/trees/<branch>?recursive=1 -> {tree:[{path,type}], truncated}
+    // Added 2026-09-20 for tools/reconcile_batches.js: the reconciler walks the
+    // whole repo through store.getTreeMeta, and `truncated` is the field that
+    // makes it say "could not look" instead of "clean". A fixture that could
+    // not represent a truncated tree could not test that distinction at all.
+    this.treeTruncated = false;
+    this.treeStatus = 200; // set to 5xx to make the tree unreadable
   }
 
   _repoMap(repo) {
@@ -101,6 +108,17 @@ class MockGitHubStore {
 
   async handleFetch(url, opts) {
     const u = new URL(String(url));
+
+    const tm = u.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/git\/trees\/[^/]+$/);
+    if (tm) {
+      if (this.treeStatus !== 200) {
+        return fakeResponse(this.treeStatus, { message: "mock: forced tree read failure" });
+      }
+      const entries = [];
+      for (const [p] of this._repoMap(tm[1])) entries.push({ path: p, type: "blob" });
+      return fakeResponse(200, { tree: entries, truncated: this.treeTruncated === true });
+    }
+
     const m = u.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/contents\/(.+)$/);
     if (!m) return fakeResponse(404, { message: `mock: unhandled path ${u.pathname}` });
 
