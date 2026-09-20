@@ -66,8 +66,8 @@ test("NO IMPLIED ADOPTION: the operator's own namespace is tagged reference, a c
   const html = htmlOf(await render());
   const demoRow = html.slice(html.indexOf("velouria-demo"), html.indexOf("velouria-demo") + 2500);
   const acmeRow = html.slice(html.indexOf("acme-prod"), html.indexOf("acme-prod") + 2500).split("velouria-demo")[0];
-  assert.match(demoRow, />reference</, "the operator's own namespace must carry the reference tag");
-  assert.ok(!/>reference</.test(acmeRow.split("</tr>")[0]), "a customer's namespace must NOT be tagged reference");
+  assert.match(demoRow, />our own log</, "the operator's own namespace must carry the plain our-own-log tag");
+  assert.ok(!/>our own log</.test(acmeRow.split("</tr>")[0]), "a customer's namespace must NOT be tagged as ours");
 });
 
 test("JSON: states the service property, not the usage; and carries the per-namespace flag", async () => {
@@ -84,7 +84,20 @@ test("JSON: states the service property, not the usage; and carries the per-name
 
 test("PREFIX RULE: reference is decided by prefix, and a lookalike in the middle of a name does not count", () => {
   assert.equal(isReferenceNamespace("velouria-canon"), true);
-  assert.equal(isReferenceNamespace("test-freeplan"), true);
+  assert.equal(isReferenceNamespace("test-freeplan"), false); // generic stem: no longer ours by prefix
   assert.equal(isReferenceNamespace("acme-velouria-mirror"), false);
   assert.equal(isReferenceNamespace("acme-prod"), false);
+});
+
+test("GENERIC STEMS ARE NOT OURS: a customer who picks demo- or test- is never tagged as the operator (2026-09-20 review)", () => {
+  assert.equal(isReferenceNamespace("demo-project-alpha"), false);
+  assert.equal(isReferenceNamespace("test-acme"), false);
+  assert.equal(isReferenceNamespace("test-freeplan-smoke"), true);
+  assert.equal(isReferenceNamespace("velouria-canon"), true);
+});
+
+test("JSON KEEPS THE ROOT COUNT: independence.roots stays machine-readable next to the new fields", async () => {
+  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "lib", "_status_json.js"), "utf8");
+  assert.match(src, /roots:\s*1/);
+  assert.match(src, /witness_operators:\s*1/);
 });
