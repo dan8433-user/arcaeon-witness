@@ -47,6 +47,7 @@
 const store = require("../lib/_store.js");
 const cors = require("../lib/_cors.js");
 const ratelimit = require("../lib/_ratelimit.js");
+const stamp = require("../lib/_stamp.js");
 
 const HISTORY_BASE = `https://github.com/${store.REPO}/commits/${store.BRANCH}`;
 const RAW_BASE = `https://raw.githubusercontent.com/${store.REPO}/${store.BRANCH}`;
@@ -347,6 +348,17 @@ async function handleBulk(req, res) {
 }
 
 module.exports = async (req, res) => {
+  // --- co-hosted mode: /api/stamp (vercel.json rewrite -> ?op=stamp) ---
+  // A WRITE riding on a read endpoint, and it says so here rather than hiding:
+  // this deployment is at the Vercel Hobby 12-function cap, so lib/_stamp.js
+  // cannot have an api/ file of its own. It is dispatched BEFORE the GET-only
+  // CORS helper below because it answers its own POST preflight, and it shares
+  // nothing with verify's logic: no bearer key, no pins/ reads, its own
+  // limiter and its own daily cap. See lib/_stamp.js.
+  if (String((req.query || {}).op || "") === "stamp") {
+    return stamp.handleStamp(req, res);
+  }
+
   // GET-only CORS: answers an OPTIONS preflight with 204 and returns; every
   // other method falls through to the guard below with the ACAO header
   // already set. See _cors.js for why this is scoped to read endpoints only.
