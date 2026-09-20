@@ -97,20 +97,9 @@ beforeEach(() => {
       authorization: headers.authorization || headers.Authorization || null,
       ua: headers["user-agent"] || null,
     });
-    // The recursive-tree call the status page makes. The shared mock only
-    // speaks the contents API, so it is served here, from the same repo map,
-    // rather than by editing a helper five other files depend on.
-    const m = String(url).match(/^https?:\/\/[^/]+\/repos\/([^/]+\/[^/]+)\/git\/trees\//);
-    if (m) {
-      const map = gh.repos.get(m[1]) || new Map();
-      const tree = [...map.keys()].map((p) => ({ path: p, type: "blob" }));
-      return Promise.resolve({
-        status: 200,
-        ok: true,
-        json: async () => ({ tree }),
-        text: async () => JSON.stringify({ tree }),
-      });
-    }
+    // The recursive-tree call the status page makes is served by the shared
+    // mock (test/helpers/mock_store.js grew git/trees support on 2026-09-20
+    // for tools/reconcile_batches.js); this wrapper only WATCHES the wire.
     return mocked(url, opts);
   };
   restore = () => {

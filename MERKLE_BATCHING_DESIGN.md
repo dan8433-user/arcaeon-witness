@@ -25,6 +25,17 @@ real `api/verify` handler with the accumulator live and a sealer-committed root 
 repo, and asserting from the store's own read log that the verifier read
 `pins/<ns>/latest.json` and nothing under `batches/`.
 
+**Two gaps closed 2026-09-20, on branch `sealer-safety`, NOT deployed and the flag still
+off.** A second-lineage attack review of the unshipped commits named both as must-close
+before `WITNESS_BATCH_SHADOW` is ever turned on. §12 is the single-sealer claim
+(`lib/_claim.js`) — two overlapping `tools/seal_batch.js` runs could publish the same leaves
+under two roots, with no crash needed, and that interleaving was reproduced against the
+pre-change code before anything was written. §13 is the reconciler
+(`tools/reconcile_batches.js`), the instrument behind Phase 1's own "run it until a full
+week reconciles clean," which until now was a sentence with nothing behind it. **§14 is the
+checklist to work through before the flag goes on**, including the items that are still
+*not* built and are named there rather than left to be discovered. Suite 265 → 293.
+
 **Phase 1 is a run, and it has not started.** Accumulation is off unless
 `WITNESS_BATCH_SHADOW` is on. §9 Phase 1 is "Run it until a full week reconciles clean" —
 an operator act with a start date and a week of watching, not a code state that arrives
@@ -694,12 +705,19 @@ different claims.
    GITHUB_USAGE_REPO=dan8433-user/arcaeon-witness-usage \
    node tools/seal_batch.js
    ```
-   Exit 0 = sealed or a legitimate no-op; **1 = refused, nothing written** (fail-closed
-   fired — alert on this); 2 = the seal failed after the close, no root published, leaves
-   held for the next run.
-3. Reconcile daily for a week: every leaf in every `batches/*/leaves.json` must match a
-   committed record under `pins/`, and every committed record in the interval must appear in
-   exactly one leaf list.
+   Exit 0 = sealed or a legitimate no-op; **1 = refused, nothing published** (fail-closed
+   fired, or the §12 claim stopped this run — alert on this); 2 = the seal failed after the
+   close, no root published, leaves held for the next run. Two runs overlapping is safe
+   (§12); the second refuses rather than double-sealing.
+3. Reconcile daily for a week, with `tools/reconcile_batches.js` (§13) rather than by hand:
+   every leaf in every `batches/*/leaves.json` must match a committed record under `pins/`,
+   and every committed record in the interval must appear in exactly one leaf list.
+   **Alert on exit 2 (`INCOMPLETE`) as loudly as on exit 1 (`FINDINGS`)** — "could not
+   look" is not "clean," and the whole value of the instrument is that its silence means
+   something.
+4. Work §14's checklist first. Two of its items — worst-case pin latency, and the missing
+   rate limit on `POST /api/verify?op=bulk` in the same unshipped range — are not batching
+   work and are not fixed by anything here.
 
 Rollback is the same switch: unset `WITNESS_BATCH_SHADOW`, stop running the command. Roots
 already committed stay valid.
@@ -855,3 +873,228 @@ is measured and near, not because it is the more interesting design.
    recomputable "by anyone, forever, with us gone"; a leaf list that silently omits a class
    of accepted record is not that. The leaf-volume saving for idle namespaces is real and is
    the price.
+
+---
+
+## 12. Concurrency: one sealer at a time
+
+**Status: BUILT 2026-09-20 (`lib/_claim.js`, branch `sealer-safety`, NOT deployed, flag
+still off).** Added after a second-lineage attack review of the unshipped commits raised it
+as a must-close gap before `WITNESS_BATCH_SHADOW` is ever turned on.
+
+### 12.1 What the close CAS already guaranteed, and what it did not
+
+The close (`lib/_sealer.js`, `WRITE 1: CLOSE the batch. THIS IS THE BOUNDARY.`) is a
+compare-and-swap on the pending document, and it has always partitioned the **leaf set**
+exactly. A pin racing a seal either wins — the close 409s, re-reads, and folds the new leaf
+into the batch being closed — or loses, and its own append 409s, re-reads, and lands in the
+batch the close just opened. It cannot land in both and it cannot land in neither, and
+`test/sealer.test.js` asserts both halves from the published record.
+
+What that CAS does **not** partition is the **seal execution**. Two sealers can both take a
+turn at the same leaves, and no crash is needed to reach it:
+
+```
+A closes batch N          -> pending: {open: N+1 (empty), sealing: {N, L}}
+B's close 409s, B re-reads, sees sealing={N,L}
+B asks the pin repo: is root N published?   -> not yet (A has not written it)
+B legitimately concludes "unsealed, carry it forward"
+B closes N+1 carrying L, and publishes root N+1 over L
+A, still running, publishes root N over L
+-> every leaf of L is now claimed by two published roots
+```
+
+This was reproduced against the pre-change code, not reasoned about: two `sealOnce()` calls
+with the first suspended one write short of `root.json` published all four leaf slots —
+both leaves in batch 1 and the same two again in batch 2.
+
+### 12.2 The claim
+
+The store is a GitHub repo. The only mutual-exclusion primitive available is the conditional
+write the contents API already gives us, in its two shapes:
+
+- **PUT with no `sha`** creates the file, or returns `422 "sha wasn't supplied"` if it
+  already exists. Create-if-absent.
+- **PUT with a `sha`** writes, or returns `409` if the file moved. Update-if-unchanged.
+
+Both are arbitrated by GitHub, so exactly one of two racing writers wins each. A seal takes
+a claim — `pending/seal_claim.json` in the private usage repo, beside the pending document —
+by exactly one of those writes. The claim names the holder, an absolute `expires_at`, and
+the **scope it is sealing**: the batch id, the leaf count, and a digest over the
+`(namespace, rows, chain, seq)` identity of every leaf in the set. A claim found in the wild
+therefore says what is being sealed, not merely that something is.
+
+**Where it sits in the order is part of the design.** Every read that can refuse still
+happens before any write, claim included; a run whose trigger has not fired returns having
+written nothing at all, because a lease taken every 60 seconds to discover there is nothing
+to do is a write per interval to say nothing happened.
+
+```
+read pending -> resolve prior seal -> read chain tip -> trigger?
+   no  -> return, zero writes
+   yes -> ACQUIRE -> close -> leaves.json -> [RE-CHECK] -> root.json -> release
+```
+
+The bracketed re-check before `root.json` is `batch.sealBatch`'s `beforeRoot` gate: the last
+instant at which aborting costs nothing but an inert orphan leaf list, which by this
+document's own failure atom claims nothing.
+
+**Expiry and takeover.** A claim is takeable when it is `released`, or when `expires_at` has
+passed by the taker's own clock. Takeover is itself a conditional write against the observed
+`sha`, so two takers still produce one winner. Default TTL is 120 seconds — two batch
+intervals. A claim whose `expires_at` cannot be parsed is treated as **live**, on purpose: a
+corrupt claim wedges the sealer, and a wedged sealer is harmless (leaves wait in the pending
+document and the next run absorbs them) while two sealers are not. Clearing it is deleting
+one file, and 12.4 says so.
+
+### 12.3 What is and is not guaranteed
+
+**Guaranteed.**
+
+- Two sealers that both attempt to acquire cannot both be told yes for the same live claim.
+  The winner is picked by GitHub's conditional write, not by us.
+- A sealer that dies holding the claim does not wedge the queue past one TTL.
+- A sealer whose claim expired or was taken over mid-run detects it **before** the root
+  write and stands down: no root published, no proof minted, leaves held in the `sealing`
+  slot, and the next run carries them under a new batch id. A consumed id is never reused.
+- Four failure shapes are covered by tests that fail against the pre-change code: two
+  sealers starting in the same second; a crash after claiming and before the close; a crash
+  after the root write and before clearing pending; a slow sealer whose lease expires while
+  it is still working.
+
+**Not guaranteed, and this is the honest part.**
+
+- **This is a lease, not a lock.** Between the pre-root check and the root PUT landing at
+  GitHub there is a window. A sealer that stalls *inside* that window past its own expiry,
+  while another takes over and seals, can still publish a second root over the same leaves.
+  The TTL is sized so that window is far smaller than a run. It is not zero, and nothing
+  here claims it is. **The property that does hold without qualification is that a violation
+  would SHOW**: section 13's reconciler reports any leaf carried by two batches, and the
+  roots chain publicly, so a double seal is evidence in the record rather than a silence.
+- **Clock agreement.** Expiry is compared against each runner's own wall clock, so the TTL
+  must exceed (worst run duration + worst clock skew). 120 seconds against one
+  operator-scheduled runner is generous; a fleet with unsynchronized clocks would need it
+  raised, and `--claim-ttl` exists for that.
+- **The claim binds sealers only.** It says nothing about any other writer. That is
+  sufficient because the sealers are the only writers of roots — `api/pin.js` appends leaves
+  and never seals — but it is a property of who calls what, not of the lock.
+- **The lease clock is separate from the replay clock.** `tools/seal_batch.js --now` moves
+  the batch clock, never the lease clock: a lease that moved with a replay clock would
+  measure nothing about how long the run has really been alive.
+
+### 12.4 Operator notes
+
+- Running `tools/seal_batch.js` twice at once is now safe — the second exits 1 with
+  `seal_claim_held` and writes nothing. Still not worth doing on purpose; it is simply no
+  longer a way to publish the same leaves twice.
+- A run that exits 1 with `claim_lost_before_root` closed its batch and then stood down.
+  Nothing was published; the leaves are held. If this repeats, the runs are taking longer
+  than the TTL — raise `--claim-ttl`, do not disable the check.
+- The one thing needing a hand: a **corrupt** claim document. It holds the door by design.
+  Delete `pending/seal_claim.json` from the usage repo when no sealer is running.
+
+---
+
+## 13. Reconciliation: the instrument behind "reconciles clean"
+
+**Status: BUILT 2026-09-20 (`tools/reconcile_batches.js`, branch `sealer-safety`, NOT
+deployed).** Section 9 Phase 1 has always said "run it until a full week reconciles clean."
+Until now that was a sentence with no instrument behind it, and 6.1's own tolerated gap — a
+committed pin whose leaf never enters a tree — was invisible by construction.
+
+It is a tool, not an endpoint, for the same reason the sealer is: `api/` is at the Vercel
+Hobby 12-function cap (`9e8b060`), and a reconciler is an operator instrument run against a
+watched Phase 1 run, not a public surface. It reads; it never writes; a test asserts zero
+writes across every path.
+
+### 13.1 The four findings
+
+| Finding | What it means |
+|---|---|
+| `lost` | A pin record is committed in the public repo, its leaf is in no sealed batch, and it is not waiting in the pending document. |
+| `duplicated` | One leaf identity carried by two batches — the shape a double seal leaves behind (12.3). |
+| `root_mismatch` | A batch's published `leaves.json` does not hash to the root its own `root.json` claims, recomputed through the same `lib/_merkle.js` an outside verifier would use. |
+| `proof_failed` | A leaf's inclusion proof, rebuilt from the published leaf list, does not verify against the published root. Built from the **declared** `tree_size` and `leaf_hashes` rather than the recomputed ones — that is the data a stranger holds, so a document whose declared fields disagree with its own leaf array fails here even when the array alone would hash fine. |
+
+Leaf identity is `(namespace, rows, chain, seq)` — deliberately not the leaf hash, so a
+record that predates the leaf shape can still be placed in or out of scope.
+
+**A `lost` finding is not automatically a bug.** Section 6.1's pending-head refusal
+(`pending_head_regression`) is a legitimate cause: `api/pin.js` and the pending store can
+legitimately disagree about order when two requests for one namespace finish out of order,
+and the leaf is refused into the tree while the pin stays publicly committed. That is the
+tolerated Phase 1 gap this phase exists to measure. It is reported rather than filtered,
+because "expected sometimes" is not the same as "nobody should look."
+
+**An orphan `leaves.json`** — a leaf list with no root — is **not** a finding. The failure
+atom makes it inert: nothing cites it, no proof can reference it. It is counted and reported
+as a note, because a growing count means seals are failing.
+
+### 13.2 Three verdicts, not two
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `CLEAN` | 0 | Every record in scope was read and nothing was found. |
+| `FINDINGS` | 1 | At least one of the four. Findings win over incompleteness — an unread file does not make a real finding less real. |
+| `INCOMPLETE` | 2 | Something could not be read, or a bound was hit. |
+
+`INCOMPLETE` exists because the one way this tool can lie is by being read as a clean bill
+when it simply did not look. It fires on: a truncated GitHub recursive tree (the flag
+`store.getTree` used to drop, which is why `store.getTreeMeta` was added), an unreadable
+root/leaves/pin file, an unreadable pending document (without it, a waiting leaf and a
+dropped one are indistinguishable), and either bound being hit.
+
+### 13.3 Bounds and scope
+
+Every read spends a contents-API call against the same shared token the paid write path
+uses, so the walk is bounded: `--max-batches` (default 512) and `--max-pins` (default 5000).
+Past either one the tool **stops, says exactly how many it did not look at, and the verdict
+becomes `INCOMPLETE`**.
+
+Scope starts at the earliest `opened_at` of any batch read, or at `--since` if given. A pin
+committed before batching ever ran legitimately has no leaf; calling it lost would bury the
+real findings in noise, so those are counted `out_of_scope` and never reported.
+
+```
+GITHUB_PIN_TOKEN=...  GITHUB_PIN_REPO=dan8433-user/arcaeon-witness-pins \
+GITHUB_USAGE_REPO=dan8433-user/arcaeon-witness-usage \
+node tools/reconcile_batches.js [--since=<iso>] [--json]
+```
+
+---
+
+## 14. Before turning the flag on — the checklist
+
+`WITNESS_BATCH_SHADOW` is off and nothing here is deployed. Every line below is a thing to
+do or to check, in order, before it is turned on.
+
+**Built, and to be verified live rather than assumed:**
+
+- [ ] **One sealer.** Section 12 is built (`lib/_claim.js`). Confirm the operator's
+      scheduler cannot start a second run — and know that if it does, the second refuses
+      rather than double-seals. Read the claim file once after the first seal and confirm it
+      says `released`.
+- [ ] **Reconciliation.** Section 13 is built (`tools/reconcile_batches.js`). Schedule it
+      daily for the whole Phase 1 week and **alert on exit 2 as loudly as on exit 1** —
+      "could not look" is not "clean."
+- [ ] **The old path.** A pre-batching receipt must verify byte-identically after a seal.
+      Held by tests; re-check once against the live repo after the first real batch.
+
+**Not built, and named here rather than left to be discovered:**
+
+- [ ] **Worst-case pin latency (audit finding #7, PLAUSIBLE, unmeasured).** With the flag
+      on, one content-advance pin can pay two `putFile` retry budgets (~10.5s each) plus
+      `recordAcceptedSafe`'s CAS loop, all before the 201 is sent. `vercel.json` sets no
+      `functions.maxDuration`, so the ceiling is the plan default and nobody here has
+      measured it. **Measure it before the flag and the 409 retry ship in the same deploy.**
+- [ ] **No leaf-count ceiling on the accumulation path (audit finding #11).**
+      `_batch.js MAX_LEAVES` is enforced only by `sealTrigger`, which only runs when the
+      operator's scheduler runs. If the scheduler stops under load, the pending document
+      grows unbounded. Low severity in Phase 1; it wants a cap of its own before Phase 2.
+- [ ] **`readPrevRoot`'s 64-id lookback (audit finding #9).** 65 consecutive failed seals
+      throw `chain_break` with no auto-recovery. Needs a manual-recovery runbook line before
+      Phase 2, not before Phase 1.
+- [ ] **Unrelated, but shipping in the same unshipped range: bulk verify has no rate limit
+      (audit finding #1, CONFIRMED, CRITICAL).** `POST /api/verify?op=bulk` dispatches before
+      `ratelimit.check(req)`. It is not part of batching and it is not fixed here, but it
+      threatens the paid write path. **Do not ship that range without fixing it.**
