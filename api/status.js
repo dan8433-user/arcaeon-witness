@@ -120,6 +120,9 @@ module.exports = async (req, res) => {
         const retiredFlag = r.retired
           ? `<div class="badge badge-grey" title="excluded from the health verdict via WITNESS_RETIRED_NS — still listed, not hidden">retired</div>`
           : "";
+        const referenceFlag = r.reference
+          ? `<div class="badge badge-grey" title="the operator's own log, pinned continuously as a public reference for the cadence">reference</div>`
+          : "";
         const rowClasses = [
           r.gradeable === false ? "row-ungradeable" : null,
           r.retired ? "row-retired" : null,
@@ -130,7 +133,7 @@ module.exports = async (req, res) => {
           <td>${r.rowsWitnessed != null ? esc(r.rowsWitnessed) : "&mdash;"}</td>
           <td><time datetime="${esc(r.pinnedAt || "")}">${esc(r.pinnedAt || "unknown")}</time></td>
           <td>${r.nextDueBy ? `<time datetime="${esc(r.nextDueBy)}">${esc(r.nextDueBy)}</time>` : "<em>none declared &mdash; nothing to grade</em>"}</td>
-          <td>${statusBadge(r.status, r.overdueSeconds)}${retiredFlag}${heartbeatDetail}${
+          <td>${statusBadge(r.status, r.overdueSeconds)}${retiredFlag}${referenceFlag}${heartbeatDetail}${
             r.gradeable === false
               ? `<div class="muted-sm">predates the cadence field &mdash; this row is <strong>not</strong> a pass; <code>cadence_gradeable:false</code> in the API</div>`
               : ""
@@ -275,10 +278,10 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     <code>${esc(store.BRANCH)}</code>. This page reads the same public sources you can read yourself &mdash;
     every number below links to its raw source.
   </p>
-  <p class="muted"><strong>Independence disclosure: k=1.</strong> Every namespace below traces to one
-    operator root &mdash; a count of independent derivation roots, not of signatures. We measured, the
-    answer is one, and the determinate number beats an indeterminate impression. (Vocabulary owed to
-    an external reviewer's critique: eight signatures from one root is k=1, disclosed &mdash; not k=8.)</p>
+  <p class="muted"><strong>Check it yourself.</strong> Every pin below is a public, third-party-timestamped
+    commit, and every number links to its raw source, so nothing on this page has to be taken on trust.
+    Rows tagged <em>reference</em> are the operator's own logs, pinned continuously so that anyone can
+    watch the cadence hold.</p>
 
   <div class="panel">
     <div class="stat-row">
@@ -289,7 +292,6 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
       <div class="stat"><span class="n" style="${overdueCount ? "color:var(--red-ink)" : ""}">${overdueCount}</span><span class="l">overdue</span></div>
       <div class="stat"><span class="n" style="${ungradeableCount ? "color:var(--amber-ink)" : ""}">${ungradeableCount}</span><span class="l">not gradeable</span></div>
       <div class="stat"><span class="n">${missedEverCount}</span><span class="l">ever missed a deadline</span></div>
-      <div class="stat"><span class="n">k=1</span><span class="l">independent roots (disclosed)</span></div>
       <div class="stat"><span class="n">${obsCount}</span><span class="l">conflicts observed</span></div>
       ${retiredCount ? `<div class="stat"><span class="n">${retiredCount}</span><span class="l">retired (excluded from verdict)</span></div>` : ""}
     </div>

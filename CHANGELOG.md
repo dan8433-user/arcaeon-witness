@@ -1,5 +1,14 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-19 — the status page reports the service (branch `status-posture`, NOT deployed)
+
+The page opened with "Independence disclosure: k=1. Every namespace below traces to one operator root... We measured, the answer is one", plus a `k=1` stat tile, and `status.json` carried "all namespaces trace to one operator root". That wording came out of a forum reviewer's critique and was right for the forum. On a product surface it read as an announcement that nobody else uses the service. Owner's call, 2026-09-19: a status page says what the service is doing; it does not editorialise about adoption.
+
+- **Kept, because a relying party needs it:** single-operator witness; every pin is a public, third-party-timestamped commit; every number links to its raw source; nothing has to be taken on trust. `independence` in the JSON now states `witness_operators: 1` and `verifiable_without_trusting_us: true`.
+- **Removed:** the paragraph, the `k=1` tile, and the usage sentence in the JSON.
+- **Added, so the removal does not overclaim in the other direction:** the operator's own namespaces are tagged `reference` (HTML badge, `reference: true` in JSON), decided by prefix (`WITNESS_REFERENCE_NS_PREFIXES`, default `velouria-,arcaeon-,test-,demo-`). A bare namespace count would otherwise read as a customer count. A customer's namespace is simply untagged.
+- Test fixture: the mock GitHub store now lists immediate subdirectories (`type: "dir"`), as the real contents API does; without it nothing that walks `pins/<namespace>/` could be tested. `test/status_posture.test.js`, 5 tests; suite 258 -> 263.
+
 ## 2026-09-13 — Merkle batching, the caller: the sealer exists, and the batch does not seal early
 
 `6c0bb93` left one sentence in `MERKLE_BATCHING_DESIGN.md`: *"Until the sealer exists,
