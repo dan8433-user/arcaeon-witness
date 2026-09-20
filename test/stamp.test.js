@@ -4,7 +4,14 @@
 process.env.GITHUB_PIN_REPO = "test-owner/test-pins";
 process.env.GITHUB_PIN_BRANCH = "main";
 process.env.GITHUB_PIN_TOKEN = "test-token";
+// Stamps have their OWN repo and OWN token (2026-09-20). Every assertion in
+// this file that used to name the pins repo now names the stamps repo, and
+// test/stamp_own_repo.test.js is where "and never the pins repo" is proved.
+process.env.STAMP_REPO = "test-owner/test-stamps";
+process.env.STAMP_BRANCH = "main";
+process.env.STAMP_TOKEN = "test-stamp-token";
 process.env.STAMP_DAILY_CAP = "3";
+process.env.STAMP_FREE_PER_DAY = "1000"; // this file tests the OTHER fences
 
 const { test, beforeEach, afterEach } = require("node:test");
 const assert = require("node:assert/strict");
@@ -14,7 +21,7 @@ const { makeReq, makeRes } = require("./helpers/http_mocks.js");
 const store = require("../lib/_store.js");
 const stamp = require("../lib/_stamp.js");
 
-const REPO = process.env.GITHUB_PIN_REPO;
+const REPO = process.env.STAMP_REPO; // the stamps repo, not the pins repo
 const SHA_A = "a".repeat(64);
 const SHA_B = "b".repeat(64);
 const pathOf = (sha) => `stamps/${sha.slice(0, 2)}/${sha}.json`;
