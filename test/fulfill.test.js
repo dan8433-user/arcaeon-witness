@@ -721,3 +721,26 @@ test("rev-2: first mint renders the welcome email through the stub without break
   }
   assert.ok(logged.some((l) => l.includes("welcome-email") && l.includes("B html")));
 });
+
+// ---------------------------------------------------------------------
+// verdict before the key page (lib/_verdict.js, 2026-09-21)
+// ---------------------------------------------------------------------
+// MUST-FAIL ARM: run red once with the requireGreen block in api/fulfill.js
+// removed — the revisit answered 200 ok:true with no `key` in the body.
+test("VERDICT: a fulfillment record that is present but has lost its key is NOT re-shown as 200 ok:true", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const first = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(first._status, 200);
+  assert.equal(typeof first._body.key, "string");
+
+  const path = `fulfillments/${id}.json`;
+  const rec = gh.read(USAGE, path);
+  assert.ok(rec && rec.key, "fixture: no fulfillment record to damage; the test proves nothing");
+  delete rec.key;
+  gh.seed(USAGE, path, rec);
+
+  const again = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.notEqual(again._status, 200, `a damaged fulfillment record rendered a success page: ${JSON.stringify(again._body)}`);
+  assert.notEqual(again._body.ok, true);
+});

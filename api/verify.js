@@ -45,6 +45,7 @@
 "use strict";
 
 const store = require("../lib/_store.js");
+const verdict = require("../lib/_verdict.js");
 const cors = require("../lib/_cors.js");
 const ratelimit = require("../lib/_ratelimit.js");
 const stamp = require("../lib/_stamp.js");
@@ -75,7 +76,9 @@ function rawRecordUrl(ns, seq) {
 // a second implementation of a verdict without a parity mechanism — here the
 // mechanism is "there is only one implementation"). Returns {status, body}
 // instead of writing to a response, so both the single-item path and bulk
-// mode can use it. Never throws — every failure mode returns a body.
+// mode can use it. Every failure mode of the STORE returns a body. The one
+// thing that throws is a programming error: building an ok:true body without
+// a green verdict in hand (lib/_verdict.js) — deliberately, fail closed.
 async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   const ns = rawNs || "";
   if (!store.NS_RE.test(ns)) {
@@ -110,14 +113,29 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   try {
     cur = await store.getFile(`pins/${ns}/latest.json`);
   } catch (err) {
+    // Reached-and-not-JSON is a verdict about the record (red), not a store
+    // outage: same 503 + ok:false as a head that parses but is not a pin.
+    if (err instanceof SyntaxError) {
+      return verdict.refusal(verdict.red(`pins/${ns}/latest.json`, "not_json"), "verify");
+    }
     return { status: 502, body: { error: `pin store read error: ${err.message}` } };
   }
 
-  if (!cur) {
+  // The verdict on the head comes before any answer is built from it
+  // (lib/_verdict.js). Every `ok: true` body below is made by
+  // verdict.success(<a verdict>, ...), which throws without one and throws on
+  // a red one. Before this, a latest.json that was present but was not a pin
+  // record fell past cases 1 and 2 (no integer rows), started the scan at
+  // `seq = 0` (a DEFAULT), walked nothing, and answered 200 ok:true
+  // witnessed:false "reached the start of this namespace's history without a
+  // match" — a conclusive refutation manufactured from a damaged file.
+  const headVerdict = verdict.judgePin(cur, { what: `pins/${ns}/latest.json`, namespace: ns });
+
+  if (verdict.isEmpty(headVerdict, "verify")) {
+    // Verified empty: the store said 404. The only road to this answer.
     return {
       status: 200,
-      body: {
-        ok: true,
+      body: verdict.success(headVerdict, {
         // null, not false: there is no record set to decide against. A conclusive
         // false is reserved for heads the store actively contradicts.
         witnessed: null,
@@ -125,16 +143,16 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         reason: "no_pin_recorded_for_namespace",
         note: `no pin has ever been recorded for namespace "${ns}" — the witness has no basis to confirm or refute this head`,
         history: historyUrl,
-      },
+      }, "verify"),
     };
   }
+  if (!headVerdict.ok) return verdict.refusal(headVerdict, "verify");
 
   const latest = cur.json;
 
-  function witnessedResponse(record, isCurrentHead) {
+  function witnessedResponse(recordVerdict, record, isCurrentHead) {
     const cadenceFields = store.computeCadenceFields(record);
-    return {
-      ok: true,
+    return verdict.success(recordVerdict, {
       witnessed: true,
       pin: record,
       seq: record.seq,
@@ -146,18 +164,17 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         ? "this is the namespace's current witnessed head"
         : "this exact (rows, chain) was witnessed, but the namespace has since advanced past it — this is a superseded historical head, not the current one; cadence fields below describe THIS record, not the namespace's live status",
       ...cadenceFields,
-    };
+    }, "verify");
   }
 
   // --- case 1: matches the current head ---
-  if (Number.isInteger(latest.rows) && rows === latest.rows) {
-    if (String(latest.chain).toLowerCase() === chainLower) {
-      return { status: 200, body: witnessedResponse(latest, true) };
+  if (rows === latest.rows) {
+    if (latest.chain.toLowerCase() === chainLower) {
+      return { status: 200, body: witnessedResponse(headVerdict, latest, true) };
     }
     return {
       status: 200,
-      body: {
-        ok: true,
+      body: verdict.success(headVerdict, {
         witnessed: false,
         pin: null,
         reason: "rows_match_chain_mismatch",
@@ -165,16 +182,15 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
         raw_record_url: rawRecordUrl(ns, latest.seq),
         history: historyUrl,
-      },
+      }, "verify"),
     };
   }
 
   // --- case 2: rows exceeds the current head — cannot have been witnessed yet ---
-  if (Number.isInteger(latest.rows) && rows > latest.rows) {
+  if (rows > latest.rows) {
     return {
       status: 200,
-      body: {
-        ok: true,
+      body: verdict.success(headVerdict, {
         // null, not false: a head ahead of the current pin hasn't been witnessed
         // YET — the store can't refute it, only report what it has accepted.
         witnessed: null,
@@ -183,7 +199,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         note: `requested rows (${rows}) is ahead of the namespace's current witnessed head (${latest.rows}) — it cannot have been witnessed yet; not a refutation`,
         accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
         history: historyUrl,
-      },
+      }, "verify"),
     };
   }
 
@@ -191,31 +207,58 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   // Same-rows accepted records have a unique chain (conflicts never land in
   // pins/, see api/pin.js), so the first record found at rows===target is
   // conclusive: match its chain, or it's a real mismatch, either way done.
-  let seq = Number.isInteger(latest.seq) ? latest.seq - 1 : 0;
+  // No `: 0` here any more: headVerdict already proved latest.seq is an integer.
+  let seq = latest.seq - 1;
   let scanned = 0;
+  // Records the walk asked for and could not read as pin records: a hole in
+  // the numbering, or a file that is there and is not a pin. Either one could
+  // have been the record being asked about, so once this is non-zero no
+  // NEGATIVE below may be conclusive. (A positive still is: a verified record
+  // that matches is a match whatever else is damaged.)
+  let unreadable = 0;
+  const inconclusive = (fields) => ({
+    ...fields,
+    witnessed: null,
+    reason: "history_unreadable",
+    unreadable_records: unreadable,
+    note:
+      `${unreadable} record(s) in the scanned range are missing or cannot be read as pin records, and any of them ` +
+      "could have been the head asked about — so this is NOT a refutation. Browse the commit history directly.",
+  });
   try {
     while (seq >= 1 && scanned < MAX_HISTORY_SCAN) {
       let got;
       try {
         got = await store.getFile(`pins/${ns}/${seqName(seq)}.json`);
       } catch (err) {
+        if (err instanceof SyntaxError) {
+          // a historical record that is not JSON: unreadable, same as one that
+          // parses and is not a pin — counted, never silently passed over
+          scanned += 1;
+          unreadable += 1;
+          seq -= 1;
+          continue;
+        }
         return { status: 502, body: { error: `pin store read error during history scan: ${err.message}` } };
       }
       scanned += 1;
-      if (!got) {
-        // A gap in numbering shouldn't happen, but don't loop forever on one.
+      const recVerdict = verdict.judgePin(got, { what: `pins/${ns}/${seqName(seq)}.json`, namespace: ns });
+      if (!recVerdict.ok || verdict.isEmpty(recVerdict, "verify")) {
+        // A gap in numbering shouldn't happen, and neither should a record that
+        // is not a record. Don't loop forever on one — and don't pretend it was
+        // looked at, either (both used to be skipped in silence).
+        unreadable += 1;
         seq -= 1;
         continue;
       }
       const rec = got.json;
-      if (Number.isInteger(rec.rows) && rec.rows === rows) {
-        if (String(rec.chain).toLowerCase() === chainLower) {
-          return { status: 200, body: witnessedResponse(rec, false) };
+      if (rec.rows === rows) {
+        if (rec.chain.toLowerCase() === chainLower) {
+          return { status: 200, body: witnessedResponse(recVerdict, rec, false) };
         }
         return {
           status: 200,
-          body: {
-            ok: true,
+          body: verdict.success(recVerdict, {
             witnessed: false,
             pin: null,
             reason: "rows_match_chain_mismatch",
@@ -223,25 +266,23 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
             scanned,
             raw_record_url: rawRecordUrl(ns, rec.seq),
             history: historyUrl,
-          },
+          }, "verify"),
         };
       }
-      if (Number.isInteger(rec.rows) && rec.rows < rows) {
+      if (rec.rows < rows) {
         // Rows only ever advance forward across records; once we've stepped
         // below the target without an exact hit, that rows count was never
-        // pinned (an advance can skip past values) — conclusively not found.
-        return {
-          status: 200,
-          body: {
-            ok: true,
-            witnessed: false,
-            pin: null,
-            reason: "rows_never_witnessed",
-            note: `rows=${rows} falls between two witnessed heads and was never itself the head — it was skipped by an advance`,
-            scanned,
-            history: historyUrl,
-          },
+        // pinned (an advance can skip past values) — conclusively not found,
+        // PROVIDED every record on the way down was actually read.
+        const fields = {
+          witnessed: false,
+          pin: null,
+          reason: "rows_never_witnessed",
+          note: `rows=${rows} falls between two witnessed heads and was never itself the head — it was skipped by an advance`,
+          scanned,
+          history: historyUrl,
         };
+        return { status: 200, body: verdict.success(recVerdict, unreadable ? inconclusive(fields) : fields, "verify") };
       }
       seq -= 1;
     }
@@ -250,10 +291,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   }
 
   const boundReached = scanned >= MAX_HISTORY_SCAN;
-  return {
-    status: 200,
-    body: {
-      ok: true,
+  const tail = {
       // Tri-state: a capped scan is an INCOMPLETE check, so it may not assert a
       // conclusive negative — witnessed:null. Reaching the start of history
       // without a match IS conclusive — witnessed:false.
@@ -265,7 +303,10 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         : "reached the start of this namespace's history without a match",
       scanned,
       history: historyUrl,
-    },
+  };
+  return {
+    status: 200,
+    body: verdict.success(headVerdict, unreadable && !boundReached ? inconclusive(tail) : tail, "verify"),
   };
 }
 

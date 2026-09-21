@@ -24,6 +24,7 @@
 
 const crypto = require("crypto");
 const store = require("../lib/_store.js");
+const verdict = require("../lib/_verdict.js");
 const meter = require("../lib/_meter.js");
 const balance = require("../lib/_balance.js");
 const issuedKeys = require("../lib/_keys.js");
@@ -92,7 +93,17 @@ async function putSeqRecord(namespace, seqName, record, message) {
 // clobbered. Only a strictly-behind latest is advanced.
 function latestPointerRebuild(record) {
   return (freshJson) => {
-    const freshSeq = freshJson && Number.isInteger(freshJson.seq) ? freshJson.seq : 0;
+    // 0 only for a pointer that is verifiably GONE (putFile passes null for a
+    // 404). A pointer that is present but unreadable used to read as seq 0 and
+    // get overwritten; now this throws and the write fails instead
+    // (lib/_verdict.js).
+    const fresh = verdict.requireGreen(
+      verdict.judgePin(freshJson === null ? null : { json: freshJson }, {
+        what: `pins/${record.namespace}/latest.json`, namespace: record.namespace,
+      }),
+      "latest pointer rebuild"
+    );
+    const freshSeq = verdict.isEmpty(fresh) ? 0 : freshJson.seq;
     if (freshSeq >= record.seq) return null; // abandon — never rewind the pointer
     return record;
   };
@@ -513,6 +524,23 @@ module.exports = async (req, res) => {
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       // --- read the current latest pin ---
       const cur = await store.getFile(latestPath);
+
+      // --- the head's verdict, before anything is decided against it ---
+      // Every guard below is written `cur && Number.isInteger(cur.json.rows) &&
+      // ...`, so a latest.json that was present but unreadable SKIPPED all of
+      // them: no monotonic check, no re-mint check, and `seq` fell to its
+      // default of 1 — a brand-new namespace's first pin, over a damaged head.
+      // "No head yet" is the verified-empty verdict (the store's 404) and
+      // nothing else. Refused before any charge. See lib/_verdict.js.
+      const headVerdict = verdict.judgePin(cur, { what: `pins/${namespace}/latest.json`, namespace });
+      if (!headVerdict.ok) {
+        const refused = verdict.refusal(headVerdict, "pin");
+        refused.body.note =
+          "the namespace's current head is stored but cannot be read as a pin record, so this pin was NOT " +
+          "accepted and nothing was charged: a witness that pins over a head it cannot read has stopped " +
+          "checking that it never goes backward.";
+        return res.status(refused.status).json(refused.body);
+      }
 
       // --- renewal preconditions: a renewal may only ever RESTATE the head ---
       // (rejections here charge nothing — no write happens)

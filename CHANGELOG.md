@@ -1,5 +1,21 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-21 — a success-shaped answer can no longer be built without a verdict (branch `verdict-required`, NOT deployed)
+
+**The class, not the call site.** On 2026-09-19/20 the receipt proxy's health endpoint (a different repo: `arcaeon-receipt`, commits `b5d98a7` and `757fc18`, with `arcaeon-ledger` `9e3dc66`) was found answering `200 {"ok": true, "rows": 0, "chain": "genesis"}` over a corrupt ledger: the verify step had said no, and a wrapper built a success out of defaults. That call site was patched the same day. This change is about the same shape in THIS codebase: anywhere a stored document that is present-but-unreadable fell through `x && typeof x.y === ... ? x.y : <default>` and came out as a well-formed answer. `VERDICT_SURVEY.md` lists every site, the greps it rests on, and what was left alone.
+
+**Remedy A, forbid the default: `lib/_verdict.js`.** One helper. `requireVerdict(v)` throws `VerdictRequiredError` unless `v` is an object with an explicit boolean `ok` and, when green, a named state. `success(v, fields)` is the constructor of an `ok: true` body on the record-reading endpoints and throws on a missing verdict and on a red one. "Empty / brand new" is its own verdict, `verified_empty`, and the judges mint it in exactly one situation: the store answered 404. Present-but-unreadable is red. The two never share a value again.
+
+**What it found here (25 sites, all listed with file:line in the survey).** The ones that mattered most: `/api/verify` turned a damaged `latest.json` into a CONCLUSIVE `witnessed:false` (the scan started at a defaulted `seq = 0`, walked nothing, and reported reaching the start of history); `/api/pin` skipped its monotonic guard and its re-mint guard over a damaged head, because both are written `cur && Number.isInteger(cur.json.rows) && ...`; the free-tier meter and the daily stamp budget read a damaged counter as 0, which fails OPEN; a credit grant over a damaged balance file replaced it with a fresh one holding only the grant; the status board reported `conflicts_observed: 0` under `ok: true` when the observations tree could not be read; and the badge, the status JSON and a listing each had a fallthrough whose last branch was the good news.
+
+**Remedy B, keep the plant on the producer: `test/planted_dead_ledger.test.js`.** Its own file. Overwrites a healthy namespace's stored head with garbage (bytes that are not JSON, and valid JSON saying `rows:0 chain:genesis`), asks `/api/latest`, `/api/verify` and `/api/pin`, requires non-200, and carries the guard from the receipt repo's fixture word for word: `fixture did not break the ledger; the test proves nothing`. The guard has its own control test, which skips the plant and requires the assertion to refuse.
+
+**Behaviour changes a caller can see.** A damaged head is `503 {ok:false, reason}` on `/api/latest` and `/api/verify` (was 200), and `/api/pin` refuses with 503 before any charge. `/api/verify` can answer `witnessed:null, reason:"history_unreadable"` where it used to answer a conclusive false past a hole or an unreadable record. `/api/status.json` reports `conflicts_observed: null` and `status:"indeterminate"` when the conflict log could not be counted. `/api/latest` no longer falls back to the raw CDN when the commit-fresh copy was REACHED and is not JSON. Honest empties are unchanged and pinned by tests: 404 on `/api/latest`, `witnessed:null no_pin_recorded_for_namespace` on `/api/verify`, first pin lands as seq 1, a key with no balance file reads 0, a month with no usage file starts at 0.
+
+**Before deploying:** the judges assume every stored pin carries `namespace`, `rows`, `chain`, `seq` (true of `api/pin.js` since its first commit), every balance file a numeric `balance`, every usage file an integer `used`, every day counter an integer `count`. That was checked against the CODE that writes them, not against the live repos. A read-only pass over the live pins and usage repos should come first; a legacy document that breaks the assumption would now be a 503 instead of a quiet default.
+
+Suite 383 → 420, 0 failed. No new file under `api/` (still 12).
+
 
 ## 2026-09-20 — two sealers cannot publish the same leaves twice, and a reconciler says so when something does (branch `sealer-safety`, NOT deployed, flag still off)
 
