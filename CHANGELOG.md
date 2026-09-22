@@ -164,7 +164,7 @@ Daniel's ask: a person should not have to write code to get a tamper-evident rec
 - A store outage on lookup is a 503 "this is not a no", never a 404.
 - Tests: 12 new, suite 270/270.
 - **Not done:** no chain across stamps yet (the existing Merkle batch sealer is the intended path), no receipt page, no deploy. Pushing this branch would create a preview that writes to the REAL public pins repo, so that waits for his go.
-## 2026-09-19 — the status page reports the service (branch `status-posture`, NOT deployed)
+## 2026-09-19 — the status page reports the service (deployed 2026-09-20 on top of live commit 14308a0; later commits on main NOT included)
 
 The page opened with "Independence disclosure: k=1. Every namespace below traces to one operator root... We measured, the answer is one", plus a `k=1` stat tile, and `status.json` carried "all namespaces trace to one operator root". That wording came out of a forum reviewer's critique and was right for the forum. On a product surface it read as an announcement that nobody else uses the service. Owner's call, 2026-09-19: a status page says what the service is doing; it does not editorialise about adoption.
 
