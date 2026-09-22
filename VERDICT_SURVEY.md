@@ -136,3 +136,39 @@ Method: a script edited the source in place, ran the named test file, captured t
 | F1x | stamp: both layers off, mismatched record | `a damaged stamp record answered 200: {"ok":true,"existing":true,"stamp":{…"sha256":"dddd…` |
 
 Two honest footnotes. **C1/C1x, non-JSON arm:** red, but through a `TypeError` that is an artifact of how the mutation was written (`pinRead.json` on `undefined`), not the original symptom; the valid-JSON arm is the clean one. **E6:** the test mock serves the raw-CDN host from the same garbage bytes, so what went red was "502 with no `ok:false`", not "stale 200 from a lagging CDN". The stale-CDN scenario the fix is aimed at is reasoned from the code, not simulated.
+
+## 6. The sixteen files §1 only grepped — now READ, one by one (2026-09-22)
+
+None of these files changed between `30bd34c` and `b051719`, so every "was" line number below is valid at either commit. Read for the four shapes: `Number(x) || 0`, guard_disarmed_by_damage (a conjunction whose early clause goes false on damage and skips the refusal), a ternary whose fallthrough is green, a non-listing read as empty.
+
+| file | how | verdict |
+|---|---|---|
+| `api/stripe-webhook.js` (whole file, 317 lines) | READ (not grepped) | **SITE #26, FIXED.** was :253 `(currency && currency !== "usd")` — guard_disarmed_by_damage: a missing/null/empty currency skipped the currency check and a paid session was credited. Now `currency !== "usd"`. Also seen, NOT changed (see below): :190 livemode gate is the same conjunction shape; :285 idempotency key falls back to `event.id` when `session.id` is absent |
+| `api/distill.js` | READ (not grepped) | CLEAN. Reads no stored record of its own; the meter and balance reads it calls are sites #14/#16, already fixed. `budget` default 2000 is request parsing |
+| `lib/_distill_core.js` | READ (not grepped) | CLEAN of the four shapes — a pure text transform over request input, no stored state. Out-of-class note: `parseString` turns a `\u` escape with bad hex into U+0000 instead of refusing |
+| `api/renew.js` | READ (not grepped) | CLEAN. A body it cannot stamp `intent:"renew"` onto (non-object) is refused 400 by `validatePin` in pin.js |
+| `lib/_sealer.js` | READ (not grepped) | **SITE #27, FIXED.** was :109 `resolveSealing`: `if (!state.sealing \|\| !Array.isArray(state.sealing.leaves) \|\| …) return {carry: []}` — non-listing read as empty: a PRESENT sealing slot with no leaf array (or leaves but no integer batch_id) read as "nothing owed", and the close then wrote a new slot over it, losing unpublished leaves. **SITE #28, FIXED.** was :113 `if (rec) return {published: true, root: rec.json.root}` — a root.json present but carrying no root counted as "published", the held leaves were dropped from the carry and overwritten by the close (observed with the fix reverted: slot went from `["demo-a"]` to `["demo-b"]`, reported only as `seal_failed`). Both now refuse. Legacy-optional kept: `sealing` null OR absent still means "no slot" |
+| `lib/_merkle.js` | READ (not grepped) | CLEAN. `verifyInclusion` green requires the recomputed root to equal the stated root. `recipe !== undefined && recipe !== MERKLE_RECIPE` accepts an absent top-level recipe by design (bare-hex path entries carry no label; every labelled value is checked by `splitLabelled`) |
+| `lib/_prefix_check.js` | READ (not grepped) | CLEAN. A failed prefix-list read answers 503 `available:null`, never `available:true`. Inherits the `_keys.listPrefixes` skip (§4, human decision) |
+| `lib/_prefix_ui.js` | READ (not grepped) | CLEAN. Browser script paints "free" only on `available === true`; the fallthrough branch is "couldn't check" |
+| `lib/_page.js` | READ (not grepped) | CLEAN. Template and escaping only; env URL defaults are configuration |
+| `lib/_cors.js` | READ (not grepped) | CLEAN. Headers only |
+| `lib/_ratelimit.js` | READ (not grepped) | CLEAN. In-memory buckets; the only non-default `cost` caller passes a validated array's length |
+| `lib/_welcome_email.js` | READ (not grepped) | CLEAN. Pure renderer; its one caller (`api/fulfill.js:634`) passes a record it just minted on first visit |
+| `lib/_stamp_store.js` | READ (not grepped) | CLEAN. Missing env fails closed (`configured:false`, throws); `STAMP_BRANCH` → "main" is configuration |
+| `tools/seal_batch.js` | READ (not grepped) | tool, listed not fixed: `--claim-ttl` is not validated as a number the way `--margin` is (NaN reaches `claim.acquire`) |
+| `tools/ceiling_probe.js` | READ (not grepped) | tool, listed not fixed: :206 and :268 `res.rate.remaining !== null && Number(...) < PRIMARY_FLOOR` — guard_disarmed_by_damage: a garbled rate header makes the floor check skip, so the probe keeps writing. Also the live-repo refusal compares the repo NAME only, not owner |
+| `tools/stamp_genesis.js` | READ (not grepped) | tool, CLEAN. The same-repo refusal uses the same `GITHUB_PIN_REPO` default as `lib/_store.js:14`, so it compares against the repo the write actually goes to |
+
+Must-fail arms for §6 (defect put back, test run, file restored, `git diff --stat` checked):
+
+| arm | defect put back | red line |
+|---|---|---|
+| G1 | webhook: `(currency && currency !== "usd")` | `currency absent: a session of unknown currency was credited: {"ok":true,"credited":true,"already_credited":false,"balance_after":1000,"event_id":"evt-nocur-absent"}` |
+| G2 | `lib/_sealer.js` at `b051719` (all three sealer checks off) | `damaged slot {"batch_id":1,…,"leaves":"garbage"} was read as nothing owed and the run sealed: {"sealed":true,"batch_id":"000000002",…` |
+| G3 | same revert, root.json `{}` | `Expected values to be strictly equal: + undefined - true` at the `refused` assertion. The run did not publish (a later chain check refused `prev_root` undefined as `seal_failed`) but the held leaf was already overwritten by the close |
+| G4 | same revert, slot with leaves and no batch_id, batch 1 actually published | `a slot with no batch_id was carried and re-sealed: {"sealed":true,…"tree_size":2,…"carried_leaves":1` — the same leaf published under a second root |
+
+Left for a human, not changed (same class, but absence may be legitimate and I cannot see live data or Stripe's guarantees from here):
+- `api/stripe-webhook.js:190` livemode gate, `typeof event.livemode === "boolean" && …` — skipped when the field is absent. The comment says this is deliberate ("Only asserted when the event actually carries the boolean") and the signing secret already separates modes.
+- `api/stripe-webhook.js:285` idempotency key falls back to `event.id` when `session.id` is missing, which reopens the two-events-one-session double credit the comment above it describes. Documented as belt-and-suspenders.

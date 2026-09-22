@@ -336,3 +336,38 @@ test("H2 REGRESSION: two different event ids reporting paid for the SAME session
   const bal = await balance.readBalance(hash);
   assert.equal(bal.balance, balance.PACKS.standard.pins, "one real purchase, reported by two event ids, must credit exactly once");
 });
+
+// ---------------------------------------------------------------------------
+// SITE #26 (VERDICT_SURVEY.md): the currency clause was a conjunction,
+// `(currency && currency !== "usd")`. A MISSING currency made it false, so a
+// signature-valid, paid, correct-amount session with no currency at all was
+// credited. Damage switched off the check that should have caught it.
+// ---------------------------------------------------------------------------
+
+test("SITE #26 REGRESSION: a signed, paid session with NO currency is NOT credited", async () => {
+  for (const kind of ["absent", "null", "empty"]) {
+    const hash = balance.keyHash("site26-no-currency-" + kind);
+    const event = checkoutEvent({ id: "evt-nocur-" + kind, hash, pack: "mini", amountTotal: 500 });
+    if (kind === "absent") delete event.data.object.currency;
+    if (kind === "null") event.data.object.currency = null;
+    if (kind === "empty") event.data.object.currency = "";
+    const res = await post(event);
+    assert.equal(res._status, 200, `currency ${kind}: answered ${res._status}`);
+    assert.notEqual(res._body.credited, true, `currency ${kind}: a session of unknown currency was credited: ${JSON.stringify(res._body)}`);
+    assert.match(res._body.skipped || "", /does not match|not credited/i);
+    const bal = await balance.readBalance(hash);
+    assert.equal(bal.balance, 0, `currency ${kind}: pins granted without a stated currency`);
+  }
+});
+
+test("SITE #26: a non-USD currency still refuses, and upper-case USD still credits", async () => {
+  const eurHash = balance.keyHash("site26-eur");
+  const eur = await post(checkoutEvent({ id: "evt-eur", hash: eurHash, pack: "mini", amountTotal: 500, currency: "eur" }));
+  assert.match(eur._body.skipped || "", /not credited/i);
+  assert.equal((await balance.readBalance(eurHash)).balance, 0);
+
+  const usdHash = balance.keyHash("site26-USD");
+  const usd = await post(checkoutEvent({ id: "evt-USD", hash: usdHash, pack: "mini", amountTotal: 500, currency: "USD" }));
+  assert.equal(usd._body.credited, true);
+  assert.equal((await balance.readBalance(usdHash)).balance, balance.PACKS.mini.pins);
+});

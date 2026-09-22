@@ -650,3 +650,73 @@ test("CONTRACT: with the shadow run off, a pin accumulates nothing and the pendi
     process.env.WITNESS_BATCH_SHADOW = prev;
   }
 });
+
+// ===========================================================================
+// VERDICT_SURVEY.md §6: resolveSealing read two damaged shapes as green.
+// ===========================================================================
+
+test("VERDICT: a sealing slot that is present but has no leaf array refuses the run; it is never read as 'nothing owed' and written over", async () => {
+  for (const slot of [{ batch_id: 1, opened_at: "2026-08-14T18:00:00.000Z", leaves: "garbage" }, {}, [], "x"]) {
+    gh = new MockGitHubStore();
+    restore();
+    restore = install(gh);
+    seedPending({
+      ...pending.initialState(new Date("2026-08-14T18:00:00Z")),
+      open: { batch_id: 2, opened_at: "2026-08-14T18:01:00.000Z", leaves: [leafFixture("demo-b", 20, "bbbbbbbb", 1)] },
+      sealing: slot,
+    });
+    const r = await sealer.sealOnce({ now: new Date("2026-08-14T18:02:00Z") });
+    assert.notEqual(r.sealed, true, `damaged slot ${JSON.stringify(slot)} was read as nothing owed and the run sealed: ${JSON.stringify(r)}`);
+    assert.equal(r.refused, true);
+    assert.equal(r.reason, "pending_document_corrupt");
+    assert.equal(pinRepoWrites().length, 0, "nothing published over a slot nobody could read");
+    assert.deepEqual(readPendingDoc().sealing, slot, "the damaged slot is left for a human, not overwritten");
+  }
+});
+
+test("VERDICT: a root.json that is present but carries no root does not count as published; the run refuses and the slot's leaves stay held", async () => {
+  const leaf = leafFixture("demo-a", 10, "aaaaaaaa", 1);
+  seedPending({
+    ...pending.initialState(new Date("2026-08-14T18:00:00Z")),
+    open: { batch_id: 2, opened_at: "2026-08-14T18:01:00.000Z", leaves: [leafFixture("demo-b", 20, "bbbbbbbb", 1)] },
+    sealing: { batch_id: 1, opened_at: "2026-08-14T18:00:00.000Z", leaves: [leaf] },
+  });
+  gh.seed(PIN_REPO, batch.rootPath(1), {});
+
+  const r = await sealer.sealOnce({ now: new Date("2026-08-14T18:02:00Z") });
+  assert.notEqual(r.sealed, true, `a root.json with no root was read as published and the run sealed: ${JSON.stringify(r)}`);
+  assert.equal(r.refused, true);
+  assert.equal(r.reason, "pin_repo_unreadable");
+  assert.equal(pinRepoWrites().length, 0);
+  assert.deepEqual(
+    readPendingDoc().sealing.leaves.map((l) => l.namespace),
+    ["demo-a"],
+    "the held leaf is still held, not overwritten by the next close"
+  );
+});
+
+test("VERDICT (legacy guard): a pending document with NO sealing key at all still seals normally", async () => {
+  const state = {
+    ...pending.initialState(new Date("2026-08-14T18:00:00Z")),
+    open: { batch_id: 1, opened_at: "2026-08-14T18:00:00.000Z", leaves: [leafFixture("demo-b", 20, "bbbbbbbb", 1)] },
+  };
+  delete state.sealing;
+  seedPending(state);
+  const r = await sealer.sealOnce({ now: new Date("2026-08-14T18:02:00Z") });
+  assert.equal(r.sealed, true, JSON.stringify(r));
+});
+
+test("VERDICT: a sealing slot holding leaves but no integer batch_id refuses; it cannot be checked against the public record, so it is never re-sealed", async () => {
+  const leaf = leafFixture("demo-a", 10, "aaaaaaaa", 1);
+  seedPending({
+    ...pending.initialState(new Date("2026-08-14T18:00:00Z")),
+    open: { batch_id: 2, opened_at: "2026-08-14T18:01:00.000Z", leaves: [leafFixture("demo-b", 20, "bbbbbbbb", 1)] },
+    sealing: { opened_at: "2026-08-14T18:00:00.000Z", leaves: [leaf] },
+  });
+  // Batch 1 really did publish these leaves; a slot that lost its id cannot ask.
+  gh.seed(PIN_REPO, batch.rootPath(1), { batch_id: "000000001", root: "sha256:witness-merkle:v1:" + "11".repeat(32), prev_root: null, tree_size: 1 });
+  const r = await sealer.sealOnce({ now: new Date("2026-08-14T18:02:00Z") });
+  assert.notEqual(r.sealed, true, `a slot with no batch_id was carried and re-sealed: ${JSON.stringify(r)}`);
+  assert.equal(r.reason, "pending_document_corrupt");
+  assert.equal(pinRepoWrites().length, 0);
+});
