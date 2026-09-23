@@ -405,7 +405,9 @@ async function main(argv, io = { out: (s) => process.stdout.write(s), err: (s) =
   } catch (err) {
     if (!(err instanceof Refused)) throw err;
     for (const c of err.created || []) io.out(`CREATED    ${c.rel}  commit ${c.commit}\n`);
-    io.err(`${err.outcome.toUpperCase()}: ${err.message}\n`);
+    // Display words use spaces (COULD NOT LOOK, as every other tool prints it);
+    // err.outcome keeps its hyphenated internal value.
+    io.err(`${err.outcome.toUpperCase().replace(/-/g, " ")}: ${err.message}\n`);
     return 2;
   }
 }

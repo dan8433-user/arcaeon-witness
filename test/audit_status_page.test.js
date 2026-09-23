@@ -185,7 +185,34 @@ test("gatherAuditStates: the read budget marks a namespace COULD NOT LOOK rather
   assert.ok(!cell.includes("UNALTERED"));
   const summary = auditStatus.renderAuditSummary(audit, { noun: "namespaces" });
   assert.ok(summary.includes("0 of 0 namespaces checked by a key not declared as ours."));
-  assert.ok(summary.includes("2 not fully read."));
+  assert.ok(summary.includes("2 COULD NOT LOOK."));
+  assert.ok(!summary.includes("not fully read"), "the retired headline spelling is gone");
+});
+
+test("VOCABULARY: the headline count and the badge say COULD NOT LOOK in the same words", async () => {
+  gh.seed(REPO, "checks/OPERATOR_KEYS.json", { keys: [{ key: ours.keyId }] });
+  const cap = auditStatus.recordReadCap(2);
+  for (let i = 0; i < cap + 1; i++) {
+    seedCheck(check(cr.generateKeyPair(), "acme-prod", "VERIFIED", 3600 + i));
+  }
+  seedCheck(check(stranger, "velouria-demo", "VERIFIED", 3600));
+  const audit = await auditStatus.gatherAuditStates(["acme-prod", "velouria-demo"], { nowSeconds: NOW });
+  const word = auditStatus.COULD_NOT_LOOK_WORD;
+  assert.equal(word, "COULD NOT LOOK");
+  const badgeOf = (html) => {
+    const m = /<span class="badge badge-amber">&#9888; ([^<]+)<\/span>/.exec(html);
+    assert.ok(m, html);
+    return m[1];
+  };
+  assert.equal(badgeOf(auditStatus.renderAuditCell(audit.byNs["acme-prod"])), word);
+  assert.equal(badgeOf(auditStatus.renderAuditCell(null)), word, "the no-data badge uses the same words");
+  const summary = auditStatus.renderAuditSummary(audit, { noun: "namespaces" });
+  const head = /<p class="audit-headline">.*? (\d+) ([^<.]+)\.<\/p>/.exec(summary);
+  assert.ok(head, summary);
+  assert.equal(head[1], "2");
+  assert.equal(head[2], word, "headline and badge share one spelling");
+  // The machine value on the JSON twin is frozen and does not move with the display word.
+  assert.equal(auditStatus.NOT_FULLY_READ, "NOT_FULLY_READ");
 });
 
 test("auditStateEnabled reads only 1/true/on", () => {

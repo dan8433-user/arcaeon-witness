@@ -90,6 +90,7 @@ test("DAY 30: 8 namespaces x 30 days of records all derive, SELF-CHECKED or CHEC
   assert.ok(summary.includes("4 of 8 namespaces checked by a key not declared as ours."), summary);
   assert.ok(summary.includes("8 namespaces: 0 blind, 4 self-checked, 4 checked, 0 stale, 0 broken."));
   assert.ok(!summary.includes("not fully read"));
+  assert.ok(!summary.includes("COULD NOT LOOK"), "no namespace was left unread, so the headline carries no COULD NOT LOOK count");
   assert.equal(counted.filter((d) => d.partial).length, 0);
   const cell = auditStatus.renderAuditCell(audit.byNs["ns-01"]);
   assert.ok(cell.includes(`${30 - K} older records not read: each checker key&#39;s newest ${K} were, and a key&#39;s newer check supersedes its older ones`));

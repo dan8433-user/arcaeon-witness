@@ -1,5 +1,12 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 (evening): the audit headline says COULD NOT LOOK, the badge's spelling (branch `release-candidate-2026-09-23b`, local only, NOT deployed)
+
+- **Why.** The Fable audit's item 1 example: on one status page the badge for a namespace the render did not fully read said COULD NOT LOOK while the headline above it said "N not fully read." One page, two spellings for one fact.
+- **`lib/_audit_status.js`**: one constant, `COULD_NOT_LOOK_WORD = "COULD NOT LOOK"`, now feeds the badge (both branches), the headline count ("2 COULD NOT LOOK.") and the superseded line; exported. The JSON twin's machine values (`state: "NOT_FULLY_READ"`, `badge: "NOT FULLY READ"`, `counts.not_fully_read`) are frozen wire values and did not move.
+- **`tools/publish_self_checks.js`**: the refusal line on stderr prints `COULD NOT LOOK:` with spaces, like every other tool; `err.outcome` keeps its hyphenated internal value.
+- **Tests:** `audit_status_page.test.js` headline pin moved to "2 COULD NOT LOOK." with the old spelling asserted absent, plus one new test that the headline and the badge (partial and no-data) carry the same words and that `NOT_FULLY_READ` is unchanged; `audit_reader_newest.test.js` also asserts no COULD NOT LOOK count when nothing was left unread.
+
 ## 2026-09-23 — the battery says when it was not there (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
 
 A correspondent found three of four selftest functions in their library defined and called by nothing, while their daily beat reported green. The same guard, here:
