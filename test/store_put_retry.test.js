@@ -113,7 +113,7 @@ test("409 twice then 201: the write lands on attempt 3, and the third PUT carrie
   const seen = raceOn(path, 2, (cur, n) => ({ rows: [...cur.rows, `racer${n}`] }));
 
   const res = await store.putFile(path, { rows: ["A", "mine"] }, "mine", staleSha, {
-    rebuild: (fresh) => ({ rows: [...fresh.rows, "mine"] }),
+    rebuild: (fresh) => ({ rows: [...fresh.json.rows, "mine"] }),
   });
 
   assert.equal(res.attempts, 3, "the result must say it took three attempts, not report a clean single write");
@@ -191,9 +191,9 @@ test("after a race, the merged content contains BOTH writers' rows", async () =>
   // Writer C commits {rows:[A,C]} the instant before B's PUT, so B's sha is stale.
   raceOn(path, 1, () => ({ rows: ["A", "C"] }));
 
-  // B wants to append its own row. Its rebuild is handed the FRESH json.
+  // B wants to append its own row. Its rebuild is handed the FRESH store read.
   const res = await store.putFile(path, { rows: ["A", "B"] }, "writer B", shaB, {
-    rebuild: (fresh) => ({ rows: [...fresh.rows, "B"] }),
+    rebuild: (fresh) => ({ rows: [...fresh.json.rows, "B"] }),
   });
 
   assert.equal(res.attempts, 2);
@@ -236,7 +236,7 @@ test("a rebuild that returns null abandons the write and says so, rather than re
   raceOn(path, 1, () => ({ seq: 7 }));
 
   const res = await store.putFile(path, { seq: 6 }, "mine", sha, {
-    rebuild: (fresh) => (fresh.seq >= 6 ? null : { seq: 6 }),
+    rebuild: (fresh) => (fresh.json.seq >= 6 ? null : { seq: 6 }),
   });
 
   assert.equal(res.abandoned, true);

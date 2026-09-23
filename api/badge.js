@@ -11,7 +11,7 @@
 
 "use strict";
 
-const { gatherStatusData } = require("../lib/_status_data.js");
+const { gatherStatusData, overallWord } = require("../lib/_status_data.js");
 const ratelimit = require("../lib/_ratelimit.js");
 
 module.exports = async (req, res) => {
@@ -44,8 +44,8 @@ module.exports = async (req, res) => {
 
   const data = await gatherStatusData();
 
-  const word = data.degraded ? "degraded" : data.indeterminate ? "indeterminate" : "ok";
-  const color = data.degraded ? "red" : data.indeterminate ? "yellow" : "green";
+  const word = overallWord(data); // throws rather than fall through to "ok"
+  const color = { degraded: "red", indeterminate: "yellow", ok: "green" }[word];
   // Board item 26: a stale/cannot_determine anchor already pulls `word`/
   // `color` red or yellow via data.degraded/data.indeterminate (see
   // _status_data.js) — this just makes the badge SAY why at a glance instead

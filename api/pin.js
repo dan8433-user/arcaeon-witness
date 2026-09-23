@@ -24,6 +24,7 @@
 
 const crypto = require("crypto");
 const store = require("../lib/_store.js");
+const verdict = require("../lib/_verdict.js");
 const meter = require("../lib/_meter.js");
 const balance = require("../lib/_balance.js");
 const issuedKeys = require("../lib/_keys.js");
@@ -91,8 +92,20 @@ async function putSeqRecord(namespace, seqName, record, message) {
 // still recorded at its own numbered path; nothing is lost and nothing is
 // clobbered. Only a strictly-behind latest is advanced.
 function latestPointerRebuild(record) {
-  return (freshJson) => {
-    const freshSeq = freshJson && Number.isInteger(freshJson.seq) ? freshJson.seq : 0;
+  return (freshRead) => {
+    // `freshRead` is the whole store read putFile made: null ONLY for a 404,
+    // {json, sha} for anything present. It is judged as-is. 0 only for a
+    // pointer that is verifiably GONE. A pointer that is present but
+    // unreadable (including one whose JSON is the literal null, which the
+    // bare-json hook of f12d0ed read as a 404) throws a RedVerdictError and
+    // the handler refuses the pin (503) instead of writing over it.
+    const what = `pins/${record.namespace}/latest.json`;
+    const fresh = verdict.requireGreen(
+      verdict.judgePin(freshRead, { what, namespace: record.namespace }),
+      "latest pointer rebuild",
+      { what }
+    );
+    const freshSeq = verdict.isEmpty(fresh) ? 0 : freshRead.json.seq;
     if (freshSeq >= record.seq) return null; // abandon — never rewind the pointer
     return record;
   };
@@ -514,6 +527,23 @@ module.exports = async (req, res) => {
       // --- read the current latest pin ---
       const cur = await store.getFile(latestPath);
 
+      // --- the head's verdict, before anything is decided against it ---
+      // Every guard below is written `cur && Number.isInteger(cur.json.rows) &&
+      // ...`, so a latest.json that was present but unreadable SKIPPED all of
+      // them: no monotonic check, no re-mint check, and `seq` fell to its
+      // default of 1 — a brand-new namespace's first pin, over a damaged head.
+      // "No head yet" is the verified-empty verdict (the store's 404) and
+      // nothing else. Refused before any charge. See lib/_verdict.js.
+      const headVerdict = verdict.judgePin(cur, { what: `pins/${namespace}/latest.json`, namespace });
+      if (!headVerdict.ok) {
+        const refused = verdict.refusal(headVerdict, "pin");
+        refused.body.note =
+          "the namespace's current head is stored but cannot be read as a pin record, so this pin was NOT " +
+          "accepted and nothing was charged: a witness that pins over a head it cannot read has stopped " +
+          "checking that it never goes backward.";
+        return res.status(refused.status).json(refused.body);
+      }
+
       // --- renewal preconditions: a renewal may only ever RESTATE the head ---
       // (rejections here charge nothing — no write happens)
       if (intent === "renew") {
@@ -814,6 +844,16 @@ module.exports = async (req, res) => {
   } catch (err) {
     if (err && err.wedged) {
       return res.status(409).json(orphanedSeqBody(namespace, err.seqName));
+    }
+    // A red verdict thrown from inside the write (the latest-pointer rebuild
+    // hook found the pointer present but unreadable after it moved) is a
+    // refusal with a named reason, not a generic store failure.
+    if (err instanceof verdict.RedVerdictError) {
+      const refused = verdict.refusal(err.verdict, "pin");
+      refused.body.note =
+        "the namespace's latest pointer moved during this write and what it now holds cannot be read as a pin " +
+        "record, so the pointer was NOT written over and the charge was refunded.";
+      return res.status(refused.status).json(refused.body);
     }
     // Generic store failure. err.message is deliberately short and carries no
     // upstream response body — api/_store.js logs the detail server-side.

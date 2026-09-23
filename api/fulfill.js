@@ -90,6 +90,7 @@ const balance = require("../lib/_balance.js");
 const meter = require("../lib/_meter.js");
 const keys = require("../lib/_keys.js");
 const welcome = require("../lib/_welcome_email.js");
+const verdict = require("../lib/_verdict.js");
 // Page template (brand shell, copy boxes, escaping, content negotiation)
 // lives in lib/_page.js since the /api/balance human page — extracted from
 // here verbatim so both endpoints render one brand without a 13th function.
@@ -453,6 +454,20 @@ module.exports = async (req, res) => {
       // Already fulfilled: re-show as always. The prefix picker exists ONLY
       // at first-time minting — a ?prefix= here is deliberately ignored.
       record = cur.json;
+      // The key page is a success page built FROM this record, so the record
+      // gets a verdict first (lib/_verdict.js): a fulfillment file that is
+      // present without a key and a prefix used to render 200 ok:true with
+      // `key: undefined`. Thrown here, it lands in the catch below as a 502.
+      // Since 2026-09-22 the green is minted by a judge over THIS read (the
+      // read_id binding in lib/_verdict.js), not built here by hand.
+      verdict.requireGreen(
+        verdict.judgeWith(cur, "fulfillment record", (r) =>
+          typeof r.key === "string" && r.key !== "" &&
+          typeof r.namespace_prefix === "string" && r.namespace_prefix !== ""
+            ? true
+            : "key_or_prefix_unreadable"),
+        "fulfill"
+      );
     } else {
       // FIRST-TIME MINT — rev-2 prefix picker (see header).
       const rawPrefix = q.prefix !== undefined ? q.prefix : body.prefix;

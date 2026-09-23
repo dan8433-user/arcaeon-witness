@@ -20,6 +20,7 @@
 "use strict";
 
 const store = require("../lib/_store.js");
+const verdict = require("../lib/_verdict.js");
 const ratelimit = require("../lib/_ratelimit.js");
 
 const HISTORY_BASE = `https://github.com/${store.REPO}/commits/${store.BRANCH}`;
@@ -53,19 +54,24 @@ module.exports = async (req, res) => {
   }
 
   const path = `pins/${ns}/latest.json`;
-  let pin = null;
+  let pinRead; // deliberately NOT initialised: undefined makes judgePin throw, so no road reaches a 200 without a read
   let source, note;
+  let unparseable = false;
 
   // Primary: contents API — commit-fresh, no CDN cache.
   try {
-    const got = await store.getFile(path);
-    if (got === null) {
-      return res.status(404).json({ error: `no pin recorded for namespace "${ns}"` });
-    }
-    pin = got.json;
+    pinRead = await store.getFile(path); // null = the store's 404, and only that
     source = "github-contents-api";
     note = "read via the GitHub contents API (commit-fresh)";
-  } catch {
+  } catch (primaryErr) {
+    // The fallback below is for a contents API that could not be REACHED. A
+    // file that was reached and is not JSON is a different event: that is the
+    // commit-fresh truth, and falling back from it to a CDN that may still be
+    // serving the last good copy would answer 200 over a head that is, right
+    // now, damaged. So a parse failure is a red verdict and goes nowhere else.
+    if (primaryErr instanceof SyntaxError) unparseable = true;
+  }
+  if (pinRead === undefined && !unparseable) {
     // Fallback: raw CDN with cache-buster. Honest note: raw can lag well
     // beyond the folk ~60s — the repo history is the source of truth.
     try {
@@ -73,13 +79,10 @@ module.exports = async (req, res) => {
         `https://raw.githubusercontent.com/${store.REPO}/${store.BRANCH}/${path}?cb=${Date.now()}`,
         { headers: { "cache-control": "no-cache" } }
       );
-      if (r.status === 404) {
-        return res.status(404).json({ error: `no pin recorded for namespace "${ns}"` });
-      }
-      if (!r.ok) {
+      if (!r.ok && r.status !== 404) {
         return res.status(502).json({ error: `pin store read failed: ${r.status}` });
       }
-      pin = await r.json();
+      pinRead = r.status === 404 ? null : { json: await r.json(), sha: null };
       source = "raw.githubusercontent";
       note = "served from the raw CDN, which can lag minutes behind the newest commit";
     } catch (err) {
@@ -98,20 +101,40 @@ module.exports = async (req, res) => {
   // Extracted into store.computeCadenceFields (2026-08-14, board item 20) so
   // api/verify.js grades a pin exactly the same way this endpoint does —
   // this call is a pure extraction, output is unchanged from before.
+  //
+  // The verdict comes first (lib/_verdict.js). A latest.json that is present
+  // but is not a pin record used to fall through every typeof-guard in
+  // computeCadenceFields and come out as 200 ok:true status:"legacy_no_deadline"
+  // — a damaged head wearing the costume of an old one. It is a 503 now, and
+  // the success body below cannot be built without the green verdict in hand.
+  const HEAD = { what: `pins/${ns}/latest.json` }; // lib/_verdict.js rule 6
+  const pinVerdict = unparseable
+    ? verdict.red(HEAD.what, "not_json")
+    : verdict.judgePin(pinRead, { what: HEAD.what, namespace: ns });
+  if (verdict.isEmpty(pinVerdict, "latest", HEAD)) {
+    // The one legitimate "nothing here": the store said 404. Reached through
+    // the verdict, never by falling past it.
+    return res.status(404).json({ error: `no pin recorded for namespace "${ns}"` });
+  }
+  if (!pinVerdict.ok) {
+    const refused = verdict.refusal(pinVerdict, "latest", HEAD);
+    res.setHeader("cache-control", "no-store");
+    return res.status(refused.status).json(refused.body);
+  }
+  const pin = pinRead.json;
   const cadenceFields = store.computeCadenceFields(pin);
 
   res.setHeader("cache-control", "no-store");
   // Header form so a proxy or a gate can refuse without parsing the body.
   res.setHeader("x-cadence-gradeable", cadenceFields.cadence_gradeable ? "true" : "false");
 
-  const out = {
-    ok: true,
+  const out = verdict.success(pinVerdict, {
     pin,
     source,
     freshness_note: `${note}; the authoritative record is the commit history at ${HISTORY_BASE}/pins/${ns}`,
     history: `${HISTORY_BASE}/pins/${ns}`,
     ...cadenceFields,
-  };
+  }, "latest", HEAD);
 
   return res.status(200).json(out);
 };

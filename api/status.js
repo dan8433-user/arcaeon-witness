@@ -164,7 +164,7 @@ module.exports = async (req, res) => {
           ? `<code>${esc(v.claimed && v.claimed.namespace)}</code> at rows=${esc(v.claimed && v.claimed.rows)} &mdash; ${esc(v.verdict || "conflict")}`
           : "(could not read record content)";
         return `<li>${label} &middot; <a href="${esc(o.url)}">raw record</a></li>`;
-      }).join("\n")}</ul>${obsCount > obsSample.length ? `<p class="muted">${obsCount - obsSample.length} more not sampled here &mdash; see the full folder.</p>` : ""}`
+      }).join("\n")}</ul>${obsCount !== null && obsCount > obsSample.length ? `<p class="muted">${obsCount - obsSample.length} more not sampled here &mdash; see the full folder.</p>` : ""}`
     : "";
 
   let anchorHtml;
@@ -284,7 +284,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
       ? `<span class="badge badge-green" style="font-size:.95rem">OK</span>`
       : degraded
         ? `<span class="badge badge-red" style="font-size:.95rem">DEGRADED</span>`
-        : `<span class="badge badge-amber" style="font-size:.95rem">&#9888; INDETERMINATE &middot; ${ungradeableCount} namespace${ungradeableCount === 1 ? "" : "s"} not gradeable</span>`}
+        : `<span class="badge badge-amber" style="font-size:.95rem">&#9888; INDETERMINATE &middot; ${ungradeableCount} namespace${ungradeableCount === 1 ? "" : "s"} not gradeable${obsCount === null ? " &middot; conflicts not counted" : ""}</span>`}
   </header>
   <p class="sub">
     Rendered <time datetime="${renderedAt.toISOString()}">${renderedAt.toISOString()}</time> (UTC, this request).
@@ -308,7 +308,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
       <div class="stat"><span class="n" style="${overdueCount ? "color:var(--red-ink)" : ""}">${overdueCount}</span><span class="l">overdue</span></div>
       <div class="stat"><span class="n" style="${ungradeableCount ? "color:var(--amber-ink)" : ""}">${ungradeableCount}</span><span class="l">not gradeable</span></div>
       <div class="stat"><span class="n">${missedEverCount}</span><span class="l">ever missed a deadline</span></div>
-      <div class="stat"><span class="n">${obsCount}</span><span class="l">conflicts observed</span></div>
+      <div class="stat"><span class="n">${obsCount === null ? "?" : obsCount}</span><span class="l">conflicts observed</span></div>
       ${retiredCount ? `<div class="stat"><span class="n">${retiredCount}</span><span class="l">retired (excluded from verdict)</span></div>` : ""}
     </div>
     ${healthErr ? `<p class="muted">health check error: ${esc(healthErr)}</p>` : ""}
@@ -335,7 +335,9 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   <h2>Conflict observations</h2>
   <p class="muted">A same-rows/different-chain submission never overwrites the accepted head &mdash; it's rejected and appended to an append-only log instead, so a detected conflict attempt can't quietly disappear even though it failed. <a href="${TREE("observations")}">browse observations/</a> directly.</p>
   <div class="panel">
-    <p><strong>${obsCount}</strong> conflict${obsCount === 1 ? "" : "s"} observed, ever.${obsErr ? ` (count may be incomplete: ${esc(obsErr)})` : ""}</p>
+    ${obsCount === null
+      ? `<p><strong>Conflicts could not be counted on this render</strong>${obsErr ? `: ${esc(obsErr)}` : ""}. That is not zero &mdash; browse the folder directly.</p>`
+      : `<p><strong>${obsCount}</strong> conflict${obsCount === 1 ? "" : "s"} observed, ever.${obsErr ? ` (count may be incomplete: ${esc(obsErr)})` : ""}</p>`}
     ${obsListHtml}
   </div>
 

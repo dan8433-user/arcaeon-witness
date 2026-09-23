@@ -250,7 +250,12 @@ module.exports = async (req, res) => {
   const expectedCents = balance.PACKS[pack].price_usd * 100;
   const paidCents = session && Number.isFinite(Number(session.amount_total)) ? Number(session.amount_total) : null;
   const currency = session && session.currency ? String(session.currency).toLowerCase() : null;
-  if (paidCents === null || paidCents < expectedCents || (currency && currency !== "usd")) {
+  // `currency !== "usd"`, NOT `(currency && currency !== "usd")`: the old
+  // conjunction was guard_disarmed_by_damage — a MISSING currency made the
+  // clause false, so the currency check was skipped rather than failed and a
+  // session of unknown currency was credited as if it were dollars. USD must
+  // be stated, not assumed (VERDICT_SURVEY.md site #26).
+  if (paidCents === null || paidCents < expectedCents || currency !== "usd") {
     return res.status(200).json({
       ok: true,
       skipped: `payment does not match pack '${pack}': paid ${paidCents} ${currency || "?"}, expected ${expectedCents} usd — NOT credited`,
