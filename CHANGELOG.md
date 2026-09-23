@@ -1,5 +1,14 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23b — second release tree (branch `release-candidate-2026-09-23b`, local only, NOT deployed)
+
+`release-candidate-2026-09-23` (`1266d39`, production `dpl_4dBieifo`) plus `log-tree-golive`, `merkle-fix` and `verdict-required`, merged in that order. See `RELEASE_NOTES_2026-09-23b.md`.
+
+- Conflicts in `lib/_stamp.js` (3 hunks), `api/verify.js` (1) and this file. Both behaviours kept: the S-1 compare answers 409 `record_mismatch` first, then `sendStamp` builds the answer through the verdict; verify keeps W-1/W-2 and passes the record's verdict to `witnessedResponse`.
+- `test/stamp_failure_conformance.test.js` +6 (S-1 CONTRACT, GET and POST): after the merge, the break arm "GET skips the sha compare" failed nothing, because `judgeStamp` refuses the same record; the new cases pin the 409 itself.
+- Flag-off `/status` and `/api/status.json` byte-identical to `1266d39` on a healthy and a mixed store; the intended differences (uncounted conflicts, a head that is not a pin) are listed in the notes.
+- Suite 641, 641 pass, 0 fail, 0 todo.
+
 ## 2026-09-22 — inclusion proofs bind tree_size and refuse a bare leaf hash (branch `merkle-fix` from `release-candidate-2026-09-23`, local only, NOT deployed)
 
 Closes the two false-yes findings the Merkle failure-conformance suite left as `todo`. The batch path is still behind `WITNESS_BATCH_SHADOW`; nothing about when it runs changed.
