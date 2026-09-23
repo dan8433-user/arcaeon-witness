@@ -109,14 +109,21 @@ class MockGitHubStore {
   async handleFetch(url, opts) {
     const u = new URL(String(url));
 
+    // Recursive tree read (_store.js getTree / getTreeMeta):
+    // GET /repos/<repo>/git/trees/<ref> -> {sha, tree:[{path,type:"blob",sha}...], truncated}.
+    // Two lineages grew this on 2026-09-20/22 and both are kept: the sealer
+    // reconciler's forced failure (treeStatus) and truncation (treeTruncated),
+    // and the audit-state column's per-entry sha + GET-only routing. Every
+    // seeded file is a blob; directories are not listed (the real API lists
+    // them as "tree" entries, and nothing under test reads those).
     const tm = u.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/git\/trees\/[^/]+$/);
-    if (tm) {
+    if (tm && ((opts && opts.method) || "GET") === "GET") {
       if (this.treeStatus !== 200) {
         return fakeResponse(this.treeStatus, { message: "mock: forced tree read failure" });
       }
-      const entries = [];
-      for (const [p] of this._repoMap(tm[1])) entries.push({ path: p, type: "blob" });
-      return fakeResponse(200, { tree: entries, truncated: this.treeTruncated === true });
+      const tree = [];
+      for (const [p, r] of this._repoMap(tm[1])) tree.push({ path: p, type: "blob", sha: r.sha });
+      return fakeResponse(200, { sha: "mock-tree", tree, truncated: this.treeTruncated === true });
     }
 
     const m = u.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/contents\/(.+)$/);
