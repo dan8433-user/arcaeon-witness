@@ -6,7 +6,7 @@
 //
 //   node tools/publish_self_checks.js --dir OUT --operator-keys OPERATOR_KEYS.json
 //        (--dry-run | --publish) [--date YYYY-MM-DD] [--days N] [--show-bytes]
-//        [--env-file PATH] [--now ISO]
+//        [--env-file PATH] [--now ISO] [--break-battery]
 //
 // THE READER IS THE CONTRACT. lib/_audit_status.js lists the repo tree,
 // takes the blobs matching checks/(pin|observation)/<ns>/<file>.json, one
@@ -31,6 +31,11 @@
 //      by a key the published declaration does not list would read on the
 //      page as an OUTSIDE check: our own look painted green (design B5).
 //   Any refusal = nothing is published, exit 2.
+//   The fences are the BATTERY (check_* functions, CHECKS). Every run prints
+//   `battery: N defined, M called, K orphaned [names]` (lib/_battery_inventory.js:
+//   defined = parsed from this file's source, called = recorded by the runner).
+//   K > 0 is REFUSED, exit 2. --break-battery adds one never-called check to
+//   the source the inventory reads, to show the red.
 //
 // Create-only and idempotent. Live mode GETs every target path first:
 // absent -> created; present with the same git blob sha -> already
@@ -55,6 +60,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const cr = require("../lib/_check_record.js");
+const battery = require("../lib/_battery_inventory.js");
 
 const REPO = "dan8433-user/arcaeon-witness-pins";
 const BRANCH = "main";
@@ -109,52 +115,119 @@ function collectRecords(dir, dates) {
   return out.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 
-// One file against the design's record shape and the three fences above.
-// Returns {ok:true, rel, bytes, record} or {ok:false, rel, reason, field?}.
-function validateRecordFile({ rel, bytes }, { ownKeys, nowSeconds }) {
-  const bad = (reason, field) => ({ ok: false, rel, reason, field });
-  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) return bad("byte_order_mark");
-  let record;
-  try {
-    record = JSON.parse(bytes.toString("utf-8"));
-  } catch {
-    return bad("not_json");
-  }
-  // Fence 0: a record whose `rerun` names a local path (drive letter, home
-  // directory, backslash) is refused before anything else, so a user folder
-  // name never reaches the public repo. verifyCheckRecord refuses it too
-  // (validateShape); this line keeps the publisher's fence if that ever moves.
-  if (record && typeof record === "object" && typeof record.rerun === "string" && !cr.rerunIsPortable(record.rerun)) {
-    return bad("rerun_not_portable", "rerun");
-  }
-  const v = cr.verifyCheckRecord(record, { nowSeconds });
-  if (!v.ok) return bad(v.reason, v.field);
-  // Fence 2a (D22): the result in the file name is the reader's index of
-  // BROKENs; a name that says one result over a body that says another is
-  // refused by the reader, so it is refused here before it can be published.
-  if (cr.pathResultMismatch(rel, record)) return bad("path_result_mismatch", `name says ${cr.parseRecordFileName(rel).result}, record says ${record.result}`);
-  let want;
-  try {
-    want = cr.checkRecordPath(record);
-  } catch {
-    return bad("no_namespace", "target.ref");
-  }
-  if (want !== rel) return bad("path_mismatch", `expected ${want}`);
-  if (!ownKeys.has(record.checker.key)) return bad("key_not_declared", "checker.key");
-  return { ok: true, rel, bytes, record };
+// ---------------------------------------------------------------------------
+// THE BATTERY. One file against the design's record shape and the fences
+// above, as named check functions run in CHECKS order. Each takes the
+// per-file context {rel, bytes, ownKeys, nowSeconds, record} and returns
+// null (pass) or {reason, field?} (refused); the first refusal stops the
+// file. check_json fills ctx.record for the checks after it.
+//
+// Every run, lib/_battery_inventory.js compares the check_* functions
+// DEFINED in this file's own source against the ones the runner CALLED, and
+// prints `battery: N defined, M called, K orphaned [names]`. A check defined
+// here and never called (not in CHECKS, or skipped by the loop) is an
+// orphan, and an orphan refuses the run: a fence that did not run cannot
+// pass a record.
+// ---------------------------------------------------------------------------
+function check_byte_order_mark(ctx) {
+  const b = ctx.bytes;
+  return b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf ? { reason: "byte_order_mark" } : null;
 }
 
-// Local only. Returns {files, refused}.
-function planPublish({ dir, dates, ownKeys, nowSeconds }) {
+function check_json(ctx) {
+  try {
+    ctx.record = JSON.parse(ctx.bytes.toString("utf-8"));
+  } catch {
+    return { reason: "not_json" };
+  }
+  return null;
+}
+
+// Fence 0: a record whose `rerun` names a local path (drive letter, home
+// directory, backslash) is refused before anything else, so a user folder
+// name never reaches the public repo. verifyCheckRecord refuses it too
+// (validateShape); this check keeps the publisher's fence if that ever moves.
+function check_rerun_portable(ctx) {
+  const record = ctx.record;
+  if (record && typeof record === "object" && typeof record.rerun === "string" && !cr.rerunIsPortable(record.rerun)) {
+    return { reason: "rerun_not_portable", field: "rerun" };
+  }
+  return null;
+}
+
+// Fence 1: shape, Ed25519 signature over every field, not future-dated.
+function check_record_verifies(ctx) {
+  const v = cr.verifyCheckRecord(ctx.record, { nowSeconds: ctx.nowSeconds });
+  return v.ok ? null : { reason: v.reason, field: v.field };
+}
+
+// Fence 2a (D22): the result in the file name is the reader's index of
+// BROKENs; a name that says one result over a body that says another is
+// refused by the reader, so it is refused here before it can be published.
+function check_path_result(ctx) {
+  if (!cr.pathResultMismatch(ctx.rel, ctx.record)) return null;
+  return { reason: "path_result_mismatch", field: `name says ${cr.parseRecordFileName(ctx.rel).result}, record says ${ctx.record.result}` };
+}
+
+// Fence 2: the local path is the path the record's own content names.
+function check_record_path(ctx) {
+  let want;
+  try {
+    want = cr.checkRecordPath(ctx.record);
+  } catch {
+    return { reason: "no_namespace", field: "target.ref" };
+  }
+  return want === ctx.rel ? null : { reason: "path_mismatch", field: `expected ${want}` };
+}
+
+// Fence 3 (local half): the checker key is in the local declaration.
+function check_key_declared(ctx) {
+  return ctx.ownKeys.has(ctx.record.checker.key) ? null : { reason: "key_not_declared", field: "checker.key" };
+}
+
+const CHECKS = Object.freeze([
+  check_byte_order_mark,
+  check_json,
+  check_rerun_portable,
+  check_record_verifies,
+  check_path_result,
+  check_record_path,
+  check_key_declared,
+]);
+
+// This file's own source: the battery's definitions, read fresh every run.
+function batterySource() {
+  return fs.readFileSync(__filename, "utf-8");
+}
+
+// The runner. Returns {ok:true, rel, bytes, record} or {ok:false, rel,
+// reason, field?}. `called` (a Set) receives the name of every check it
+// invokes, recorded before the call.
+function validateRecordFile({ rel, bytes }, { ownKeys, nowSeconds, called = new Set(), checks = CHECKS }) {
+  const ctx = { rel, bytes, ownKeys, nowSeconds, record: undefined };
+  for (const fn of checks) {
+    const r = battery.callRecorded(called, fn, ctx);
+    if (r) return { ok: false, rel, reason: r.reason, field: r.field };
+  }
+  return { ok: true, rel, bytes, record: ctx.record };
+}
+
+// Local only. Returns {files, refused, called}.
+function planPublish({ dir, dates, ownKeys, nowSeconds, checks = CHECKS }) {
   const files = [];
   const refused = [];
+  const called = new Set();
   for (const f of collectRecords(dir, dates)) {
-    const r = validateRecordFile(f, { ownKeys, nowSeconds });
+    const r = validateRecordFile(f, { ownKeys, nowSeconds, called, checks });
     if (r.ok) files.push(r);
     else refused.push(r);
   }
-  return { files, refused };
+  return { files, refused, called };
 }
+
+// The break arm's extra check: a real function, defined in the source the
+// inventory reads (appended, never written to disk) and never called.
+const BREAK_ARM_SOURCE = "\nfunction check_break_arm_never_called(ctx) {\n  return null;\n}\n";
 
 function readToken(envFile) {
   for (const line of fs.readFileSync(envFile, "utf-8").split(/\r?\n/)) {
@@ -261,6 +334,7 @@ function parseArgs(argv) {
     else if (k === "--dry-run") a.dryRun = true;
     else if (k === "--publish") a.publish = true;
     else if (k === "--show-bytes") a.showBytes = true;
+    else if (k === "--break-battery") a.breakBattery = true;
     else if (k === "--help" || k === "-h") a.help = true;
     else throw new Error(`unknown argument ${k}`);
   }
@@ -272,7 +346,7 @@ function parseArgs(argv) {
 async function main(argv, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, deps = {}) {
   const a = parseArgs(argv);
   if (a.help) {
-    io.out(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 49).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
+    io.out(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 54).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
     return 0;
   }
   if (!a.dir) throw new Error("--dir is required (the self-check --out directory)");
@@ -287,15 +361,26 @@ async function main(argv, io = { out: (s) => process.stdout.write(s), err: (s) =
   const dates = datesFor(date, a.days);
   const ownKeys = declaredKeys(JSON.parse(fs.readFileSync(a.operatorKeys, "utf-8")));
 
-  const { files, refused } = planPublish({ dir: a.dir, dates, ownKeys, nowSeconds });
+  const { files, refused, called } = planPublish({ dir: a.dir, dates, ownKeys, nowSeconds });
   const span = dates.length === 1 ? dates[0] : `${dates[dates.length - 1]}..${dates[0]}`;
   for (const r of refused) io.err(`REFUSED  ${r.rel}  ${r.reason}${r.field ? ` (${r.field})` : ""}\n`);
+  // The battery line, every run, before any verdict on the day.
+  const source = (deps.batterySource || batterySource)() + (a.breakBattery ? BREAK_ARM_SOURCE : "");
+  const inv = battery.inventory({ source, called });
+  io.err(`${inv.line}\n`);
   if (refused.length) {
     io.err(`${refused.length} record(s) for ${span} failed validation; nothing published.\n`);
     return 2;
   }
   if (!files.length) {
     io.err(`no self-check records for ${span} under ${a.dir}; nothing to publish.\n`);
+    return 2;
+  }
+  if (!inv.ok) {
+    const why = inv.defined.length
+      ? `${inv.orphaned.length} check function(s) defined in ${path.basename(__filename)} and never called by this run: ${inv.orphaned.join(", ")}`
+      : `no check functions found in ${path.basename(__filename)}`;
+    io.err(`REFUSED: battery: ${why}; a fence that did not run cannot pass a record. Nothing published.\n`);
     return 2;
   }
 
@@ -333,7 +418,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  REPO, BRANCH, API, OPERATOR_KEYS_REL,
+  REPO, BRANCH, API, OPERATOR_KEYS_REL, CHECKS, BREAK_ARM_SOURCE, batterySource,
   sha256hex, gitBlobSha, declaredKeys, datesFor, collectRecords, validateRecordFile,
   planPublish, publishPlan, readToken, parseArgs, main, Refused,
 };

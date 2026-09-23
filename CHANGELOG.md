@@ -1,5 +1,14 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 — the battery says when it was not there (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
+
+A correspondent found three of four selftest functions in their library defined and called by nothing, while their daily beat reported green. The same guard, here:
+
+- **`lib/_battery_inventory.js` (new).** Parses a battery's own source for `function check_*` / `async function check_*` / `const check_* = (...) =>` definitions, compares them against the names the runner recorded as it called them, and returns one line: `battery: N defined, M called, K orphaned [names]`. Orphaned = defined and not called. K > 0, or no checks at all, is not green.
+- **`tools/publish_self_checks.js`.** The per-record fences are now the battery: seven named `check_*` functions in an exported `CHECKS` registry, run in the same order with the same refusal reasons (no behaviour change for any record). The runner records every call. Every run prints the battery line on stderr (so it lands in the daily task's log), including refused days and days with no records. Any orphan refuses the run with the existing word, `REFUSED: battery: ...`, exit 2, nothing published, before any token read or network call. `--break-battery` appends one never-called check to the source the inventory reads, to show the red on demand.
+- **Not changed:** the check record format (its top-level fields are strict, so the line is not written into records), `tools/self_check_daily.js`, and verifier two (`verify.py`, outside this tree).
+- **Tests:** `test/battery_inventory.test.js` (11): parser, green, orphan, empty battery, call-before-throw, registry equals parsed definitions, clean CLI run, no-records run, and three break arms (the flag, a function added to the source but not to `CHECKS`, a runner that skips a registered check). Suite 718 -> 729, 0 fail. Break arm: an inventory that always says ok fails 5.
+
 ## 2026-09-23 — D1 literal: the result goes in the check record's file name (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
 
 The helm's ruling on D20: per-key newest 3 stands, and a BROKEN must stay permanent however many later records its own key publishes.
