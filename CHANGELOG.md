@@ -1,5 +1,12 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 — the self-check publisher (branch `release-candidate-2026-09-23b`, local only, NOT run live, task NOT registered)
+
+- **`tools/publish_self_checks.js`**: puts the daily self-check records into the pins repo at the paths `lib/_audit_status.js` reads (`checks/<type>/<ns>/<checkRecordPath>`), bytes unchanged, through the GitHub contents API with the genesis checkpoint's auth (velouria `.env` `GITHUB_TOKEN`, Bearer, one PUT per file to `main`). Every record is verified (shape, signature, path, key declared locally and in the published `OPERATOR_KEYS.json`) before anything is sent; any failure publishes nothing. Create-only and idempotent by git blob sha. `--dry-run` reads no token and makes no network call.
+- **`tools/self_check_daily_run.ps1`** (new) and **`tools/install_self_check_task.ps1`**: the task is now write, then publish (`--days 7`); the publish step fails soft and logs one line; the task's result is the write step's.
+- **Found, not fixed:** the reader's 100-read budget is used up by day 13 of daily records (measured); the task should not be registered until the reader reads only what it needs. See the release notes 2026-09-23c addendum.
+- **Tests:** `test/publish_self_checks.test.js` (12). Suite 701, 0 fail. Break arm: ignoring `bad_signature` in the publisher fails 1.
+
 ## 2026-09-23 — release tree three: slice 2 + vocabulary merged; `velouria-selftest` superseded as a test namespace on the audit surfaces (branch `release-candidate-2026-09-23b`, local only, NOT deployed, flag still off)
 
 - **Merged** `audit-state-slice2` (`f4ab63d`) and `vocabulary-2026-09-23` (`9eac76a`). Two conflicts, both in wording: this file (both entries kept) and `lib/_audit_status.js` (slice 2's outside-sources comment and partial cell kept, with the vocabulary pass's COULD NOT LOOK on the human text). The JSON twin's machine value `state: "NOT_FULLY_READ"` and its `badge` text are unchanged: the vocabulary pass moves no JSON field and no exit code.

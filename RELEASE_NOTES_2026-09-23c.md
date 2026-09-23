@@ -154,3 +154,72 @@ If any of 1, 2, 3 or 5 fails, or 4 shows a new red cadence row, roll back to `dp
 - That the live namespace set at deploy time is still today's eight (the headline numbers in item 7 assume it).
 - In a `git archive` export (no `.git`), one test fails by construction: `test/logtree_keygen.test.js` ".gitignore covers the suffix the tool insists on" runs `git check-ignore`, which exits 128 outside a repository. Seen on the `983ce57` export (646 tests, 645 pass); it passes in the worktree. Environment, not code.
 - The exact script the owner ran for `WITNESS_LOG_SIGNER_KEY`: only its documented shape was found (runbook section 2; `bridge/arcaeon/CHANGELOG.md` records that the owner put the key on Vercel).
+
+## Addendum: the self-check publisher (closes the gap in item 2 above, in code; nothing published)
+
+`tools/publish_self_checks.js`, wired into the daily task. Still local only: not run live, no token read, nothing pushed, task not registered.
+
+### What it does
+
+It takes the records `tools/self_check_daily.js --write` left under its `--out` directory for a day (or `--days N` ending on `--date`) and puts each one, byte for byte, at the path the status page reads. **The reader is the contract:** `lib/_audit_status.js` lists the tree and reads every blob matching `^checks\/(pin|observation)\/([^/]+)\/[^/]+\.json$`, one record per file, and the file name is `lib/_check_record.js` `checkRecordPath(record)`: `checks/pin/<ns>/<checked_at with dashes>-<keyid8>.json`. There is no per-day bundle file; a bundle per day would not be read at all.
+
+Before anything is sent, every record of the run must pass all of these, or **nothing** from that run is published (exit 2):
+
+1. `verifyCheckRecord`: the design's record shape (unknown fields refused, public https inputs only), the Ed25519 signature over every field, not future-dated. Also refused: not JSON, or a UTF-8 byte-order mark.
+2. Its local path equals `checkRecordPath(record)`, so the name and the content agree and a record cannot be filed under another namespace.
+3. Its checker key is in the local `OPERATOR_KEYS.json` and, live only, in the **published** `checks/OPERATOR_KEYS.json` on `main`. If the published declaration is absent or lacks the key, the run is refused: a self-check under a key the public list does not name would read on the page as an outside check (design B5).
+
+Live mode (`--publish`) is create-only and idempotent. It GETs every target path before the first PUT: 404 means create; 200 with the same git blob sha means already published, skipped; 200 with different bytes refuses the run (records are never overwritten). A second run over the same records makes no commit. A run that died between PUTs resumes on the next run. Auth and commit shape are the genesis checkpoint's (`velouria/bridge/arcaeon/logtree_checkpoint.py` through `ots_anchor._token` and `_gh`): the `GITHUB_TOKEN=` line of `C:/Users/USER/velouria/.env`, never on argv, never printed; `Authorization: Bearer`, `Accept: application/vnd.github+json`; one contents-API PUT (one commit) per file to `main` of `dan8433-user/arcaeon-witness-pins`. One addition: a `User-Agent` header, which GitHub requires and Python's urllib sends by itself but Node's fetch does not. Commit message: `checks: <RESULT> <ns> (self-check <checked_at>, key <keyid8>)`.
+
+`checks/` is not in the witness log's eligible set (`lib/_logtree.js`: pins, observations, anchors), so these commits add no leaves and do not disturb the daily checkpoint.
+
+### The daily task: write, then publish
+
+`tools/install_self_check_task.ps1` now registers a task that runs `tools/self_check_daily_run.ps1` (new). The installer takes `-EnvFile` (default `%USERPROFILE%\velouria\.env`), checks that it exists, and never reads it. Step 1 is the unchanged write. Step 2 is `publish_self_checks.js --publish --days 7`, run even if step 1 exited 2 (one SKIPPED namespace still leaves the others written). The publish step **fails soft**: a non-zero exit is one log line (`PUBLISH FAILED SOFT (exit N); records stay in <OutDir>, the next run retries the last 7 days ...`), and the task's result stays the write step's code. Seven days back means a failed day is picked up by the next run at the cost of GETs only. Both scripts parse clean. The runner was run once offline against a scratch dir holding today's records, with a missing key and a token-less env file: write logged exit 2, publish validated the 8 records, stopped at the token read, logged the soft failure; no network.
+
+One bug found and fixed while doing that: `Set-Location` moves only PowerShell's location, and a child `cmd.exe` starts in the process directory, so `node tools\...` resolved against the wrong folder. The runner now sets the process directory too and names both tools by absolute path.
+
+### Dry run (the exact command; no token, no network)
+
+```
+node C:/Users/USER/arcaeon-witness-rc3b/tools/publish_self_checks.js --dir <self-check out dir> --operator-keys C:/Users/USER/arcaeon-witness-pins/checks/OPERATOR_KEYS.json --date 2026-09-23 --dry-run
+```
+
+Add `--show-bytes` to print each file's bytes. Per record it prints `WOULD PUT  main:<path>  <n> bytes  sha256 <hex>  blob <git blob sha>  <RESULT>` (the blob sha is what the live run compares against). On today's eight records (the 13:40:45Z run): 8 paths, 14911 bytes, 7 VERIFIED, 1 BROKEN, exit 0:
+
+```
+checks/pin/test-freeplan-smoke/2026-09-23T13-40-45Z-d751d8aa.json
+checks/pin/velouria-audit-20260819/2026-09-23T13-40-45Z-d751d8aa.json
+checks/pin/velouria-cadence-verify/2026-09-23T13-40-45Z-d751d8aa.json
+checks/pin/velouria-canon/2026-09-23T13-40-45Z-d751d8aa.json
+checks/pin/velouria-demo/2026-09-23T13-40-45Z-d751d8aa.json
+checks/pin/velouria-metersmoke-1786722009/2026-09-23T13-40-45Z-d751d8aa.json
+checks/pin/velouria-metersmoke-final/2026-09-23T13-40-45Z-d751d8aa.json
+checks/pin/velouria-selftest/2026-09-23T13-40-45Z-d751d8aa.json   (BROKEN)
+```
+
+`d751d8aa` is `keyIdShort` of the declared self-check key `ed25519:cgMyBlr5...`. One blob sha was cross-checked against `git hash-object --no-filters`: equal.
+
+### What the first live publish changes (pins branch pushed first; the publisher refuses otherwise)
+
+- **Flag off (production today): nothing on the page changes.** The flag-off render does not read `checks/`. The pins repo gains 8 commits.
+- **Flag on:** every counted namespace moves from BLIND to SELF-CHECKED, dated 2026-09-23. The headline stays `0 of 7 namespaces checked by a key not declared as ours.` (all eight records are under our own declared key, so CHECKED is not reachable, by design), and the aggregate moves from `7 namespaces: 7 blind, 0 self-checked, 0 checked, 0 stale, 0 broken.` to `7 namespaces: 0 blind, 7 self-checked, 0 checked, 0 stale, 0 broken.` The `velouria-selftest` row turns red BROKEN, keeps its grey `superseded test namespace` tag, and stays out of the counts. This is the reading already rendered locally above (live pins + prepared pins commits + these eight records). Read-back item 7's expected numbers are the pre-publish ones; after a publish, expect the self-checked line instead.
+
+### Found, not fixed: the reader's read budget runs out on day 13
+
+`lib/_audit_status.js` reads at most `MAX_RECORD_READS = 100` record files per render, across all namespaces, oldest path first, and a namespace whose records were not all read renders COULD NOT LOOK (`if (readsUsed >= MAX_RECORD_READS) { partial = true; break; }`). Eight records a day, never deleted (create-only), fill that budget in twelve days. Measured with the mock store and eight namespaces: with 12 days of records all eight read SELF-CHECKED; with 13 days the eighth reads COULD NOT LOOK, and one more namespace goes each day after. The supersede read spends from the same budget. **So the daily task should not be registered until the reader reads only what it needs** (for example the newest records per namespace, plus whatever a BROKEN needs to stay permanent), or the budget changes. That is a change to page code behind the flag, so it is the helm's call and is not in this commit.
+
+### Tests
+
+`test/publish_self_checks.test.js` (12): record-shape validation (a good record passes; not JSON, BOM, unsigned, unknown field, bad result, non-public input, wrong path, future-dated and undeclared key each refused with its own reason); day selection; the dry run (exact paths, lengths, sha256, blob sha and bytes printed; no token read; `fetch` replaced by a thrower and never called); exactly one of `--dry-run` / `--publish`; idempotence on a fake contents API (3 PUTs, then a second run with 0 PUTs and `0 created, 3 already published`, every GET before the first PUT); resume after a partial run; the create-only conflict refuses before any PUT; the published-declaration fence (absent, and key missing); a failed PUT; and the reader contract (what the stub received, seeded into the mock store, moves a namespace from BLIND to SELF-CHECKED and keeps a BROKEN red).
+
+**Break arm:** a record whose `result` was flipped after signing is refused as `bad_signature (sig)` in both modes, with no token read, no GET and no PUT, and the good record in the same run waits too. Mutations, run and restored (`git status` clean after): the publisher ignoring `bad_signature` fails **1** (that arm); release three's lying-verifier arm (the signature check removed from `lib/_check_record.js`) now fails **5** (4 before, plus this arm).
+
+`npm test`: **701 tests, 701 pass, 0 fail, 0 todo** (689 + 12).
+
+### Still not confirmed
+
+- A live run: no GitHub call was made. The contents-API behaviour relied on (404 for an absent path, `sha` = git blob sha on a GET, 201 on create) is GitHub's documented behaviour and what the genesis publisher relied on; here it was exercised only against a stub.
+- That the token in velouria's `.env` still has contents-write on the pins repo (the genesis checkpoint used it; not re-checked, since checking means a network call with the token).
+- The `rerun` field of today's records names a local path (`C:/Users/USER/velouria/projects/online_business/verifier_two/verify.py`). Publishing puts that string in a public repo: it shows a Windows user folder name and repeats the unpublished-verifier problem under "Before deploying". Not changed: the records are signed, and changing the field means changing the writer and re-running it.
+- The session scratchpad holds two other record sets: 06:13:45Z today (same key) and 2026-09-22 19:45:00Z (a different key, `28865cfd`, not in `OPERATOR_KEYS.json`; the publisher would refuse it). Only the 13:40:45Z set is the one these notes name. A folder holding two runs of one day publishes both; the scheduled task's `-OutDir` holds only the task's own runs.
