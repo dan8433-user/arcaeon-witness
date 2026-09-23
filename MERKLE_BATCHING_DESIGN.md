@@ -467,18 +467,25 @@ left/right array would be a second source of truth that can disagree with the in
 a verifier that trusts the flags over the index is exploitable. Stated here because a
 stranger implementing this from the JSON alone must get it right.
 
-Verification, complete:
+Verification, complete (tightened 2026-09-22; the earlier loop was driven by the path
+rather than the tree shape, which accepted a wrong `tree_size` (finding M-1) and a bare
+`leaf_hash` for an interior node (finding M-2)):
 
 ```
-h = SHA256(0x00 || json_c14n_v1(leaf))
-i = leaf_index ; n = tree_size
-for sib in path:
-    if i is odd or i + 1 == n:   # right child, or promoted-left pairing
-        h = SHA256(0x01 || sib || h)
+h = SHA256(0x00 || json_c14n_v1(leaf))   # always derived from the leaf record;
+                                         # a proof without the leaf is refused
+i = leaf_index ; n = tree_size ; k = 0
+while n > 1:
+    if i == n - 1 and n is odd:          # promoted: no sibling at this level
+        pass
     else:
-        h = SHA256(0x01 || h || sib)
+        sib = path[k] ; k += 1           # missing -> fail
+        h = SHA256(0x01 || sib || h) if i is odd else SHA256(0x01 || h || sib)
     i >>= 1 ; n = (n + 1) >> 1
-assert h == root                 # inclusion proven, OFFLINE
+assert k == len(path)                    # leftover siblings -> fail
+assert h == root                         # inclusion proven, OFFLINE
+assert root.json.root == root and root.json.tree_size == tree_size
+                                         # binds the size; the root alone does not
 ```
 
 Two separate claims, never merged into one boolean:

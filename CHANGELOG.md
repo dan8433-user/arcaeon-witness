@@ -1,5 +1,14 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-22 — inclusion proofs bind tree_size and refuse a bare leaf hash (branch `merkle-fix` from `release-candidate-2026-09-23`, local only, NOT deployed)
+
+Closes the two false-yes findings the Merkle failure-conformance suite left as `todo`. The batch path is still behind `WITNESS_BATCH_SHADOW`; nothing about when it runs changed.
+
+- **M-1, wrong tree_size accepted.** `lib/_merkle.js` `verifyInclusion` used to consume whatever siblings the proof carried, so a 4-leaf proof re-labelled tree_size 5 or 6 still verified. It now walks the tree shape fixed by (leaf_index, tree_size): the path must hold exactly the siblings that shape needs (`path_too_short` / `path_too_long`). Some wrong sizes share a path shape with the real one (leaf 3 of 7 vs of 6), and the root alone does not commit the count, so `verifyInclusion(proof, published)` takes the published root.json record and refuses `tree_size_mismatch` / `published_root_mismatch`. Every ok result carries `tree_size_bound`, false when no record was checked, so an unchecked size is never reported as confirmed. `tools/reconcile_batches.js` now passes root.json's own tree_size.
+- **M-2, interior node accepted as a leaf.** A proof with only `leaf_hash` used to take the hash on trust. The leaf record is now required (`leaf_required`) and its hash is always derived under the 0x00 prefix; a supplied `leaf_hash` must match the derived one. No production minting path produced hash-only proofs (`lib/_batch.js` buildProof always includes the leaf).
+- `MERKLE_BATCHING_DESIGN.md` §5 pseudocode updated to the tightened algorithm.
+- `test/merkle_failure_conformance.test.js`: both todos are real assertions with typed reasons, plus a path-length test. Suite 579, 579 pass, 0 fail, 0 todo.
+
 ## 2026-09-22 — witness log go-live prep: the signing key, its runbook, the README key (branch `log-tree-golive` from `release-candidate-2026-09-23`, local only, NOT published, NOT deployed)
 
 The owner decided the checkpoint signing key lives on Vercel (env var on this project) and that this push deploys when done; the helm verifies and publishes. Nothing here wrote to Vercel, pushed, or touched the pins repo.

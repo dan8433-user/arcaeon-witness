@@ -270,6 +270,12 @@ async function reconcile({
     } catch {
       levels = null;
     }
+    // M-1: bind the declared tree_size to the one root.json publishes, when
+    // root.json carries it, so a leaves.json whose size disagrees fails here.
+    const publishedRecord =
+      rootRec.json && Number.isInteger(rootRec.json.tree_size)
+        ? { root: storedRoot, tree_size: rootRec.json.tree_size }
+        : undefined;
     if (levels) {
       for (let i = 0; i < leaves.length; i++) {
         let path;
@@ -291,7 +297,7 @@ async function reconcile({
           path,
           root: storedRoot,
           recipe: merkle.MERKLE_RECIPE,
-        });
+        }, publishedRecord);
         if (!v.ok) {
           findings.push(
             finding("proof_failed", leavesP, `leaf ${i} (${identity(leaves[i])}) does not verify against the published root: ${v.reason}`)

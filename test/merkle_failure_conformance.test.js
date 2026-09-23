@@ -6,7 +6,7 @@
 // The break arm runs the same mutations against a verifier that always returns
 // ok:true and asserts every case goes red.
 //
-// Known accept-bad-input findings stay as `todo` with the reason.
+// Findings M-1 and M-2 (formerly `todo`) are closed and asserted below.
 "use strict";
 
 const { test } = require("node:test");
@@ -117,51 +117,80 @@ for (const [name, mutate] of CASES) {
 }
 
 // ---------------------------------------------------------------------------
-// KNOWN ACCEPT-BAD-INPUT FINDINGS (todo; verifier untouched).
+// FORMER ACCEPT-BAD-INPUT FINDINGS, now closed (2026-09-22, branch merkle-fix).
 // ---------------------------------------------------------------------------
 
-// FINDING M-1: tree_size is not bound to anything. The root commits to the
-// leaves, not to the count, and verifyInclusion derives direction from
-// (index, tree_size) only as far as it changes the pairing. For a leaf whose
-// path directions are the same under a larger size, a proof claiming
-// tree_size = n+1 (or more) still verifies. The caller is told "included in a
-// tree of size N" for an N the tree does not have. Fix shape (not applied):
-// require path.length === expected depth for (index, tree_size), and cross-check
-// tree_size against the published root.json's leaf count.
-test("FAILS when tree_size is inflated beyond the real tree",
-  { todo: "FINDING M-1: verifyInclusion accepts a proof with a wrong tree_size (larger AND smaller); size is not committed by the root or checked against path length" },
-  () => {
-    // larger: 4-leaf tree, leaf 0, claimed size 5 or 6
-    const { proof } = goodProof(4, 0);
-    for (const fake of [5, 6]) {
-      const bad = clone(proof); bad.tree_size = fake;
-      assertRejected(merkle.verifyInclusion(bad), `tree_size ${fake} for a 4-leaf tree`);
-    }
-    // smaller: 7-leaf tree, leaf 3, claimed size 6
-    const small = clone(goodProof(7, 3).proof); small.tree_size = 6;
-    assertRejected(merkle.verifyInclusion(small), "tree_size 6 for a 7-leaf tree");
-  });
+// FINDING M-1 (closed): tree_size used to be bound to nothing. verifyInclusion
+// now walks the tree shape implied by (leaf_index, tree_size), so the path must
+// carry exactly the siblings that shape needs; and when the published root
+// record (root.json) is supplied, its tree_size must equal the proof's. The
+// smaller case below (leaf 3 of 7 re-labelled as 6) has the SAME path shape in
+// both trees, so it can only be caught against publication; that is why the
+// root record is passed there, and why an unbound result says so.
+test("FAILS when tree_size is inflated beyond the real tree, or shrunk against the published root", () => {
+  // larger: 4-leaf tree, leaf 0, claimed size 5 or 6 -> path depth no longer fits
+  const { proof } = goodProof(4, 0);
+  for (const fake of [5, 6]) {
+    const bad = clone(proof); bad.tree_size = fake;
+    const v = merkle.verifyInclusion(bad);
+    assertRejected(v, `tree_size ${fake} for a 4-leaf tree`);
+    assert.equal(v.reason, "path_too_short", `tree_size ${fake}`);
+  }
+  // smaller: 7-leaf tree, leaf 3, claimed size 6, checked against the published root record
+  const g7 = goodProof(7, 3);
+  const published = { root: g7.t.root, tree_size: 7 };
+  const small = clone(g7.proof); small.tree_size = 6;
+  const v = merkle.verifyInclusion(small, published);
+  assertRejected(v, "tree_size 6 for a 7-leaf tree");
+  assert.equal(v.reason, "tree_size_mismatch");
+  // the honest proof against the same record is bound
+  const good = merkle.verifyInclusion(g7.proof, published);
+  assert.equal(good.ok, true, good.reason);
+  assert.equal(good.tree_size_bound, true);
+  // without the record, inclusion can pass but the size is reported as UNBOUND
+  const unbound = merkle.verifyInclusion(small);
+  assert.equal(unbound.tree_size_bound, false, "an unchecked tree_size must not be reported as bound");
+  // a published record for a different root is refused, not ignored
+  const other = merkle.verifyInclusion(g7.proof, { root: tree(9).root, tree_size: 7 });
+  assertRejected(other, "published record for another root");
+  assert.equal(other.reason, "published_root_mismatch");
+});
 
-// FINDING M-2: in leaf_hash-only mode (no `leaf` object) an INTERIOR node can be
-// presented as a leaf with a shorter path and a smaller tree_size, and it
-// verifies. Domain separation (0x00/0x01) only protects you when the leaf is
-// recomputed from the leaf object; a bare leaf_hash is taken on trust.
-test("FAILS when an interior node is presented as a leaf (leaf_hash-only proof)",
-  { todo: "FINDING M-2: leaf_hash-only proofs accept an interior node as a 'leaf' (second-preimage shape); path length/tree_size not bound" },
-  () => {
-    const t = tree(4);
-    const n01 = t.levels[1][0].toString("hex");
-    const n23 = t.levels[1][1].toString("hex");
-    const bad = {
-      leaf_hash: merkle.labelled(merkle.LEAF_RECIPE, Buffer.from(n01, "hex")),
-      leaf_index: 0,
-      tree_size: 2,
-      path: [n23],
-      root: t.root,
-      recipe: merkle.MERKLE_RECIPE,
-    };
-    assertRejected(merkle.verifyInclusion(bad), "interior node as leaf");
-  });
+test("FAILS when the path is longer or shorter than the tree shape requires", () => {
+  for (const [n, idx] of SHAPES) {
+    const { proof } = goodProof(n, idx);
+    const long = clone(proof); long.path = long.path.concat([long.path[0]]);
+    assert.equal(merkle.verifyInclusion(long).reason, "path_too_long", `n=${n} idx=${idx}`);
+    const short = clone(proof); short.path = short.path.slice(0, -1);
+    assert.equal(merkle.verifyInclusion(short).reason, "path_too_short", `n=${n} idx=${idx}`);
+  }
+});
+
+// FINDING M-2 (closed): a leaf_hash-only proof used to take the hash on trust,
+// so an interior node could be presented as a leaf. The leaf record is now
+// required and its hash is always derived under the 0x00 prefix; a bare hash
+// is refused with a typed reason.
+test("FAILS when an interior node is presented as a leaf (leaf_hash-only proof)", () => {
+  const t = tree(4);
+  const n01 = t.levels[1][0].toString("hex");
+  const n23 = t.levels[1][1].toString("hex");
+  const bad = {
+    leaf_hash: merkle.labelled(merkle.LEAF_RECIPE, Buffer.from(n01, "hex")),
+    leaf_index: 0,
+    tree_size: 2,
+    path: [n23],
+    root: t.root,
+    recipe: merkle.MERKLE_RECIPE,
+  };
+  const v = merkle.verifyInclusion(bad);
+  assertRejected(v, "interior node as leaf");
+  assert.equal(v.reason, "leaf_required");
+  // and a GENUINE leaf's hash without its record is refused the same way:
+  // the verifier cannot tell the two apart without re-deriving, so it never tries.
+  const { proof } = goodProof(4, 0);
+  const bare = clone(proof); delete bare.leaf;
+  assert.equal(merkle.verifyInclusion(bare).reason, "leaf_required");
+});
 
 // ---------------------------------------------------------------------------
 // BREAK ARM
