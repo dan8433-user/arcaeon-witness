@@ -744,3 +744,154 @@ test("VERDICT: a fulfillment record that is present but has lost its key is NOT 
   assert.notEqual(again._status, 200, `a damaged fulfillment record rendered a success page: ${JSON.stringify(again._body)}`);
   assert.notEqual(again._body.ok, true);
 });
+
+// ---------------------------------------------------------------------
+// legacy fulfillment shape (2026-09-22): a manual reconcile of an env key,
+// written before the prefix was stored on the record. Found by a read-only
+// scan of the live usage repo: one real record of exactly this shape, which
+// this tree answered with 502 store_error "reload this exact URL" forever.
+// ---------------------------------------------------------------------
+const verdictLib = require("../lib/_verdict.js");
+
+function legacyRecord(id, key, over = {}) {
+  return {
+    session_id: id,
+    mode: "manual_reconcile",
+    key,
+    key_hash: keys.keyHash(key),
+    namespace_prefix: null,
+    prefix_source: "env_key_manual",
+    pack: "mini",
+    credits: 1000,
+    pool_id: "pool_cccccccccccccccc",
+    org: null,
+    email: null,
+    consent_product_updates: false,
+    created_at: "2026-08-18T00:00:00.000Z",
+    ...over,
+  };
+}
+
+async function withEnvKeys(value, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, "WITNESS_KEYS");
+  const prev = process.env.WITNESS_KEYS;
+  if (value === undefined) delete process.env.WITNESS_KEYS;
+  else process.env.WITNESS_KEYS = value;
+  try {
+    return await fn();
+  } finally {
+    if (had) process.env.WITNESS_KEYS = prev;
+    else delete process.env.WITNESS_KEYS;
+  }
+}
+
+test("LEGACY: env_key_manual record with a null prefix renders with the prefix WITNESS_KEYS binds the key to", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const key = "legacy-env-key-0001";
+  gh.seed(USAGE, `fulfillments/${id}.json`, legacyRecord(id, key));
+  await withEnvKeys(`other-key:otherco-,${key}:legacyco-`, async () => {
+    const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+    assert.equal(res._status, 200, JSON.stringify(res._body));
+    assert.equal(res._body.key, key);
+    assert.equal(res._body.namespace, "legacyco-");
+    assert.equal(res._body.namespace_example, "legacyco-main");
+    assert.equal(res._body.prefix_resolved_from, "WITNESS_KEYS");
+    assert.equal(res._body.prefix_source, "env_key_manual");
+
+    const html = await call({ query: { session_id: id } });
+    assert.equal(html._status, 200);
+    assert.match(String(html._body), /legacyco-/);
+    assert.doesNotMatch(String(html._body), /nullmain/);
+  });
+  // No data write: the resolved prefix is never copied into the store.
+  assert.equal(gh.read(USAGE, `fulfillments/${id}.json`).namespace_prefix, null);
+  const issued = gh.read(USAGE, `keys/${keys.keyHash(key)}.json`);
+  assert.ok(!issued || issued.namespace_prefix !== "legacyco-", "resolved env prefix leaked into the issued-key store");
+});
+
+test("LEGACY: the same record whose key is no longer in WITNESS_KEYS gets the named refusal (503, not store_error, not retry_safe)", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  gh.seed(USAGE, `fulfillments/${id}.json`, legacyRecord(id, "legacy-env-key-gone"));
+  await withEnvKeys("other-key:otherco-", async () => {
+    const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+    assert.equal(res._status, 503);
+    assert.equal(res._body.ok, false);
+    assert.equal(res._body.reason, "legacy_record_key_not_configured");
+    assert.equal(res._body.reason, fulfill.LEGACY_KEY_NOT_CONFIGURED);
+    assert.notEqual(res._body.reason, "store_error");
+    assert.notEqual(res._body.retry_safe, true);
+    assert.equal(res._body.error, "this record predates prefix binding and its key is no longer configured; contact support");
+    assert.equal(res._body.key, undefined, "a refusal must not carry the key");
+
+    const html = await call({ query: { session_id: id } });
+    assert.equal(html._status, 503);
+    assert.match(String(html._body), /predates prefix binding/);
+    assert.doesNotMatch(String(html._body), /Reload this exact URL/);
+  });
+});
+
+test("LEGACY: a null prefix with any other prefix_source (or none) stays red key_or_prefix_unreadable, even when the key is in WITNESS_KEYS", async () => {
+  const key = "legacy-env-key-0002";
+  await withEnvKeys(`${key}:legacyco-`, async () => {
+    for (const over of [{ prefix_source: "custom" }, { prefix_source: "random" }, { prefix_source: null }, { prefix_source: undefined }, { prefix_source: "ENV_KEY_MANUAL" }]) {
+      const id = sid();
+      stripe.seed(paidSession({ id, _pack: "mini" }));
+      gh.seed(USAGE, `fulfillments/${id}.json`, legacyRecord(id, key, over));
+      const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+      assert.equal(res._status, 503, `prefix_source=${over.prefix_source}: ${JSON.stringify(res._body)}`);
+      assert.equal(res._body.reason, "key_or_prefix_unreadable");
+      assert.notEqual(res._body.retry_safe, true);
+    }
+    // and the recognised source with a key-less record is still red
+    const id = sid();
+    stripe.seed(paidSession({ id, _pack: "mini" }));
+    const rec = legacyRecord(id, key);
+    delete rec.key;
+    gh.seed(USAGE, `fulfillments/${id}.json`, rec);
+    const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+    assert.equal(res._status, 503);
+    assert.equal(res._body.reason, "key_or_prefix_unreadable");
+  });
+});
+
+test("VERDICT: a record-level red is refused with its named reason (503), never the 502 retry_safe store_error", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const rec = legacyRecord(id, "whatever", { namespace_prefix: "", prefix_source: "custom" });
+  gh.seed(USAGE, `fulfillments/${id}.json`, rec);
+  const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(res._status, 503);
+  assert.equal(res._body.reason, "key_or_prefix_unreadable");
+  assert.notEqual(res._body.retry_safe, true);
+});
+
+test("BREAK ARM: a hand-built green carrying a prefix cannot reach the page; only the judge's green over a read renders", async () => {
+  const key = "legacy-env-key-0003";
+  await withEnvKeys(`${key}:legacyco-`, async () => {
+    // The real judge over a real read: green, bound, carries the resolved prefix.
+    const good = fulfill.judgeFulfillment({ json: legacyRecord("cs_test_x", key), sha: "abc" });
+    assert.equal(fulfill.renderPrefix(good), "legacyco-");
+
+    // Hand-built greens, every spelling: all refused by the render gate.
+    const forged = [
+      { ok: true, state: verdictLib.STATES.RECORD, what: "fulfillment record", namespace_prefix: "legacyco-" },
+      { ...good },
+      Object.freeze({ ...good }),
+      { ok: true, state: verdictLib.STATES.RECORD, what: "fulfillment record", namespace_prefix: "legacyco-", read_id: good.read_id },
+    ];
+    for (const f of forged) {
+      assert.throws(() => fulfill.renderPrefix(f), (e) => e instanceof verdictLib.VerdictRequiredError,
+        `a hand-built green rendered: ${JSON.stringify(f)}`);
+    }
+    // A green about a different record cannot gate this page either.
+    const other = verdictLib.judgeWith({ json: { a: 1 }, sha: "x" }, "some other record", () => ({ namespace_prefix: "evil-" }));
+    assert.throws(() => fulfill.renderPrefix(other), (e) => e instanceof verdictLib.VerdictMismatchError);
+    // And the red for an unconfigured key cannot be rendered.
+    const redV = await withEnvKeys(undefined, async () =>
+      fulfill.judgeFulfillment({ json: legacyRecord("cs_test_y", key), sha: "abc" }));
+    assert.equal(redV.ok, false);
+    assert.throws(() => fulfill.renderPrefix(redV), (e) => e instanceof verdictLib.RedVerdictError);
+  });
+});

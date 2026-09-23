@@ -39,7 +39,7 @@ No new files under `api/` (still 12, the Hobby cap) and `vercel.json` is identic
 
 ## Tests
 
-`npm test` (Node 24): **641 tests, 641 pass, 0 fail, 0 todo.** Production's tree ran 578 with 2 todo; M-1 and M-2 are now real assertions. Every test name from both merge parents (583 and 435) is present in the merged run.
+`npm test` (Node 24): **641 tests, 641 pass, 0 fail, 0 todo.** (646 after the fulfill legacy-record fix, see CHANGELOG.) Production's tree ran 578 with 2 todo; M-1 and M-2 are now real assertions. Every test name from both merge parents (583 and 435) is present in the merged run.
 
 Break arms, run by hand on this tree and restored (`git status` clean after each):
 
@@ -95,5 +95,6 @@ Archive the branch name (or its commit hash), not a moving `HEAD`, so the export
 3. `GET /api/latest?ns=<a live namespace>` is **200** `ok:true`, and `/api/verify` on that namespace's current head is `witnessed:true` (the verdict layer passes real records).
 4. `/status` bytes unchanged against a capture taken just before the deploy, except live timestamps. No `BLIND`, `SELF-CHECKED` or `audit state`; no `conflicts not counted`, no `?` in the conflicts stat, no `not a readable pin record` row. `/api/status.json` `status` and `conflicts_observed` match the pre-deploy capture.
 5. `py C:/Users/USER/velouria/bridge/tmp/stamps_release/verify_stamps_live.py` reports **PASS**.
+6. `GET https://witness.arcaeon.io/api/fulfill?session_id=cs_live_a12bGzwu6rBFgFbl7eyHQQQGNfgK2B8Yz2IuqU9Hhm83aiRfq0ugi734jo` with `Accept: application/json` is **200** with a non-null `namespace` (`namespace_example` is not `nullmain`) and `prefix_resolved_from: "WITNESS_KEYS"`: the 2026-08-18 manual-reconcile record (null prefix, `prefix_source: env_key_manual`) renders with its env-bound prefix. A 503 `legacy_record_key_not_configured` means that key has left `WITNESS_KEYS`. Do not paste the key from the body anywhere.
 
 If any of 1, 2, 3 or 5 fails, or 4 shows a new red row, roll back to `dpl_4dBieifo` first and diagnose after.

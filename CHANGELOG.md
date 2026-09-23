@@ -1,5 +1,15 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-22 — fulfill: legacy manual-reconcile record renders again; a red record is refused, not "reload" (branch `release-candidate-2026-09-23b`, local only, NOT deployed)
+
+Found by a read-only scan of the live usage repo: one real customer's fulfillment record (written 2026-08-18 by a manual reconcile: `mode: manual_reconcile`, `prefix_source: env_key_manual`, `namespace_prefix: null`, key present) is refused by this tree's fulfillment judge as `key_or_prefix_unreadable`. Production re-shows it with a null prefix (`nullmain`); this tree threw the red into the catch-all and answered 502 `store_error`, `retry_safe: true`, "reload this exact URL", on every reload. Fixed in code; no data was written.
+
+- **The rule** (`api/fulfill.js` `fulfillmentRule`, run through `verdict.judgeWith` so the green is bound to the read): key must be a non-empty string; a non-empty `namespace_prefix` passes as before; `namespace_prefix === null` with `prefix_source === "env_key_manual"` is the one recognised legacy shape, and its prefix is resolved the way pin.js resolves the key at pin time, `store.keyPrefixFor(key)` over `WITNESS_KEYS`; key not there -> red `legacy_record_key_not_configured`; any other null-prefix record stays red `key_or_prefix_unreadable`. The green carries the prefix, and the page renders only what `renderPrefix(v)` (requireGreen, bound to "fulfillment record") hands it.
+- The resolved prefix is for rendering only. It is not written into the fulfillment record or the issued-key record: copying an env binding into the store would keep authorizing the key after the env entry is removed. JSON gains `prefix_resolved_from: "WITNESS_KEYS"` on that path only.
+- **Refusals.** A red fulfillment record is refused in place, and the catch-all now maps any `RedVerdictError` to `verdict.refusal` (503, named reason, `retry_safe: false`, support named), matching api/pin.js on this tree, instead of the 502 `store_error`. The not-configured case says: "this record predates prefix binding and its key is no longer configured; contact support".
+- `test/fulfill.test.js` +5: LEGACY renders with the WITNESS_KEYS prefix (and writes nothing back); LEGACY key gone -> named 503 refusal; null prefix with any other prefix_source stays red; record-level red is 503 not 502; BREAK ARM: hand-built greens (literal, spread copy, frozen copy, copy with a real read_id) and a green about another record cannot reach the page. Mutation-checked: `renderPrefix` returning the raw prefix fails the break arm; removing the legacy branch fails three.
+- Suite 646, 646 pass, 0 fail, 0 todo.
+
 ## 2026-09-23b — second release tree (branch `release-candidate-2026-09-23b`, local only, NOT deployed)
 
 `release-candidate-2026-09-23` (`1266d39`, production `dpl_4dBieifo`) plus `log-tree-golive`, `merkle-fix` and `verdict-required`, merged in that order. See `RELEASE_NOTES_2026-09-23b.md`.

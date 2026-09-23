@@ -91,6 +91,10 @@ const meter = require("../lib/_meter.js");
 const keys = require("../lib/_keys.js");
 const welcome = require("../lib/_welcome_email.js");
 const verdict = require("../lib/_verdict.js");
+// Only for keyPrefixFor: the WITNESS_KEYS env lookup that pin.js runs at pin
+// time, reused to resolve a legacy fulfillment record's prefix (see
+// judgeFulfillment below).
+const store = require("../lib/_store.js");
 // Page template (brand shell, copy boxes, escaping, content negotiation)
 // lives in lib/_page.js since the /api/balance human page — extracted from
 // here verbatim so both endpoints render one brand without a 13th function.
@@ -275,6 +279,84 @@ function topupHtml(sessionId, pack, credits, balanceAfter) {
   );
 }
 
+// ---- the fulfillment record's verdict ----
+// The key page is a success page built FROM the stored record, so the record
+// gets a verdict first, minted by a judge over THIS read (lib/_verdict.js
+// read_id binding). The green carries the prefix the page renders: the page
+// never reads the prefix off the raw record, so it cannot show one that no
+// judge decided.
+//
+// Two shapes pass:
+//   CURRENT   key + non-empty namespace_prefix (every record this endpoint
+//             has minted since 2026-08-17).
+//   LEGACY    key + namespace_prefix null + prefix_source "env_key_manual":
+//             a manual reconcile of a hand-provisioned WITNESS_KEYS key,
+//             written before the prefix was stored on the fulfillment record.
+//             For that shape the record never held the prefix; the env binding
+//             did, and still does. So the prefix is resolved exactly the way
+//             pin.js resolves it at pin time (store.keyPrefixFor(key) over
+//             WITNESS_KEYS). Key not configured there any more -> red with a
+//             named reason: the record predates prefix binding and nothing we
+//             hold says which prefix the key pins under.
+// Anything else with a null prefix (any other prefix_source, or none) stays
+// red as key_or_prefix_unreadable: only the one recognised shape is resolved.
+//
+// The resolved prefix is used for RENDERING only. It is never written back
+// into the fulfillment record or the issued-key record: that would copy an env
+// binding into the store, where it would keep authorizing the key after the
+// env entry is removed.
+const FULFILL_WHAT = "fulfillment record";
+const LEGACY_PREFIX_SOURCE = "env_key_manual";
+const LEGACY_KEY_NOT_CONFIGURED = "legacy_record_key_not_configured";
+
+function fulfillmentRule(r) {
+  if (typeof r.key !== "string" || r.key === "") return "key_or_prefix_unreadable";
+  if (typeof r.namespace_prefix === "string" && r.namespace_prefix !== "") {
+    return { namespace_prefix: r.namespace_prefix, prefix_resolved_from: "record" };
+  }
+  if (r.namespace_prefix === null && r.prefix_source === LEGACY_PREFIX_SOURCE) {
+    const envPrefix = store.keyPrefixFor(r.key);
+    if (!envPrefix) return LEGACY_KEY_NOT_CONFIGURED;
+    return { namespace_prefix: envPrefix, prefix_resolved_from: "WITNESS_KEYS" };
+  }
+  return "key_or_prefix_unreadable";
+}
+
+function judgeFulfillment(cur) {
+  return verdict.judgeWith(cur, FULFILL_WHAT, fulfillmentRule);
+}
+
+// The prefix the page may render: only off a green this module's judge minted
+// over a read (requireGreen refuses a hand-built green, and a verdict about any
+// other record).
+function renderPrefix(v) {
+  return verdict.requireGreen(v, "fulfill", { what: FULFILL_WHAT }).namespace_prefix;
+}
+
+// A red verdict, as a response. Named reason, 503, NOT retry_safe: reloading
+// will not change what is stored. The legacy not-configured case says plainly
+// what happened instead of the generic "cannot be read" line.
+function refuseRecord(req, res, v) {
+  const refused = verdict.refusal(v, "fulfill");
+  const body = { ...refused.body, retry_safe: false, support: SUPPORT_EMAIL };
+  let title = "Payment verified — this record needs support";
+  let detail =
+    "Your payment is verified, but the stored fulfillment record for it cannot be read as a valid record. " +
+    `Reloading will not change that. Email ${SUPPORT_EMAIL} with your receipt and it will be sorted by hand.`;
+  if (v.reason === LEGACY_KEY_NOT_CONFIGURED) {
+    body.error = "this record predates prefix binding and its key is no longer configured; contact support";
+    body.note =
+      "the record was written by a manual reconcile before the namespace prefix was stored with it, and the " +
+      "key it names is no longer in this service's key configuration, so there is no prefix to show. " +
+      "Nothing was changed; reloading will not change this.";
+    title = "Payment verified — this key needs support";
+    detail =
+      "This record predates prefix binding and its key is no longer configured, so this page cannot show it. " +
+      `Contact ${SUPPORT_EMAIL} with your receipt.`;
+  }
+  return deny(req, res, refused.status, body, title, detail);
+}
+
 module.exports = async (req, res) => {
   // --- co-hosted route: GET /api/prefix-available?prefix=<p> ---
   // vercel.json rewrites that public path here with ?op=prefix-available (the
@@ -448,26 +530,25 @@ module.exports = async (req, res) => {
 
     // --- mint-or-retrieve (idempotent per session) ---
     let firstVisit = false;
+    // The prefix the page shows. On a revisit it comes off the record's
+    // verdict (renderPrefix); on a first mint it is the prefix just bound.
+    let shownPrefix = null;
+    let prefixResolvedFrom = null;
     const cur = await keys.readFulfillment(sid);
     let record;
     if (cur) {
       // Already fulfilled: re-show as always. The prefix picker exists ONLY
       // at first-time minting — a ?prefix= here is deliberately ignored.
       record = cur.json;
-      // The key page is a success page built FROM this record, so the record
-      // gets a verdict first (lib/_verdict.js): a fulfillment file that is
-      // present without a key and a prefix used to render 200 ok:true with
-      // `key: undefined`. Thrown here, it lands in the catch below as a 502.
-      // Since 2026-09-22 the green is minted by a judge over THIS read (the
-      // read_id binding in lib/_verdict.js), not built here by hand.
-      verdict.requireGreen(
-        verdict.judgeWith(cur, "fulfillment record", (r) =>
-          typeof r.key === "string" && r.key !== "" &&
-          typeof r.namespace_prefix === "string" && r.namespace_prefix !== ""
-            ? true
-            : "key_or_prefix_unreadable"),
-        "fulfill"
-      );
+      // Verdict first (see judgeFulfillment above). A record present without
+      // a key or a prefix used to render 200 ok:true with `key: undefined`;
+      // until this fix a red here was thrown into the catch and answered 502
+      // store_error "reload this exact URL", which no reload could fix. It is
+      // now refused in place with its named reason.
+      const recVerdict = judgeFulfillment(cur);
+      if (!recVerdict.ok) return refuseRecord(req, res, recVerdict);
+      shownPrefix = renderPrefix(recVerdict);
+      prefixResolvedFrom = recVerdict.prefix_resolved_from;
     } else {
       // FIRST-TIME MINT — rev-2 prefix picker (see header).
       const rawPrefix = q.prefix !== undefined ? q.prefix : body.prefix;
@@ -571,6 +652,8 @@ module.exports = async (req, res) => {
       // key and discard ours — one session, one key, ever.
       record = created.record;
       firstVisit = created.created;
+      shownPrefix = record.namespace_prefix;
+      prefixResolvedFrom = "record";
     }
 
     // Idempotent side effects, run on EVERY visit so a crash between the
@@ -639,9 +722,10 @@ module.exports = async (req, res) => {
       mode: "new_key",
       key: record.key,
       credits: record.credits,
-      namespace: record.namespace_prefix, // pin any namespace starting with this — the CHOSEN prefix
-      namespace_example: `${record.namespace_prefix}main`,
-      prefix_source: record.prefix_source || null, // "custom" | "suggested" | "random" (null on pre-rev-2 records)
+      namespace: shownPrefix, // pin any namespace starting with this — the CHOSEN prefix
+      namespace_example: `${shownPrefix}main`,
+      prefix_source: record.prefix_source || null, // "custom" | "suggested" | "random" | "env_key_manual" (null on pre-rev-2 records)
+      ...(prefixResolvedFrom === "WITNESS_KEYS" ? { prefix_resolved_from: "WITNESS_KEYS" } : {}),
       docs_url: DOCS_URL,
       pack: record.pack,
       pool_id: record.pool_id,
@@ -654,8 +738,16 @@ module.exports = async (req, res) => {
       support: SUPPORT_EMAIL,
     };
     return respond(req, res, 200, jsonBody, () =>
-      successHtml(record, grant.balance_after, consentStored));
+      successHtml({ ...record, namespace_prefix: shownPrefix }, grant.balance_after, consentStored));
   } catch (err) {
+    // A red verdict thrown from anywhere below the payment gate is a refusal
+    // with its named reason (503, not retry_safe), never the transient
+    // store_error below: a reload cannot change a stored record that is
+    // present and unreadable. Same mapping as api/pin.js on this tree.
+    if (err instanceof verdict.RedVerdictError) {
+      console.error(`[fulfill] red verdict for ${sid.slice(0, 24)}…: ${err.verdict.reason}`);
+      return refuseRecord(req, res, err.verdict);
+    }
     // Store failure AFTER payment verified: the buyer's money is real and the
     // page is safely retryable (every side effect above is idempotent), so
     // say exactly that.
@@ -666,3 +758,8 @@ module.exports = async (req, res) => {
       "Your payment is verified but provisioning hit a transient storage error. Reload this exact URL — fulfillment is idempotent and will pick up where it left off. If it persists, email support.");
   }
 };
+
+// Exported for tests: the judge and the render gate the handler uses.
+module.exports.judgeFulfillment = judgeFulfillment;
+module.exports.renderPrefix = renderPrefix;
+module.exports.LEGACY_KEY_NOT_CONFIGURED = LEGACY_KEY_NOT_CONFIGURED;
