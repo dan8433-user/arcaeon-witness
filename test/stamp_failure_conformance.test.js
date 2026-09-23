@@ -124,6 +124,36 @@ test("FAILS when the record at A's path is not a stamp object (array / string)",
     assertNotStamped(await getWith(stamp.handleStamp, { sha256: SHA_A }), "array record");
   });
 
+// S-1 CONTRACT, pinned after the verdict-required merge (release tree
+// 2026-09-23b). Two independent checks now refuse a record/path mismatch:
+// the S-1 compare (recordMatches -> 409 record_mismatch) and the verdict's
+// judgeStamp (sha256_mismatch). The three cases above only assert "not
+// stamped", so either check alone keeps them green and the S-1 compare could
+// be deleted unseen. This pins the S-1 answer itself: the typed 409 that names
+// a store integrity problem, on GET and on a POST that meets the bad record.
+const S1_RECORDS = [
+  ["the stamp for B", () => record(SHA_B)],
+  ["a record with no sha256", () => ({ size: 1, stamped_at: "2026-09-20T00:00:00.000Z" })],
+  ["an array", () => ["not", "a", "stamp"]],
+];
+for (const [label, make] of S1_RECORDS) {
+  test(`S-1 CONTRACT: GET over ${label} at A's path is 409 record_mismatch`, async () => {
+    gh.seed(REPO, pathOf(SHA_A), make());
+    const res = await getWith(stamp.handleStamp, { sha256: SHA_A });
+    assert.equal(res._status, 409, JSON.stringify(res._body));
+    assert.equal(res._body.reason, "record_mismatch");
+    assert.equal(res._body.ok, false);
+  });
+  test(`S-1 CONTRACT: POST over ${label} at A's path is 409 record_mismatch and writes nothing`, async () => {
+    gh.seed(REPO, pathOf(SHA_A), make());
+    const res = makeRes();
+    await stamp.handleStamp(makeReq({ method: "POST", body: { sha256: SHA_A, size: 1234 } }), res);
+    assert.equal(res._status, 409, JSON.stringify(res._body));
+    assert.equal(res._body.reason, "record_mismatch");
+    assert.deepEqual(gh.putLog, [], "a refused stamp wrote something (record or budget counter)");
+  });
+}
+
 // ---------------------------------------------------------------------------
 // BREAK ARM
 // ---------------------------------------------------------------------------
