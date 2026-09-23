@@ -95,7 +95,7 @@ for (const [name, run] of CASES) {
 }
 
 // ---------------------------------------------------------------------------
-// KNOWN ACCEPT-BAD-INPUT FINDINGS (todo; verifier untouched).
+// FORMER ACCEPT-BAD-INPUT FINDINGS (fixed 2026-09-22: record/path cross-check).
 // ---------------------------------------------------------------------------
 
 // FINDING S-1: the GET check never cross-checks the stored record's own sha256
@@ -107,21 +107,18 @@ for (const [name, run] of CASES) {
 // is not cross-referenced against the artifact. Requires write to the stamps
 // repo (operator, token leak, or store corruption), not a stranger path.
 test("FAILS when the record at A's path is actually the stamp for B",
-  { todo: "FINDING S-1: handleStamp GET returns ok:true for sha A while the stored record's sha256 is B; no record/path cross-check" },
   async () => {
     gh.seed(REPO, pathOf(SHA_A), record(SHA_B));
     assertNotStamped(await getWith(stamp.handleStamp, { sha256: SHA_A }), "record/path mismatch");
   });
 
 test("FAILS when the record at A's path carries no sha256 at all",
-  { todo: "FINDING S-1b (crash, not a false yes): a record with no sha256 field makes present() throw TypeError out of the handler instead of returning a verdict" },
   async () => {
     gh.seed(REPO, pathOf(SHA_A), { size: 1, stamped_at: "2026-09-20T00:00:00.000Z" });
     assertNotStamped(await getWith(stamp.handleStamp, { sha256: SHA_A }), "record without sha256");
   });
 
 test("FAILS when the record at A's path is not a stamp object (array / string)",
-  { todo: "FINDING S-1c (crash, not a false yes): a non-object record body makes present() throw TypeError instead of returning a verdict" },
   async () => {
     gh.seed(REPO, pathOf(SHA_A), ["not", "a", "stamp"]);
     assertNotStamped(await getWith(stamp.handleStamp, { sha256: SHA_A }), "array record");
