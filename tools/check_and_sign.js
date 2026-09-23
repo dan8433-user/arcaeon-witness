@@ -137,6 +137,12 @@ function repoLevelNote(verifierOutput) {
   return `repo-level overall ${verifierOutput.overall || "?"} (${ver} VERIFIED, ${broken} BROKEN, ${cnl} COULD NOT LOOK across every subject)`;
 }
 
+// The re-run command a record carries. No local path, by construction.
+function rerunFor(repoUrl, ns) {
+  const v = cr.PUBLIC_VERIFIER;
+  return `py ${v} ${repoUrl} --json > out.json && node tools/check_and_sign.js --from-json out.json --verify-py ${v} --repo ${repoUrl} --namespace ${ns} --key your.pem`;
+}
+
 // Build ONE unsigned record for a namespace.
 //   fetchBytes(url) -> Buffer   (injected; the CLI uses global fetch)
 async function buildUnsignedRecord({ verifierOutput, ns, repo, rawBase, fetchBytes, checkedAt, checker, toolSha256, verifyPyPath }) {
@@ -180,7 +186,12 @@ async function buildUnsignedRecord({ verifierOutput, ns, repo, rawBase, fetchByt
     checker: { name: checker.name || "", binding_url: checker.binding_url || "" },
     tool: { name: TOOL_NAME, version: TOOL_VERSION, impl: "independent", source_sha256: toolSha256 },
     trust_dependencies: TRUST_DEPENDENCIES,
-    rerun: `py ${verifyPyPath} ${repoUrl} --json > out.json && node tools/check_and_sign.js --from-json out.json --verify-py ${verifyPyPath} --repo ${repoUrl} --namespace ${ns} --key your.pem`,
+    // Public and portable, never the local path this run used (verifyPyPath
+    // is how THIS machine found the file; the record is read on a public
+    // page by someone else's machine). cr.PUBLIC_VERIFIER is the placeholder
+    // until verifier two has a public home; validateShape refuses a drive
+    // letter, a home-directory path or a backslash here (rerun_not_portable).
+    rerun: rerunFor(repoUrl, ns),
   };
 }
 
@@ -290,5 +301,5 @@ if (require.main === module) {
 module.exports = {
   TOOL_NAME, TOOL_VERSION, TRUST_DEPENDENCIES,
   rawBaseOf, repoUrlOf, runVerifier, resultsForNamespace, namespacesAtHead, newestPinPath, decide,
-  buildUnsignedRecord, buildSignedRecord, parseArgs, main,
+  buildUnsignedRecord, buildSignedRecord, parseArgs, main, rerunFor,
 };

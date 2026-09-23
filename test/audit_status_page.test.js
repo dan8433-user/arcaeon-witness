@@ -164,10 +164,14 @@ test("FLAG ON: a tampered record, a misfiled record, and a COULD_NOT_LOOK are co
   assert.ok(rowOf(html, "velouria-demo").includes(">BLIND</span>"), "a misfiled record is not evidence for its target either");
 });
 
+// The reader reads each checker key's newest NEWEST_PER_KEY records (D20), so
+// volume from ONE key never spends the cap. The global cap is a safety net
+// for many keys: more distinct keys in one namespace than the cap holds.
 test("gatherAuditStates: the read budget marks a namespace COULD NOT LOOK rather than deriving over half the evidence", async () => {
   gh.seed(REPO, "checks/OPERATOR_KEYS.json", { keys: [{ key: ours.keyId }] });
-  for (let i = 0; i < auditStatus.MAX_RECORD_READS + 1; i++) {
-    seedCheck(check(stranger, "acme-prod", "VERIFIED", 3600 + i));
+  const cap = auditStatus.recordReadCap(2);
+  for (let i = 0; i < cap + 1; i++) {
+    seedCheck(check(cr.generateKeyPair(), "acme-prod", "VERIFIED", 3600 + i));
   }
   seedCheck(check(stranger, "velouria-demo", "VERIFIED", 3600));
   const audit = await auditStatus.gatherAuditStates(["acme-prod", "velouria-demo"], { nowSeconds: NOW });

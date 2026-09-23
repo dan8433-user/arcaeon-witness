@@ -15,6 +15,8 @@
 // exactly those paths, with exactly the bytes self_check_daily.js wrote.
 //
 // Fences, each checked for EVERY record of the run before anything is sent:
+//   0. Its `rerun` is portable: no drive letter, home-directory path or
+//      backslash (reason rerun_not_portable; lib/_check_record.js).
 //   1. The record verifies (verifyCheckRecord: shape, Ed25519 signature over
 //      every field, not future-dated). A bad signature refuses the run.
 //   2. Its local path under --dir equals checkRecordPath(record): the name
@@ -113,6 +115,13 @@ function validateRecordFile({ rel, bytes }, { ownKeys, nowSeconds }) {
     record = JSON.parse(bytes.toString("utf-8"));
   } catch {
     return bad("not_json");
+  }
+  // Fence 0: a record whose `rerun` names a local path (drive letter, home
+  // directory, backslash) is refused before anything else, so a user folder
+  // name never reaches the public repo. verifyCheckRecord refuses it too
+  // (validateShape); this line keeps the publisher's fence if that ever moves.
+  if (record && typeof record === "object" && typeof record.rerun === "string" && !cr.rerunIsPortable(record.rerun)) {
+    return bad("rerun_not_portable", "rerun");
   }
   const v = cr.verifyCheckRecord(record, { nowSeconds });
   if (!v.ok) return bad(v.reason, v.field);

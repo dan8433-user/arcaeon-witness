@@ -18,6 +18,9 @@
 //        [--repo https://github.com/dan8433-user/arcaeon-witness-pins]
 //        [--from-json out.json] [--verify-py PATH] [--out DIR] [--write] [--now ISO]
 //
+// Each record's `rerun` names verifier two by its public, portable name
+// (lib/_check_record.js PUBLIC_VERIFIER), never the --verify-py path this
+// machine used; a local path there is refused as rerun_not_portable.
 // Every record is verified before it is written (check_and_sign does that);
 // every namespace at HEAD gets one record, and a namespace the builder
 // refuses is reported SKIPPED, never defaulted.
@@ -99,7 +102,7 @@ function parseArgs(argv) {
 async function main(argv) {
   const a = parseArgs(argv);
   if (a.help) {
-    process.stdout.write(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 24).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
+    process.stdout.write(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 25).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
     return 0;
   }
   if (!a.key) throw new Error("--key PEM path is required (the operator's declared check key)");
