@@ -154,6 +154,66 @@ for (const [name, bytes] of [["bytes that are not JSON", GARBAGE_NOT_JSON],
   });
 }
 
+// ---------------------------------------------------------------------
+// ROWS WENT BACKWARDS, over a damaged head (atomic-raven's control arm,
+// Colony post 42b8d6e0; 2026-09-22).
+//
+// api/pin.js's monotonic guard, as it was before the verdict layer:
+//     if (cur && Number.isInteger(cur.json.rows) && rows < cur.json.rows) -> 409
+// Its precondition clause, Number.isInteger(cur.json.rows), is FALSE when the
+// head's rows field is damaged, so the whole guard is false and a backward pin
+// walks past it: the guard SKIPS rather than refuses. The arm below plants
+// exactly that head (valid JSON, the right namespace, chain and seq intact,
+// rows unreadable) and submits rows that are LOWER than the head's damaged
+// "12". It must be refused red (503, nothing written), not accepted.
+//
+// Run red on the old guard before commit: with the headVerdict refusal in
+// api/pin.js removed (the pre-verdict behaviour), this arm answered 201 and
+// wrote a new head. See CHANGELOG.md, 2026-09-22.
+// ---------------------------------------------------------------------
+const DAMAGED_ROWS_HEAD = JSON.stringify({
+  namespace: NS, rows: "12", chain: "cafebabe", seq: 1, pinned_at: "2026-09-22T00:00:00Z",
+}) + "\n";
+
+async function backwardPin() {
+  return call(pinHandler, {
+    method: "POST", headers: { authorization: "Bearer testkeyA" },
+    body: { namespace: NS, rows: 5, chain: "deadbeef" },
+  });
+}
+
+test("ROWS WENT BACKWARDS over a damaged head: the old guard's precondition is false, and the pin is REFUSED red, not waved through", async () => {
+  await healthyLedger();
+  plantDead(DAMAGED_ROWS_HEAD);
+  // prove from the fixture side that this is the case the old guard skipped:
+  // the head parses, carries the namespace, and its rows are not an integer.
+  const planted = JSON.parse(gh._repoMap(PIN_REPO).get(HEAD).content);
+  assert.equal(planted.namespace, NS, GUARD);
+  assert.equal(Number.isInteger(planted.rows), false, `${GUARD} (the old guard's precondition would be true)`);
+
+  const writesBefore = gh.putLog.length;
+  const res = await backwardPin();
+  assert.notEqual(res._status, 201, "a backward pin was ACCEPTED over a head whose rows could not be read: the guard skipped");
+  assert.notEqual(res._status, 200, "a backward pin was answered 200 over a damaged head");
+  assert.equal(res._status, 503, `expected the red refusal (503), got ${res._status}: ${JSON.stringify(res._body)}`);
+  assert.equal(res._body.ok, false);
+  assert.equal(res._body.reason, "rows_unreadable");
+  assert.equal(gh.putLog.length, writesBefore, "/api/pin wrote over a head whose rows it could not read");
+  assert.equal(gh._repoMap(PIN_REPO).get(HEAD).content, DAMAGED_ROWS_HEAD, "the damaged head was overwritten");
+});
+
+test("ROWS WENT BACKWARDS, control: the same backward pin over an UNDAMAGED head is the ordinary 409 monotonic refusal", async () => {
+  // Same namespace, same submitted rows, head intact: the guard's own clause
+  // fires. If this arm ever answers 503 the damaged arm above proves nothing
+  // about damage, and if it answers 201 the monotonic guard itself is gone.
+  await healthyLedger();
+  const writesBefore = gh.putLog.length;
+  const res = await backwardPin();
+  assert.equal(res._status, 409, `control: expected the monotonic 409, got ${res._status}: ${JSON.stringify(res._body)}`);
+  assert.match(res._body.error, /never goes backward/);
+  assert.equal(gh.putLog.length, writesBefore, "control: a refused backward pin wrote something");
+});
+
 test("PLANTED DEAD, the guard's own control: an UNPLANTED ledger makes the dead-answer assertion fail with the guard sentence", async () => {
   // The guard is only worth its name if it fires. Skip the plant, run the same
   // assertion, and require that it refuses — with the guard's words.

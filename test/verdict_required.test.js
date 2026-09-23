@@ -21,6 +21,14 @@ const assert = require("node:assert/strict");
 
 const verdict = require("../lib/_verdict.js");
 
+// A real, bound green: the only way to get one is a judge over a read.
+const GOOD_PIN = { namespace: "demo", rows: 12, chain: "cafebabe", seq: 3 };
+function boundGreen() {
+  const v = verdict.judgePin({ json: GOOD_PIN }, { what: "x", namespace: "demo" });
+  assert.equal(v.ok, true, "fixture: the bound green this test needs did not come out green");
+  return v;
+}
+
 test("NO VERDICT, NO ANSWER: the success constructor throws a named error when no verdict is passed", () => {
   for (const missing of [undefined, null, {}, [], "ok", true, 1, { ok: 1 }, { ok: "true" }, { verified: true }]) {
     assert.throws(
@@ -52,12 +60,16 @@ test("RED NEVER RENDERS GREEN: success() throws on a red verdict, and refusal() 
   assert.equal(r.body.reason, "rows_unreadable");
   assert.ok(!("witnessed" in r.body), "a refusal must not carry a witnessed field at all");
   // and the other direction: a green verdict cannot be turned into a refusal by accident
-  assert.throws(() => verdict.refusal(verdict.verifiedRecord("x")), TypeError);
+  assert.throws(() => verdict.refusal(boundGreen()), TypeError);
 });
 
 test("RED NEVER RENDERS GREEN: the fields cannot smuggle their own ok past the verdict", () => {
-  assert.throws(() => verdict.success(verdict.verifiedRecord("x"), { ok: true }), TypeError);
-  assert.throws(() => verdict.success(verdict.verifiedRecord("x"), { ok: false }), TypeError);
+  // (until 2026-09-22 these called verdict.verifiedRecord, which is no longer
+  // exported: they then threw "not a function", a TypeError, and passed for
+  // the wrong reason. The control below makes that impossible to miss again.)
+  assert.throws(() => verdict.success(boundGreen(), { ok: true }), /`ok` comes from the verdict/);
+  assert.throws(() => verdict.success(boundGreen(), { ok: false }), /`ok` comes from the verdict/);
+  assert.deepEqual(verdict.success(boundGreen(), { rows: 12 }), { ok: true, rows: 12 }, "control: a bound green with clean fields must render");
 });
 
 test("GENESIS IS A VERDICT: empty is reached by the store's 404 (null) and by nothing else", () => {
@@ -145,4 +157,119 @@ test("NO RECORD, NO GRADE: both cadence graders throw when handed no pin, instea
   const legacy = { namespace: "demo", rows: 3, chain: "cafebabe", seq: 1, pinned_at: "2026-08-01T00:00:00Z" };
   assert.equal(store.computeCadenceFields(legacy).status, "legacy_no_deadline");
   assert.equal(cadenceStatus(legacy).status, "legacy_no_deadline");
+});
+
+// ---------------------------------------------------------------------
+// 2026-09-22 — atomic-raven's two points (Colony post 42b8d6e0; our reply,
+// comment 43bed67b, said we would make them as he described).
+//
+// MUST-FAIL ARMS, run red before commit (results in CHANGELOG.md):
+//   break A: judgeRead's last line put back to `return null;`  -> the
+//            PRESENT_UNCHECKED tests below fail.
+//   break B: requireVerdict's binding check removed, so success() accepts
+//            any {ok:true, state} -> the UNBOUND GREEN tests below fail.
+// ---------------------------------------------------------------------
+
+const PRESENT_OBJECTS = [
+  { json: {} },
+  { json: { rows: 0, chain: "genesis" } },
+  { json: { namespace: "demo", rows: "12", chain: "cafebabe", seq: 1 } },
+  { json: GOOD_PIN },                    // even a perfectly good record is UNCHECKED until a shape rule has looked
+  { json: { used: 97 } },
+];
+
+test("PRESENT_UNCHECKED: judgeRead never returns null — a present object is a typed verdict that is not green", () => {
+  for (const got of PRESENT_OBJECTS) {
+    const v = verdict.judgeRead(got, "head");
+    assert.notEqual(v, null, `judgeRead returned null for ${JSON.stringify(got)}: a raw caller could read that as green`);
+    assert.ok(v && typeof v === "object", `judgeRead returned ${v} for ${JSON.stringify(got)}`);
+    assert.equal(v.state, verdict.STATES.UNCHECKED);
+    assert.equal(v.ok, false, "present_unchecked must not be green");
+    assert.equal(typeof v.read_id, "string", "present_unchecked carries the read_id judgeRead issued");
+    assert.equal(verdict.isEmpty(v), false, "present is never empty");
+  }
+  // the other two answers are unchanged: 404 is a bound verified_empty, not-an-object is red
+  const empty = verdict.judgeRead(null, "head");
+  assert.equal(empty.state, verdict.STATES.EMPTY);
+  assert.equal(typeof empty.read_id, "string");
+  for (const got of [{ json: null }, { json: [] }, { json: "x" }, "x", []]) {
+    const v = verdict.judgeRead(got, "head");
+    assert.equal(v.ok, false);
+    assert.equal(v.reason, "not_a_json_object");
+  }
+  assert.throws(() => verdict.judgeRead(undefined, "head"), verdict.VerdictRequiredError);
+});
+
+test("PRESENT_UNCHECKED: requireGreen, success and counterValue refuse it BY NAME", () => {
+  for (const got of PRESENT_OBJECTS) {
+    const v = verdict.judgeRead(got, "head");
+    const named = (e) => e instanceof verdict.PresentUncheckedError && e.code === "present_unchecked";
+    assert.throws(() => verdict.requireGreen(v, "t"), named);
+    assert.throws(() => verdict.success(v, { witnessed: true }), named);
+    assert.throws(() => verdict.counterValue(v, "t"), named);
+  }
+  // the raw caller atomic-raven described: "no verdict back means go on".
+  // Under the old null it built a success; now there is no null to fall past,
+  // and handing the verdict on is refused.
+  const rawCaller = (got) => {
+    const v = verdict.judgeRead(got, "head");
+    if (!v) return { ok: true, rows: 0, chain: "genesis" }; // the disarm
+    return verdict.success(v, { rows: got.json.rows });
+  };
+  assert.throws(() => rawCaller({ json: { rows: 0, chain: "genesis" } }), verdict.PresentUncheckedError);
+});
+
+test("PRESENT_UNCHECKED: judgePin and judgeCounter consume it and return verifiedRecord / red exactly as before", () => {
+  const good = verdict.judgePin({ json: GOOD_PIN }, { namespace: "demo" });
+  assert.equal(good.ok, true);
+  assert.equal(good.state, verdict.STATES.RECORD);
+  assert.equal(typeof good.read_id, "string");
+  assert.equal(verdict.success(good, { rows: 12 }).ok, true);
+  const bad = verdict.judgePin({ json: { ...GOOD_PIN, rows: "12" } }, { namespace: "demo" });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.reason, "rows_unreadable");
+  assert.notEqual(bad.state, verdict.STATES.UNCHECKED, "a judge must not hand present_unchecked back out");
+
+  const c = verdict.judgeCounter({ json: { used: 4 } }, "used", { integer: true });
+  assert.equal(c.state, verdict.STATES.RECORD);
+  assert.equal(verdict.counterValue(c), 4);
+  const e = verdict.judgeCounter(null, "used");
+  assert.equal(e.state, verdict.STATES.EMPTY);
+  assert.equal(verdict.counterValue(e), 0);
+
+  // a shape rule that decides nothing is a thrown error, never a pass
+  for (const undecided of [undefined, null, false, 0, "", { ok: true }, { state: "verified_record" }, { read_id: "read-1" }]) {
+    assert.throws(() => verdict.judgeWith({ json: {} }, "x", () => undecided), verdict.VerdictRequiredError,
+      `judgeWith treated ${JSON.stringify(undecided)} as a decision`);
+  }
+});
+
+test("UNBOUND GREEN: success() refuses every green that did not come out of a judge over an issued read", () => {
+  const real = boundGreen();
+  const forged = [
+    { ok: true, state: verdict.STATES.RECORD },                               // hand-built, no read_id
+    { ok: true, state: verdict.STATES.EMPTY },
+    { ok: true, state: verdict.STATES.RECORD, what: "x", read_id: "read-zzzzzz" }, // read_id judgeRead never issued
+    { ok: true, state: verdict.STATES.RECORD, what: "x", read_id: real.read_id },  // a REAL read_id copied onto a literal
+    { ...real },                                                               // a spread copy of a real green
+    Object.freeze({ ...real }),                                                // ...frozen, same fields
+    Object.freeze({ ok: true, state: verdict.STATES.RECORD, what: "x", read_id: "" }),
+  ];
+  for (const v of forged) {
+    assert.throws(
+      () => verdict.success(v, { witnessed: true }),
+      (e) => e instanceof verdict.UnboundVerdictError && e.code === "verdict_unbound",
+      `success() minted an answer from an unbound verdict ${JSON.stringify(v)}`
+    );
+    assert.throws(() => verdict.requireGreen(v), verdict.UnboundVerdictError);
+    assert.throws(() => verdict.isEmpty(v), verdict.UnboundVerdictError);
+  }
+  // present_unchecked is bound too: a hand-built one is refused as unbound, not trusted
+  assert.throws(() => verdict.requireVerdict({ ok: false, state: verdict.STATES.UNCHECKED, reason: "present_unchecked", what: "x" }),
+    verdict.UnboundVerdictError);
+  // the green constructors are not reachable from outside
+  assert.equal(verdict.verifiedRecord, undefined, "verifiedRecord is exported again: a green can be built without a read");
+  assert.equal(verdict.verifiedEmpty, undefined, "verifiedEmpty is exported again: a green can be built without a read");
+  // control: the real one still renders
+  assert.deepEqual(verdict.success(real, { rows: 12 }), { ok: true, rows: 12 });
 });

@@ -458,13 +458,14 @@ module.exports = async (req, res) => {
       // gets a verdict first (lib/_verdict.js): a fulfillment file that is
       // present without a key and a prefix used to render 200 ok:true with
       // `key: undefined`. Thrown here, it lands in the catch below as a 502.
-      const readable = !!record && typeof record === "object" && !Array.isArray(record) &&
-        typeof record.key === "string" && record.key !== "" &&
-        typeof record.namespace_prefix === "string" && record.namespace_prefix !== "";
+      // Since 2026-09-22 the green is minted by a judge over THIS read (the
+      // read_id binding in lib/_verdict.js), not built here by hand.
       verdict.requireGreen(
-        readable
-          ? verdict.verifiedRecord("fulfillment record")
-          : verdict.red("fulfillment record", "key_or_prefix_unreadable"),
+        verdict.judgeWith(cur, "fulfillment record", (r) =>
+          typeof r.key === "string" && r.key !== "" &&
+          typeof r.namespace_prefix === "string" && r.namespace_prefix !== ""
+            ? true
+            : "key_or_prefix_unreadable"),
         "fulfill"
       );
     } else {
