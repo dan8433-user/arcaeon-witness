@@ -1,5 +1,13 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-22 — nothing is deleted from the record (branch `no-delete-record`, local only, NOT deployed)
+
+An outside verifier written from the spec alone ruled the pin repo BROKEN for 65 records deleted on 2026-08-14 as "test cleanup" (19 namespaces, two of them carrying conflict observations). It could not tell test cleanup from suppression, and neither can anyone else. Those deletions were one-off contents-API calls made by hand; no script in this repo or the velouria repo produced them, and no scheduled task runs one.
+
+- **New rule:** test namespaces use the reserved prefix `veltest-` (older `test-` and `velouria-tmp-` recognised). A finished namespace is never removed. `tools/supersede_namespace.js` publishes a new, create-only record at `superseded/<namespace>.json` that says so; pins and observations stay. Dry run by default; a namespace with no test prefix needs `--any-namespace`.
+- **Guard:** `test/no_delete_record.test.js` fails if any file in `lib/`, `api/` or `tools/` gains a DELETE, `git rm`, or `deleteFile(` call outside a named allowlist (`lib/_balance.js`, private usage repo, no callers; `tools/ceiling_probe.js`, its own throwaway repo). Break arms prove the scan and the create-only write can fail. Suite 342 tests, 337 pass, 0 fail.
+- Not yet done: status page and verify do not read `superseded/` yet; the 65 deleted records are not restored (that is a live write to the public repo and needs the owner's go).
+
 ## 2026-09-19 — the status page reports the service (branch `status-posture`, NOT deployed)
 
 The page opened with "Independence disclosure: k=1. Every namespace below traces to one operator root... We measured, the answer is one", plus a `k=1` stat tile, and `status.json` carried "all namespaces trace to one operator root". That wording came out of a forum reviewer's critique and was right for the forum. On a product surface it read as an announcement that nobody else uses the service. Owner's call, 2026-09-19: a status page says what the service is doing; it does not editorialise about adoption.
