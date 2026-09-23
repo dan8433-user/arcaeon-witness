@@ -233,6 +233,14 @@ function consistencyBattery() {
   add("extra trailing hash", (p) => { p.path.push(p.path[0]); });
   add("reordered path", (p) => { p.path.reverse(); }, 3, 37);
   add("m > n", (p) => { [p.old_size, p.new_size] = [p.new_size, p.old_size]; });
+  // REVERT-CONTROL 2026-09-23: with the old_size > new_size guard removed, the
+  // plain "m > n" case above is still refused by the RFC walk (path_too_long),
+  // so the guard's removal was invisible to this battery (0 of 17 tests
+  // noticed). This proof is the one shape a brute force over trees of 1..16
+  // leaves found ACCEPTED without the guard: the real (6 -> 11) proof with only
+  // the sizes swapped. It exists so the guard cannot be deleted silently.
+  add("m > n on the (6, 11) pair, roots and path untouched (accepted without the guard)",
+      (p) => { [p.old_size, p.new_size] = [p.new_size, p.old_size]; }, 6, 11);
   add("m == n with a non-empty path", (p) => { p.new_size = p.old_size; p.new_root = p.old_root; });
   add("m == n with different roots and empty path", (p) => { p.new_size = p.old_size; p.path = []; });
   add("m == 0", (p) => { p.old_size = 0; });
