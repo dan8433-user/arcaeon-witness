@@ -1,5 +1,14 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 — one release tree (branch `release-candidate-2026-09-23`, local only, NOT deployed)
+
+`honest-commit-time-2026-09-22` plus `no-delete-record`, `log-tree-slice1` and `audit-state-slice1`, merged in that order; `8f0c2d1` (production) is an ancestor. See `RELEASE_NOTES_2026-09-23.md`.
+
+- **Correction to the audit-state entry below:** its "with the flag off the page is byte-identical to before (tested)" was not true. The summary placeholder sat on its own template line, so flag-off output gained a 3-byte whitespace line; the test checked vocabulary only. Fixed in `api/status.js` during the merge; a frozen-clock render of this tree with the flag off now matches `d398315` byte for byte, and a new test in `test/audit_status_page.test.js` pins it (fails against the unfixed file).
+- `test/helpers/mock_store.js`: the two `git/trees` mocks (sealer reconciler's `treeStatus`/`treeTruncated`, audit state's per-entry `sha` and GET-only routing) are one handler now.
+- Suite 578, 576 pass, 0 fail, 2 todo (M-1, M-2, main's strict false-yes rows).
+
+
 ## 2026-09-22 — the commit date is the operator's own clock, not GitHub's (branch `honest-commit-time-2026-09-22`, NOT deployed)
 
 The README (lines 11 and 549), `lib/_store.js`, the status page (`api/status.js`, two paragraphs), `status.json`'s `independence.note`, `PRACTICES.md` §3, `STAMPS_OWN_REPO.md` and `tools/stamp_genesis.js` all said that pin commits are "third-party-timestamped by GitHub" or that "GitHub's clock is the first witness". That is not what git does. A commit's date is whatever the committing client wrote; every commit in the pins repo is made by the operator's own account through the operator's own client or token, and none is signed. GitHub stores the date; it does not vouch for it. The only independent clock in the pins repo is the daily OpenTimestamps (Bitcoin) anchor. Found by the second-lineage verifier (DISAGREEMENTS D11, live-data item 4) against the public pins README, which carries the same sentence and is corrected separately.
