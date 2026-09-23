@@ -9,8 +9,9 @@
 // THE MOVE. The old log dates the new one. This tool writes ONE record into
 // the EXISTING pins repository saying: the stamps log's first commit carries
 // this SHA and this date, observed at this time. That record lands as its own
-// commit in the pins repo, and that commit is timestamped by GitHub in a
-// history that already has months of public life behind it. From then on, the
+// commit in the pins repo, in a history that already has months of public
+// life behind it (its date is the operator's own clock, like every commit
+// there; the pins repo's daily Bitcoin anchor is the independent clock). From then on, the
 // stamps log's claimed birth has a fixed point in an older record — and a
 // later change to either side would show in the public commit history of the
 // repository it lives in.

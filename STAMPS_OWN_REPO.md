@@ -57,7 +57,7 @@ GITHUB_PIN_TOKEN=... node tools/stamp_genesis.js --sha <40-hex> --date <iso8601>
     --repo <owner/stamps-repo> --commit
 ```
 
-*Protects:* the new log's claimed age. A brand-new repository is exactly as old as its first commit, and that commit's date is whatever its creator's machine says it is — nothing outside it vouches for when it began. The genesis record puts that first commit's SHA and date into the **older** pins repository, as its own commit, timestamped by GitHub in a history that already has months of public life behind it. From then on the stamps log has a fixed point in an older record, and a later change to either side would show in the public commit history of the repository it lives in.
+*Protects:* the new log's claimed age. A brand-new repository is exactly as old as its first commit, and that commit's date is whatever its creator's machine says it is — nothing outside it vouches for when it began. The genesis record puts that first commit's SHA and date into the **older** pins repository, as its own commit, in a history that already has months of public life behind it (that commit's date is the operator's own clock too, like every commit in the pins repo; the independent clock is the pins repo's daily Bitcoin anchor). From then on the stamps log has a fixed point in an older record, and a later change to either side would show in the public commit history of the repository it lives in.
 
 The write is **create-only**. If a genesis record already exists at that path the tool refuses rather than replacing it: a birth record that can be overwritten is worth nothing.
 

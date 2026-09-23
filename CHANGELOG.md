@@ -1,5 +1,13 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-22 — the commit date is the operator's own clock, not GitHub's (branch `honest-commit-time-2026-09-22`, NOT deployed)
+
+The README (lines 11 and 549), `lib/_store.js`, the status page (`api/status.js`, two paragraphs), `status.json`'s `independence.note`, `PRACTICES.md` §3, `STAMPS_OWN_REPO.md` and `tools/stamp_genesis.js` all said that pin commits are "third-party-timestamped by GitHub" or that "GitHub's clock is the first witness". That is not what git does. A commit's date is whatever the committing client wrote; every commit in the pins repo is made by the operator's own account through the operator's own client or token, and none is signed. GitHub stores the date; it does not vouch for it. The only independent clock in the pins repo is the daily OpenTimestamps (Bitcoin) anchor. Found by the second-lineage verifier (DISAGREEMENTS D11, live-data item 4) against the public pins README, which carries the same sentence and is corrected separately.
+
+- **Wording now, everywhere the claim appeared:** the commit history is public and a rewrite is visible to anyone who cloned or watched before it; a commit's date is the operator's own statement, not a third party's; the independent evidence of time is the daily Bitcoin anchor. `PRACTICES.md` bumps to v1.3 with a dated correction note under its header.
+- **The 2026-09-19 entry below** kept the sentence "every pin is a public, third-party-timestamped commit" as a limit a relying party needs. The limit stands; that sentence was wrong and is not repeated here. Old entries are left as written.
+- `test/status_posture.test.js`: the LIMIT KEPT test now asserts the page does NOT say third-party-timestamped and DOES say the date is the operator's own statement and that the Bitcoin anchor is the independent evidence. Suite count unchanged.
+
 
 ## 2026-09-20 — two sealers cannot publish the same leaves twice, and a reconciler says so when something does (branch `sealer-safety`, NOT deployed, flag still off)
 

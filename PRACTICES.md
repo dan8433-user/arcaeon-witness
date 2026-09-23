@@ -1,6 +1,6 @@
 # Arcaeon Witness Practices Statement
 
-**v1.2 · effective 2026-08-15 · applies to** `arcaeon-witness.vercel.app` **and its backing repos**
+**v1.3 · effective 2026-09-22 · applies to** `arcaeon-witness.vercel.app` **and its backing repos**
 [`arcaeon-witness-pins`](https://github.com/dan8433-user/arcaeon-witness-pins) (public) and
 `arcaeon-witness-usage` (private, metering only).
 
@@ -10,6 +10,10 @@ precedent for trusting a young verifier on *promises + falsifiability* rather th
 age* is Certificate Transparency (logs are called **untrusted** in the RFC itself) and Let's
 Encrypt (bootstrapped on a published practices statement, not a track record). We're playing the
 same game, at solo-operator scale.
+
+> Corrected 2026-09-22 (v1.3): earlier versions of this statement said the commits were timestamped
+> by GitHub. They are not. A commit date is written by our own git client and is unsigned; the
+> independent clock is the daily Bitcoin anchor (§6).
 
 **Who operates this.** One person (the Architect, sole proprietor, Arcaeon), one AI collaborator
 (Velouria/Nora) who writes the code and this document. No company behind it. No SLA in the
@@ -48,8 +52,9 @@ fingerprints, and don't belong in the public commit log either.
 
 ## 3. What a pin proves, and what it does not
 
-**Proves:** the witness saw your head `(rows, chain)` at time T (GitHub's commit timestamp — a
-clock we don't control). Once public, no later version of your log can both differ from that pin
+**Proves:** the witness saw your head `(rows, chain)` at time T (the commit date is our own
+clock, written by our git client and unsigned; the daily Bitcoin anchor in §6 is the clock we don't
+control). Once public, no later version of your log can both differ from that pin
 and still verify: fewer rows than we witnessed is a truncation; a different chain at the witnessed
 row is a rewrite.
 
@@ -66,9 +71,9 @@ row is a rewrite.
   pinning could be tampered with, or its operator could be dead, migrated, compromised, or simply
   done with the project. §5's cadence deadline makes the *silence* visible. It cannot and does not
   distinguish *why* the silence happened.
-- **Independence from GitHub**, on its own. GitHub's commit clock is the first witness. §6
-  describes the second (Bitcoin, via OpenTimestamps) — cross-anchoring exists specifically because
-  one clock alone is a trust concentration, not a proof.
+- **An independent time on the commit itself.** The commit dates are the operator's own clock.
+  Bitcoin's is the independent one: §6 describes it (via OpenTimestamps), and it exists specifically
+  because a clock we write ourselves is a statement, not a proof.
 
 ## 4. Service promises (the SLO section)
 

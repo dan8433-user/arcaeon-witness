@@ -58,7 +58,9 @@ test("POSTURE: the HTML page does not editorialise about who uses the service", 
 
 test("LIMIT KEPT: the page still tells a relying party nothing here has to be taken on trust", async () => {
   const html = htmlOf(await render());
-  assert.match(html, /third-party-timestamped/);
+  assert.doesNotMatch(html, /third-party-timestamped/);
+  assert.match(html, /operator's own statement/);
+  assert.match(html, /Bitcoin anchor/);
   assert.match(html, /taken on trust/);
 });
 

@@ -8,8 +8,12 @@ that witness, hosted.
 
 **The backing store is a PUBLIC GitHub repo:**
 [`dan8433-user/arcaeon-witness-pins`](https://github.com/dan8433-user/arcaeon-witness-pins).
-Every pin lands as a commit. Commits are free, third-party-timestamped by GitHub,
-publicly verifiable, and any history rewrite is visible. Pins contain fingerprints
+Every pin lands as a commit. Commits are free and publicly readable, and a rewrite
+of the history is visible to anyone who cloned or watched the repo before the
+rewrite. A commit's date is the operator's own statement, not a third party's: git
+records whatever time the committing client wrote, these commits are made by the
+operator's account, and they are not signed. The independent evidence of time is
+the daily Bitcoin anchor (see Anchoring below). Pins contain fingerprints
 ONLY — `{namespace, rows, chain, pinned_at, seq}` — never log content
 ("password nowhere": breaching the store yields hashes useless without your log).
 
@@ -518,8 +522,10 @@ pin and still verify — a truncated log has fewer rows than the witness saw; a
 rewritten one has a different chain at the witnessed row.
 
 **A stranger verifies without trusting our API:** the pins live in a public
-GitHub repo. Anyone can read `pins/<namespace>/` and the commit timestamps
-directly from GitHub and run the check themselves. The API is a convenience; the
+GitHub repo. Anyone can read `pins/<namespace>/` and the commit history
+directly from GitHub and run the check themselves. (The commit dates in that
+history are the operator's own clock; the daily Bitcoin anchor below is the
+independent one.) The API is a convenience; the
 repo history is the evidence. If we tampered with pins, the rewrite would show
 in the repo's own history (force-push divergence visible to anyone who cloned).
 
@@ -541,12 +547,15 @@ assurance levels, where every tier boundary becomes a liability surface.)
 - that your logged content is *true* — the witness sees fingerprints, not facts;
 - anything about the window since the last pin — the MAX gap between pins is your
   real security parameter (an attacker picks the gap);
-- independence from GitHub — GitHub's timestamps are the third-party clock; if
-  you need stronger anchoring, cross-pin to a second witness.
+- an independent time on the commit itself: the commit dates are the operator's
+  own clock, written by our git client and unsigned. The daily Bitcoin anchor
+  (next section) is the independent evidence of time; if you need stronger
+  anchoring, cross-pin to a second witness.
 
 ## Anchoring (OpenTimestamps counter-anchor)
 
-GitHub's clock is the first witness; Bitcoin's is the second. Once a day an
+The commit dates are the operator's own clock. Bitcoin's is the independent one.
+Once a day an
 automated job records the pin repo's HEAD commit hash to
 `anchors/<date>-head.txt` (`<sha> <iso-timestamp>`) in
 [`dan8433-user/arcaeon-witness-pins`](https://github.com/dan8433-user/arcaeon-witness-pins)

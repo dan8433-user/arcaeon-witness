@@ -278,8 +278,10 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     <code>${esc(store.BRANCH)}</code>. This page reads the same public sources you can read yourself &mdash;
     every number below links to its raw source.
   </p>
-  <p class="muted"><strong>Check it yourself.</strong> Every pin below is a public, third-party-timestamped
-    commit, and every number links to its raw source, so nothing on this page has to be taken on trust.
+  <p class="muted"><strong>Check it yourself.</strong> Every pin below is a public commit, and every number
+    links to its raw source, so nothing on this page has to be taken on trust. A commit's date is the
+    operator's own statement (our git client writes it, unsigned); the daily Bitcoin anchor further
+    down is the independent evidence of time.
     Rows tagged <em>our own log</em> are ours, not a customer's, pinned continuously so that anyone can
     watch the cadence hold.</p>
 
@@ -323,7 +325,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   </div>
 
   <h2>Bitcoin anchor (OpenTimestamps)</h2>
-  <p class="muted">GitHub's commit clock is the first witness; once a day the pin repo's own HEAD commit is stamped with OpenTimestamps and the proof is committed back into the same public repo &mdash; a second, independent clock that doesn't trust us either.</p>
+  <p class="muted">The commit dates are the operator's own clock. Bitcoin's is the independent one: once a day the pin repo's own HEAD commit is stamped with OpenTimestamps and the proof is committed back into the same public repo &mdash; a clock that doesn't trust us.</p>
   <div class="panel">${anchorHtml}</div>
 
   <footer>
