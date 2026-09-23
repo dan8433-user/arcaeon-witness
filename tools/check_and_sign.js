@@ -36,7 +36,7 @@
 //
 // target.digest is the sha256 of the namespace's newest numbered pin, as
 // fetched from raw.githubusercontent.com by this tool (that fetch is also
-// the record's public input). Output path: checks/pin/<ns>/<ts>-<keyid8>.json
+// the record's public input). Output path: checks/pin/<ns>/<ts>-<keyid8>-<result>.json
 // under --out, the same relative path the record would take in the pins
 // repo. Every record is verified with lib/_check_record.js before it is
 // written; a record that does not verify is not written.

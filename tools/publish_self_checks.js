@@ -8,11 +8,13 @@
 //        (--dry-run | --publish) [--date YYYY-MM-DD] [--days N] [--show-bytes]
 //        [--env-file PATH] [--now ISO]
 //
-// THE READER IS THE CONTRACT. lib/_audit_status.js lists the repo tree and
-// reads every blob matching checks/(pin|observation)/<ns>/<file>.json, one
-// record per file, filed under the namespace its target.ref names. The file
-// name is lib/_check_record.js checkRecordPath(record). This tool publishes
-// exactly those paths, with exactly the bytes self_check_daily.js wrote.
+// THE READER IS THE CONTRACT. lib/_audit_status.js lists the repo tree,
+// takes the blobs matching checks/(pin|observation)/<ns>/<file>.json, one
+// record per file, filed under the namespace its target.ref names, and reads
+// each key's newest 3 plus every file whose name says broken. The file name
+// is lib/_check_record.js checkRecordPath(record):
+// <checked_at>-<keyid8>-<result>.json (D22). This tool publishes exactly
+// those paths, with exactly the bytes self_check_daily.js wrote.
 //
 // Fences, each checked for EVERY record of the run before anything is sent:
 //   0. Its `rerun` is portable: no drive letter, home-directory path or
@@ -21,7 +23,9 @@
 //      every field, not future-dated). A bad signature refuses the run.
 //   2. Its local path under --dir equals checkRecordPath(record): the name
 //      and the content agree, so a record cannot be filed under another
-//      namespace or another time.
+//      namespace, another time, or another result. A name whose result part
+//      disagrees with the signed `result` is refused first, with its own
+//      reason, path_result_mismatch (the reader refuses the same).
 //   3. Its checker key is in the local OPERATOR_KEYS declaration AND (live
 //      only) in the PUBLISHED checks/OPERATOR_KEYS.json. A self-check signed
 //      by a key the published declaration does not list would read on the
@@ -125,6 +129,10 @@ function validateRecordFile({ rel, bytes }, { ownKeys, nowSeconds }) {
   }
   const v = cr.verifyCheckRecord(record, { nowSeconds });
   if (!v.ok) return bad(v.reason, v.field);
+  // Fence 2a (D22): the result in the file name is the reader's index of
+  // BROKENs; a name that says one result over a body that says another is
+  // refused by the reader, so it is refused here before it can be published.
+  if (cr.pathResultMismatch(rel, record)) return bad("path_result_mismatch", `name says ${cr.parseRecordFileName(rel).result}, record says ${record.result}`);
   let want;
   try {
     want = cr.checkRecordPath(record);
@@ -264,7 +272,7 @@ function parseArgs(argv) {
 async function main(argv, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, deps = {}) {
   const a = parseArgs(argv);
   if (a.help) {
-    io.out(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 45).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
+    io.out(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 49).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
     return 0;
   }
   if (!a.dir) throw new Error("--dir is required (the self-check --out directory)");

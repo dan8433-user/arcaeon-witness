@@ -120,6 +120,24 @@ test("validateRecordFile: each defect is refused with its own reason", () => {
   assert.equal(pub.validateRecordFile({ rel: cr.checkRecordPath(theirs), bytes: Buffer.from(JSON.stringify(theirs)) }, own).reason, "key_not_declared");
 });
 
+test("D22 pre-flight: a file whose name-result disagrees with its signed body is refused as path_result_mismatch, and the run publishes nothing", async () => {
+  const own = { ownKeys: new Set([ours.keyId]), nowSeconds: NOW_S };
+  const broken = selfCheck("acme-prod", "BROKEN");
+  const asGreen = cr.checkRecordPath(broken).replace(/-broken\.json$/, "-verified.json");
+  const r1 = pub.validateRecordFile({ rel: asGreen, bytes: Buffer.from(JSON.stringify(broken)) }, own);
+  assert.equal(r1.reason, "path_result_mismatch", JSON.stringify(r1));
+  assert.match(r1.field, /name says VERIFIED, record says BROKEN/);
+  const green = selfCheck("acme-prod", "VERIFIED");
+  const asRed = cr.checkRecordPath(green).replace(/-verified\.json$/, "-broken.json");
+  assert.equal(pub.validateRecordFile({ rel: asRed, bytes: Buffer.from(JSON.stringify(green)) }, own).reason, "path_result_mismatch");
+  // Through the CLI: one mismatched file refuses the whole day.
+  const d = outDir([green], { raw: { [asGreen]: JSON.stringify(broken) } });
+  const { o, w } = io();
+  assert.equal(await pub.main([...base(d), "--dry-run"], w), 2);
+  assert.ok(o.err.includes(`REFUSED  ${asGreen}  path_result_mismatch`), o.err);
+  assert.ok(!o.out.includes("WOULD PUT"), "nothing is listed to publish");
+});
+
 test("collectRecords takes only the asked days, in path order", () => {
   const a = selfCheck("b-ns");
   const b = selfCheck("a-ns");

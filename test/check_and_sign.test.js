@@ -102,7 +102,7 @@ test("buildSignedRecord: the record verifies, digests the newest pin it fetched,
   assert.equal(rec.tool.impl, "independent");
   assert.equal(rec.checker.key, kp.keyId);
   assert.ok(rec.rerun.includes(`--namespace alpha`));
-  assert.equal(cr.checkRecordPath(rec), `checks/pin/alpha/2026-09-22T14-02-11Z-${cr.keyIdShort(kp.keyId)}.json`);
+  assert.equal(cr.checkRecordPath(rec), `checks/pin/alpha/2026-09-22T14-02-11Z-${cr.keyIdShort(kp.keyId)}-verified.json`);
 });
 
 test("buildSignedRecord: BROKEN observation makes the namespace BROKEN; an absent namespace is refused, not defaulted", async () => {
@@ -142,7 +142,7 @@ test("CLI end to end: --gen-key, --from-json, --all writes create-only records t
     const pem = fs.readFileSync(keyPath, "utf-8");
     const keyId = cr.keyIdOf(cr.publicKeyOfPrivate(cr.privateKeyFromPem(pem)));
     const short = cr.keyIdShort(keyId);
-    const files = ["alpha", "beta", "gamma"].map((ns) => path.join(outDir, "checks", "pin", ns, `2026-09-22T14-02-11Z-${short}.json`));
+    const files = [["alpha", "verified"], ["beta", "broken"], ["gamma", "could_not_look"]].map(([ns, r]) => path.join(outDir, "checks", "pin", ns, `2026-09-22T14-02-11Z-${short}-${r}.json`));
     for (const f of files) assert.ok(fs.existsSync(f), `missing ${f}`);
     const recs = files.map((f) => JSON.parse(fs.readFileSync(f, "utf-8")));
     assert.deepEqual(recs.map((r) => r.result), ["VERIFIED", "BROKEN", "COULD_NOT_LOOK"]);

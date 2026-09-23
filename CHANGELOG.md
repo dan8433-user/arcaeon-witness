@@ -1,5 +1,15 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 — D1 literal: the result goes in the check record's file name (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
+
+The helm's ruling on D20: per-key newest 3 stands, and a BROKEN must stay permanent however many later records its own key publishes.
+
+- **Path scheme (D22).** `lib/_check_record.js` `checkRecordPath` now writes `checks/<type>/<ns>/<checked_at>-<keyid8>-<result>.json` (`verified` / `broken` / `could_not_look`, from the record's own `result`). New `parseRecordFileName` and `pathResultMismatch`. Changed before the first publish; fixed from here on.
+- **Reader.** `lib/_audit_status.js` reads, per key, the newest 3 files plus every older file whose name says broken (at most 20 extra per key; beyond that the namespace is COULD NOT LOOK with a note). A verified BROKEN keeps the namespace BROKEN regardless of later same-key records. The safety cap grows by exactly the extras selected. A file whose name-result disagrees with its signed body is refused (`path_result_mismatch`) and makes its namespace COULD NOT LOOK; same for outside sources. JSON twin gains `records_broken_older_read` and `path_result_mismatch` (flag on only).
+- **Publisher.** `tools/publish_self_checks.js` pre-flight refuses `path_result_mismatch` before anything is sent. Records written under the old scheme are refused as `path_mismatch`.
+- **Writer.** `tools/self_check_daily.js` and `tools/check_and_sign.js` pick up the new name through `checkRecordPath`; headers updated.
+- **Tests:** the `D20 RESIDUAL` test is now `D20 RESIDUAL CLOSED` (a BROKEN survives 3, and 30, later same-key records); new `D22 BOUND`, `D22 NAME IS A CLAIM` (repo and outside source), `D22 pre-flight`, and a parse/mismatch test; path expectations updated in four files. Suite 713 -> 718, 0 fail. Break arms: reader ignoring broken-named files fails 4; reader accepting a mismatch fails 2; publisher accepting a mismatch fails 1. Flag-off tests unchanged and passing.
+
 ## 2026-09-23 — the two go-live blockers: reader budget and a local path in `rerun` (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
 
 - **Reader reads the newest records (D20).** `lib/_audit_status.js` no longer reads every check record oldest first under a flat cap of 100 (8 namespaces of daily self-checks went COULD NOT LOOK from day 13). Per namespace it groups the listed record files by checker key (the keyid8 in the file name), orders them newest first by the file-name timestamp, and reads the newest 3 of each key. Older same-key records are superseded (every check is a full re-run over the whole history) and do not make a namespace partial; the cell says how many were not read. Slots are per key, not per namespace, so our own daily volume cannot push an outside checker's BROKEN out of the read set. Global cap `recordReadCap(n) = n * (3 * 4 + 1)`, a safety net. JSON twin gains `records_older_not_read`. Behind the same flag; flag off unchanged.

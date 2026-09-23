@@ -129,7 +129,7 @@ test("DAILY: every namespace at HEAD gets one verifying record under our declare
     assert.equal(cr.verifyCheckRecord(b.record, { nowSeconds: NOW }).ok, true);
     assert.equal(b.record.checker.key, ours.keyId);
     assert.equal(b.record.checker.binding_url, "https://github.com/o/r/blob/main/checks/OPERATOR_KEYS.json");
-    assert.match(b.rel, new RegExp(`^checks/pin/${b.ns}/2026-09-22T06-00-00Z-${cr.keyIdShort(ours.keyId)}\\.json$`));
+    assert.match(b.rel, new RegExp(`^checks/pin/${b.ns}/2026-09-22T06-00-00Z-${cr.keyIdShort(ours.keyId)}-${b.record.result.toLowerCase()}\\.json$`));
     assert.equal(deriveAuditState([b.record], { ownKeys: new Set([ours.keyId]), nowSeconds: NOW }).state, "SELF-CHECKED");
   }
   assert.equal(built[1].record.target.ref, "pins/beta/00000002.json", "digests the newest pin");
@@ -179,8 +179,13 @@ test("DAILY CLI: dry run by default writes nothing; --write writes create-only; 
     assert.equal(await daily.main([...base, "--write"]), 0, err);
     const short = cr.keyIdShort(ours.keyId);
     for (const ns of ["alpha", "beta"]) {
-      const f = path.join(outDir, "checks", "pin", ns, `2026-09-22T06-00-00Z-${short}.json`);
-      assert.equal(cr.verifyCheckRecord(JSON.parse(fs.readFileSync(f, "utf-8"))).ok, true, f);
+      const dir = path.join(outDir, "checks", "pin", ns);
+      const names = fs.readdirSync(dir);
+      assert.equal(names.length, 1, dir);
+      assert.match(names[0], new RegExp(`^2026-09-22T06-00-00Z-${short}-(verified|broken|could_not_look)\\.json$`));
+      const rec = JSON.parse(fs.readFileSync(path.join(dir, names[0]), "utf-8"));
+      assert.equal(cr.verifyCheckRecord(rec).ok, true, names[0]);
+      assert.equal(cr.pathResultMismatch(`checks/pin/${ns}/${names[0]}`, rec), false, "the name carries the record's own result");
     }
     assert.equal(await daily.main([...base, "--write"]), 2, "create-only");
     assert.ok(err.includes("exists"));

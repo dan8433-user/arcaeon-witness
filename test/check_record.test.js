@@ -164,16 +164,40 @@ test("key round-trip through PEM; a stranger's openssl-shaped key works", () => 
   assert.equal(cr.verifyCheckRecord(rec, { nowSeconds: NOW }).ok, true);
 });
 
-test("path and namespace: checks/<type>/<ns>/<ts>-<keyid8>.json", () => {
+test("path and namespace: checks/<type>/<ns>/<ts>-<keyid8>-<result>.json (D22)", () => {
   const rec = signed(kp);
   assert.equal(cr.targetNamespace(rec), "acme-prod");
   const p = cr.checkRecordPath(rec);
-  assert.match(p, /^checks\/pin\/acme-prod\/2026-09-22T14-02-11Z-[0-9a-f]{8}\.json$/);
-  assert.equal(p, `checks/pin/acme-prod/2026-09-22T14-02-11Z-${cr.keyIdShort(kp.keyId)}.json`);
+  assert.match(p, /^checks\/pin\/acme-prod\/2026-09-22T14-02-11Z-[0-9a-f]{8}-verified\.json$/);
+  assert.equal(p, `checks/pin/acme-prod/2026-09-22T14-02-11Z-${cr.keyIdShort(kp.keyId)}-verified.json`);
+  assert.equal(cr.checkRecordPath(signed(kp, { result: "BROKEN" })), `checks/pin/acme-prod/2026-09-22T14-02-11Z-${cr.keyIdShort(kp.keyId)}-broken.json`);
+  assert.equal(cr.checkRecordPath(signed(kp, { result: "COULD_NOT_LOOK" })), `checks/pin/acme-prod/2026-09-22T14-02-11Z-${cr.keyIdShort(kp.keyId)}-could_not_look.json`);
+  assert.throws(() => cr.checkRecordPath({ ...rec, result: "MAYBE" }), /no path for result/);
   const obs = signed(kp, { target: { type: "observation", ref: "observations/acme-prod/2026-09-01T00-00-00-000Z.json" } });
   assert.equal(cr.targetNamespace(obs), "acme-prod");
   assert.match(cr.checkRecordPath(obs), /^checks\/observation\/acme-prod\//);
   const stamp = signed(kp, { target: { type: "stamp", ref: "stamps/ab/abcd.json" } });
   assert.equal(cr.targetNamespace(stamp), null);
   assert.throws(() => cr.checkRecordPath(stamp), /no namespace/);
+});
+
+test("D22 file name: parseRecordFileName reads back what checkRecordPath writes; pathResultMismatch compares it with the signed body", () => {
+  for (const result of cr.RESULTS) {
+    const rec = signed(kp, { result });
+    const p = cr.checkRecordPath(rec);
+    assert.deepEqual(cr.parseRecordFileName(p), { stamp: "2026-09-22T14-02-11Z", key8: cr.keyIdShort(kp.keyId), result });
+    assert.equal(cr.pathResultMismatch(p, rec), false, result);
+  }
+  const broken = signed(kp, { result: "BROKEN" });
+  const verified = signed(kp, { result: "VERIFIED" });
+  assert.equal(cr.pathResultMismatch(cr.checkRecordPath(broken), verified), true, "name says broken, body says verified");
+  assert.equal(cr.pathResultMismatch(cr.checkRecordPath(verified), broken), true, "name says verified, body says broken");
+  assert.equal(cr.pathResultMismatch(cr.checkRecordPath(verified), null), true, "a name with a result over no record disagrees");
+  // The pre-D22 name has no result part: it cannot disagree, and it does not parse.
+  const old = `checks/pin/acme-prod/2026-09-22T14-02-11Z-${cr.keyIdShort(kp.keyId)}.json`;
+  assert.equal(cr.parseRecordFileName(old), null);
+  assert.equal(cr.pathResultMismatch(old, broken), false);
+  // Upper-case or unknown result parts do not parse either.
+  assert.equal(cr.parseRecordFileName(old.replace(".json", "-BROKEN.json")), null);
+  assert.equal(cr.parseRecordFileName(old.replace(".json", "-maybe.json")), null);
 });

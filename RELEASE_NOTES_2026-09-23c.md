@@ -270,3 +270,34 @@ Break arms, each restored by `git checkout` (tree clean after): oldest-first wit
 - The per-key residual above is a D1 reading the helm has not ruled on.
 - Outside sources (`WITNESS_CHECK_SOURCES`) still read every listed record under the 40-fetch budget; a stranger who publishes daily fills it in about 40 days. Unset today, so not a go-live blocker; not changed.
 - Everything in the earlier "Still not confirmed" list stands (no live GitHub call, token scope unchecked).
+
+## Addendum 2: D1 literal, the result in the file name (D22); nothing published, nothing deployed
+
+The helm ruled on the D20 residual: per-key newest 3 stands, and D1 holds literally. Still local only: no push, no deploy, no env write, task not registered, nothing in the pins repo.
+
+- **Path scheme, changed once before the first publish:** `checks/<type>/<ns>/<checked_at>-<keyid8>-<result>.json`, result lower-case from the record's own `result`.
+- **Reader:** per key, the newest 3 files plus every older file whose name says `broken` (bounded at 20 extra per key; past that the namespace is COULD NOT LOOK with a note). A verified BROKEN keeps the namespace BROKEN whatever the same key publishes later. A file whose name-result disagrees with its signed body is refused (`path_result_mismatch`) and its namespace is COULD NOT LOOK (a choice beyond the ruling's words, written up in D22: a lying name means the name-chosen read set cannot be trusted, and ignoring it could take a red off the page).
+- **Publisher:** refuses `path_result_mismatch` in pre-flight. The earlier 14:44:51Z scratchpad set (old names) is now refused as `path_mismatch`, exit 2: unpublishable, as intended.
+
+Writer re-run into the session scratchpad (`scratchpad/self_check_out_rc3b_d22`): 8 records at 14:57:02Z, 7 VERIFIED, 1 BROKEN (`velouria-selftest`), 0 skipped. `publish_self_checks.js --dry-run --date 2026-09-23`: 8 paths, 13935 bytes, exit 0:
+
+```
+checks/pin/test-freeplan-smoke/2026-09-23T14-57-02Z-d751d8aa-verified.json
+checks/pin/velouria-audit-20260819/2026-09-23T14-57-02Z-d751d8aa-verified.json
+checks/pin/velouria-cadence-verify/2026-09-23T14-57-02Z-d751d8aa-verified.json
+checks/pin/velouria-canon/2026-09-23T14-57-02Z-d751d8aa-verified.json
+checks/pin/velouria-demo/2026-09-23T14-57-02Z-d751d8aa-verified.json
+checks/pin/velouria-metersmoke-1786722009/2026-09-23T14-57-02Z-d751d8aa-verified.json
+checks/pin/velouria-metersmoke-final/2026-09-23T14-57-02Z-d751d8aa-verified.json
+checks/pin/velouria-selftest/2026-09-23T14-57-02Z-d751d8aa-broken.json
+```
+
+`npm test`: **718 tests, 718 pass, 0 fail** (713 before; the residual test inverted in place, +5 new). Flag-off tests (5, including 8 namespaces x 30 days of records changing nothing on `/status` or `/api/status.json`) pass. Break arms, each restored after: reader ignoring broken-named files fails **4**; reader accepting a mismatch fails **2**; publisher accepting a mismatch fails **1**.
+
+Export re-made from the tip that carries this addendum.
+
+### Still not confirmed
+
+- The mismatch-makes-COULD-NOT-LOOK choice is mine, not the ruling's; the ruling said "refuse". If the helm wants refuse-and-ignore, it is one line in the reader.
+- Outside sources still read every listed record under the 40-fetch budget (unchanged from addendum 1).
+- Everything in the earlier lists stands (no live GitHub call, token scope unchecked, verifier two unpublished).

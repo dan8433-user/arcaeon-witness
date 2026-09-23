@@ -124,21 +124,33 @@ test("NEWEST FIRST: the newest file wins when older files carry a different resu
   assert.equal(reads[0], newest, "the newest file is read first");
 });
 
-test("NEWEST FIRST (pure): selectRecordPaths orders by the file-name timestamp, per key, and always reads an unparseable name", () => {
-  const p = (ts, key) => `checks/pin/x/${ts}-${key}.json`;
+test("NEWEST FIRST (pure): selectRecordPaths orders by the file-name timestamp, per key, reads every older broken-named file, and always reads an unparseable name", () => {
+  const p = (ts, key, r = "verified") => `checks/pin/x/${ts}-${key}-${r}.json`;
   const paths = [
-    p("2026-09-01T03-30-00Z", "aaaaaaaa"), p("2026-09-23T03-30-00Z", "aaaaaaaa"), p("2026-09-10T03-30-00Z", "aaaaaaaa"),
-    p("2026-09-22T03-30-00Z", "aaaaaaaa"), p("2026-09-21T23-59-59Z", "aaaaaaaa"),
+    p("2026-09-01T03-30-00Z", "aaaaaaaa", "broken"), p("2026-09-23T03-30-00Z", "aaaaaaaa"), p("2026-09-10T03-30-00Z", "aaaaaaaa"),
+    p("2026-09-22T03-30-00Z", "aaaaaaaa"), p("2026-09-21T23-59-59Z", "aaaaaaaa", "could_not_look"),
+    p("2026-09-05T03-30-00Z", "aaaaaaaa", "broken"),
     p("2026-08-01T00-00-00Z", "bbbbbbbb"),
     "checks/pin/x/misfiled-cccccccc.json",
+    // The pre-D22 name (no result part) does not parse, so it is always read.
+    "checks/pin/x/2026-07-01T00-00-00Z-dddddddd.json",
   ];
-  const { read, olderNotRead } = auditStatus.selectRecordPaths(paths, 3);
-  assert.deepEqual(read, [
+  const sel = auditStatus.selectRecordPaths(paths, 3);
+  assert.deepEqual(sel.read, [
+    "checks/pin/x/2026-07-01T00-00-00Z-dddddddd.json",
     "checks/pin/x/misfiled-cccccccc.json",
-    p("2026-09-23T03-30-00Z", "aaaaaaaa"), p("2026-09-22T03-30-00Z", "aaaaaaaa"), p("2026-09-21T23-59-59Z", "aaaaaaaa"),
+    p("2026-09-23T03-30-00Z", "aaaaaaaa"), p("2026-09-22T03-30-00Z", "aaaaaaaa"), p("2026-09-21T23-59-59Z", "aaaaaaaa", "could_not_look"),
+    p("2026-09-05T03-30-00Z", "aaaaaaaa", "broken"), p("2026-09-01T03-30-00Z", "aaaaaaaa", "broken"),
     p("2026-08-01T00-00-00Z", "bbbbbbbb"),
   ]);
-  assert.equal(olderNotRead, 2);
+  assert.equal(sel.olderNotRead, 1, "only the older VERIFIED of key a is left unread");
+  assert.equal(sel.brokenExtra, 2);
+  assert.deepEqual(sel.brokenOverflowKeys, []);
+  // Bound: with a per-key extra bound of 1, key a overflows.
+  const tight = auditStatus.selectRecordPaths(paths, 3, 1);
+  assert.equal(tight.brokenExtra, 1);
+  assert.deepEqual(tight.brokenOverflowKeys, ["aaaaaaaa"]);
+  assert.ok(tight.read.includes(p("2026-09-05T03-30-00Z", "aaaaaaaa", "broken")), "the newest broken-named extras are the ones read");
 });
 
 test("D1 GUARD: our own daily volume cannot bury an outside checker's older BROKEN (slots are per key)", async () => {
@@ -150,16 +162,91 @@ test("D1 GUARD: our own daily volume cannot bury an outside checker's older BROK
   assert.equal(audit.byNs["ns-03"].broken_evidence.key, stranger.keyId);
 });
 
-test("D20 RESIDUAL (pinned so it is visible): one key's own BROKEN older than that same key's newest K records is superseded", async () => {
-  // Accepted by D20: every record is a full re-run over the whole history,
-  // so the same key reporting VERIFIED K times after its BROKEN means that
-  // checker's own reading changed. A withdrawn tool is the design's release
-  // for that (D2); this pins what the reader does if no withdrawal is filed.
-  seedCheck(check(ours, "ns-04", "BROKEN", 10 * DAY));
+test("D20 RESIDUAL CLOSED (D1 literal, D22): a key's own BROKEN survives K later records from the same key", async () => {
+  // Was the D20 residual: the BROKEN fell out of the newest-K read set and
+  // the row read SELF-CHECKED. The helm's ruling: D1 holds literally. The
+  // result is in the file name, so the reader reads every broken-named file
+  // besides the newest K, and a verified BROKEN keeps the namespace BROKEN.
+  const b = seedCheck(check(ours, "ns-04", "BROKEN", 10 * DAY));
+  assert.match(b, /-broken\.json$/);
   seedDaily(ours, ["ns-04"], K);
-  const audit = await auditStatus.gatherAuditStates(["ns-04"], { nowSeconds: NOW });
-  assert.equal(audit.byNs["ns-04"].state, "SELF-CHECKED");
-  assert.equal(audit.byNs["ns-04"].records_older_not_read, 1);
+  seedDaily(ours, ["ns-05"], 30);
+  seedCheck(check(ours, "ns-05", "BROKEN", 40 * DAY));
+  const audit = await auditStatus.gatherAuditStates(["ns-04", "ns-05"], { nowSeconds: NOW });
+  assert.equal(audit.byNs["ns-04"].partial, false);
+  assert.equal(audit.byNs["ns-04"].state, "BROKEN");
+  assert.equal(audit.byNs["ns-04"].broken_evidence.checked_at, isoAt(NOW - 10 * DAY));
+  assert.equal(audit.byNs["ns-04"].records_older_not_read, 0);
+  assert.equal(audit.byNs["ns-04"].records_broken_older_read, 1);
+  assert.equal(audit.byNs["ns-05"].state, "BROKEN", "30 later same-key VERIFIEDs do not clear it either");
+  assert.equal(audit.byNs["ns-05"].records_older_not_read, 30 - K);
+  assert.ok(gh.getLog.includes(b), "the broken-named file was read");
+  assert.equal(audit.readsUsed, 2 * (K + 1), "newest K per key plus the one broken-named file, per namespace");
+  const cell = auditStatus.renderAuditCell(audit.byNs["ns-04"]);
+  assert.ok(cell.includes("1 older BROKEN record read as well"), cell);
+});
+
+test("D22 BOUND: more than MAX_BROKEN_EXTRA_PER_KEY older broken-named files from one key -> COULD NOT LOOK with a note, never a state over some of them", async () => {
+  const MAX = auditStatus.MAX_BROKEN_EXTRA_PER_KEY;
+  assert.equal(MAX, 20);
+  for (let d = 0; d < MAX + 1; d++) seedCheck(check(ours, "ns-06", "BROKEN", 10 * DAY + d * 3600));
+  seedDaily(ours, ["ns-06"], K);
+  for (let d = 0; d < MAX; d++) seedCheck(check(ours, "ns-07", "BROKEN", 10 * DAY + d * 3600));
+  seedDaily(ours, ["ns-07"], K);
+  const audit = await auditStatus.gatherAuditStates(["ns-06", "ns-07"], { nowSeconds: NOW });
+  assert.equal(audit.byNs["ns-06"].partial, true, "past the bound");
+  assert.deepEqual(audit.byNs["ns-06"].broken_overflow_keys, [cr.keyIdShort(ours.keyId)]);
+  assert.ok(audit.notes.some((n) => n.startsWith("ns-06:") && n.includes(`more than ${MAX} older BROKEN records`)), audit.notes.join("\n"));
+  assert.ok(auditStatus.renderAuditCell(audit.byNs["ns-06"]).includes("COULD NOT LOOK"));
+  assert.equal(audit.byNs["ns-07"].partial, false, "at the bound exactly: all read, derived");
+  assert.equal(audit.byNs["ns-07"].state, "BROKEN");
+  assert.equal(audit.byNs["ns-07"].records_broken_older_read, MAX);
+  // The global cap grew by exactly the extras chosen (20 + 20), so neither
+  // namespace was cut by it.
+  assert.equal(audit.readsUsed, 2 * K + 2 * MAX);
+});
+
+test("D22 NAME IS A CLAIM: a file whose name-result disagrees with its signed body is refused (path_result_mismatch) and its namespace is COULD NOT LOOK", async () => {
+  // Name says verified, body says BROKEN.
+  const lieGreen = check(ours, "ns-01", "BROKEN", 3600);
+  const pathGreen = cr.checkRecordPath(lieGreen).replace(/-broken\.json$/, "-verified.json");
+  gh.seed(REPO, pathGreen, lieGreen);
+  // Name says broken, body says VERIFIED (an older one, read only because of its name).
+  seedDaily(ours, ["ns-02"], K);
+  const lieRed = check(ours, "ns-02", "VERIFIED", 20 * DAY);
+  const pathRed = cr.checkRecordPath(lieRed).replace(/-verified\.json$/, "-broken.json");
+  gh.seed(REPO, pathRed, lieRed);
+  // Control: an honest namespace next to them still derives.
+  seedDaily(ours, ["ns-03"], K);
+  const audit = await auditStatus.gatherAuditStates(["ns-01", "ns-02", "ns-03"], { nowSeconds: NOW });
+  for (const [ns, p] of [["ns-01", pathGreen], ["ns-02", pathRed]]) {
+    assert.equal(audit.byNs[ns].partial, true, ns);
+    assert.equal(audit.byNs[ns].path_result_mismatch, 1, ns);
+    assert.ok(audit.notes.some((n) => n.includes(p) && n.includes("path_result_mismatch")), ns);
+  }
+  assert.equal(audit.byNs["ns-03"].partial, false);
+  assert.equal(audit.byNs["ns-03"].state, "SELF-CHECKED");
+  const j = auditStatus.auditNamespaceJson(audit.byNs["ns-01"]);
+  assert.equal(j.state, auditStatus.NOT_FULLY_READ);
+  assert.equal(j.path_result_mismatch, 1);
+});
+
+test("D22 NAME IS A CLAIM (outside source): the same refusal applies to a record fetched from a listed source", async () => {
+  const lie = check(stranger, "ns-01", "VERIFIED", 3600);
+  const p = cr.checkRecordPath(lie).replace(/-verified\.json$/, "-broken.json");
+  const base = "https://checks.example.org";
+  const ok = (body) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => body });
+  const fetchImpl = async (url) => {
+    if (url === `${base}/checks/INDEX.json`) return ok(JSON.stringify({ paths: [p] }));
+    if (url === `${base}/${p}`) return ok(JSON.stringify(lie));
+    return { ok: false, status: 404 };
+  };
+  const audit = await auditStatus.gatherAuditStates(["ns-01"], {
+    nowSeconds: NOW, env: { WITNESS_CHECK_SOURCES: base }, fetchImpl,
+  });
+  assert.equal(audit.byNs["ns-01"].partial, true);
+  assert.equal(audit.byNs["ns-01"].source_records, 0, "the record was not folded in");
+  assert.equal(audit.byNs["ns-01"].path_result_mismatch, 1);
 });
 
 test("SAFETY CAP: scales with namespaces x K; past it the remaining namespaces are COULD NOT LOOK, never derived", async () => {

@@ -11,7 +11,7 @@
 //      look painted green (design B5, sock-puppet risk B10). Refused, exit 2.
 //   2. Dry run by default. --write is the only way anything lands on disk,
 //      and then only under --out, create-only, in the pins-repo layout
-//      checks/<type>/<ns>/<checked_at>-<keyid8>.json. It never commits,
+//      checks/<type>/<ns>/<checked_at>-<keyid8>-<result>.json (D22). It never commits,
 //      pushes, or writes to the store; the daily job decides what to publish.
 //
 //   node tools/self_check_daily.js --key op.pem --operator-keys OPERATOR_KEYS.json
