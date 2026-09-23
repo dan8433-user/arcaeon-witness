@@ -101,6 +101,18 @@ class MockGitHubStore {
 
   async handleFetch(url, opts) {
     const u = new URL(String(url));
+    // Recursive tree read (_store.js getTree): GET /repos/<repo>/git/trees/<ref>
+    // -> {tree:[{path,type:"blob"}...]}. Added 2026-09-22 for the audit-state
+    // column, which lists checks/ from the tree the way the observations
+    // count already does. Every seeded file is a blob; directories are not
+    // listed (the real API lists them as "tree" entries, and nothing under
+    // test reads those).
+    const tm = u.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/git\/trees\/[^/]+$/);
+    if (tm && ((opts && opts.method) || "GET") === "GET") {
+      const tree = [];
+      for (const [p, r] of this._repoMap(tm[1])) tree.push({ path: p, type: "blob", sha: r.sha });
+      return fakeResponse(200, { sha: "mock-tree", tree, truncated: false });
+    }
     const m = u.pathname.match(/^\/repos\/([^/]+\/[^/]+)\/contents\/(.+)$/);
     if (!m) return fakeResponse(404, { message: `mock: unhandled path ${u.pathname}` });
 

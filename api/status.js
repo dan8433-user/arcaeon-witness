@@ -18,6 +18,10 @@ const store = require("../lib/_store.js");
 const cors = require("../lib/_cors.js");
 const ratelimit = require("../lib/_ratelimit.js");
 const { gatherStatusData, humanDuration, BLOB, TREE, REPO_URL } = require("../lib/_status_data.js");
+// Audit-state column (design page part B, slice 1). Behind WITNESS_AUDIT_STATE
+// (default off): with the flag off nothing below this line changes what the
+// page renders. See lib/_audit_status.js.
+const auditStatus = require("../lib/_audit_status.js");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -89,6 +93,14 @@ module.exports = async (req, res) => {
     namespaces,
   } = await gatherStatusData();
 
+  // Audit states, only when the flag is on. A namespace nobody has ever
+  // independently checked used to render a green "current" badge and nothing
+  // else (the design page's finding at what was line 29 of this file). With
+  // the flag on, every row leads with its audit state — BLIND for every
+  // namespace that exists today — and the cadence badge follows it.
+  const auditOn = auditStatus.auditStateEnabled();
+  const audit = auditOn ? await auditStatus.gatherAuditStates(namespaces) : null;
+
   // --- render -----------------------------------------------------------
   const nsRowsHtml = rows.length
     ? rows.map((r) => {
@@ -133,7 +145,9 @@ module.exports = async (req, res) => {
           <td>${r.rowsWitnessed != null ? esc(r.rowsWitnessed) : "&mdash;"}</td>
           <td><time datetime="${esc(r.pinnedAt || "")}">${esc(r.pinnedAt || "unknown")}</time></td>
           <td>${r.nextDueBy ? `<time datetime="${esc(r.nextDueBy)}">${esc(r.nextDueBy)}</time>` : "<em>none declared &mdash; nothing to grade</em>"}</td>
-          <td>${statusBadge(r.status, r.overdueSeconds)}${retiredFlag}${referenceFlag}${heartbeatDetail}${
+          <td>${auditOn
+            ? `${auditStatus.renderAuditCell(audit.byNs[r.ns])}<div class="muted-sm">cadence: ${statusBadge(r.status, r.overdueSeconds)}</div>`
+            : statusBadge(r.status, r.overdueSeconds)}${retiredFlag}${referenceFlag}${heartbeatDetail}${
             r.gradeable === false
               ? `<div class="muted-sm">predates the cadence field &mdash; this row is <strong>not</strong> a pass; <code>cadence_gradeable:false</code> in the API</div>`
               : ""
@@ -259,7 +273,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   footer{margin-top:2.5rem;padding-top:1.25rem;border-top:1px solid var(--line);color:var(--muted);font-size:.85rem}
   footer p{margin:.5rem 0}
   .obs-list{margin:.5rem 0;padding-left:1.2rem;font-size:.88rem}
-  .scroll{overflow-x:auto}
+  .scroll{overflow-x:auto}${auditOn ? auditStatus.AUDIT_CSS : ""}
 </style>
 </head>
 <body>
@@ -308,9 +322,10 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
     <span class="badge badge-blue">heartbeat</span> the publisher renewed the deadline while the content stayed exactly the same (alive, not active) &middot;
     <span class="badge badge-red">overdue</span> a promised record did not land &middot;
     <span class="badge badge-amber">&#9888; not gradeable</span> the record predates the cadence field and declared no deadline, so there is nothing to grade &mdash; <strong>cannot determine, not pass</strong> (<code>cadence_gradeable:false</code>). Nothing is backfilled to close that gap.</p>
+  ${auditOn ? `<div class="panel">${auditStatus.renderAuditSummary(audit, { noun: "namespaces" })}</div>` : ""}
   <div class="panel scroll">
     <table>
-      <thead><tr><th>namespace</th><th>digest</th><th>rows</th><th>pinned at</th><th>next due by</th><th>status</th><th>live check</th></tr></thead>
+      <thead><tr><th>namespace</th><th>digest</th><th>rows</th><th>pinned at</th><th>next due by</th><th>${auditOn ? "audit state / cadence" : "status"}</th><th>live check</th></tr></thead>
       <tbody>${nsRowsHtml}</tbody>
     </table>
   </div>
