@@ -1,3 +1,5 @@
 .env
 .vercel
 node_modules/
+# checkpoint signing keys (tools/logtree_keygen.js): never tracked
+*.signer.key

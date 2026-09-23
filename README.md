@@ -586,6 +586,42 @@ true, complete, or honestly produced; only that they were not fabricated after
 the fact. Each day's anchor covers all history through the previous day's
 anchor commits, forming a chain.
 
+## Witness log
+
+One cumulative Merkle tree (RFC 9162 hashing) over every create-only record
+file in the pin repo: numbered pins, observations, and anchor texts. Once a
+day a signed checkpoint of it (`origin / size / root`, a C2SP-style signed
+note) goes to `log/checkpoints/<date>.txt` in the pin repo, with the
+consistency proof from the previous checkpoint in
+`log/proofs/<date>-consistency.json` and the day's new leaves in
+`log/leaves/<date>.jsonl`. The first checkpoint is described in
+`log/checkpoints/genesis.txt`. Until that file exists in the pin repo, there
+is no log to follow yet.
+
+**Checkpoint key** (Ed25519; also in `log/checkpoints/KEYS.md` in the pin repo):
+
+```
+arcaeon.io/witness-log/2026-09-22+09765dec+AdKhx0P0WL2jig0oBbA5OC4I/Yu7dyiA54ju7lcMgQ07
+```
+
+Retired keys: none. A rotation adds a new dated key and keeps the old one
+listed here, because checkpoints it signed stay verifiable by it
+(`docs/LOGTREE_KEY_RUNBOOK.md`).
+
+Check that a checkpoint you saw earlier is an unaltered prefix of a later one
+(`tools/follow.js`, one file, Node's own modules only):
+
+```bash
+node tools/follow.js --old <earlier>.txt --new <later>.txt \
+  --proof <later>-consistency.json --key "<the key above>"
+```
+
+It answers VERIFIED, BROKEN, or COULD NOT LOOK. It does not tell you that you
+and someone else were shown the same checkpoint (compare yours with other
+people's), anything about a record accepted but not yet checkpointed, or that
+anything recorded is true. Leaves logged at genesis were already in the repo:
+the log proves they have not changed since the genesis date, not before it.
+
 ## Stage-0 limits
 
 - Single region, single operator, no SLA.
