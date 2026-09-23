@@ -33,9 +33,16 @@ function parseArgs(argv) {
   return out;
 }
 
-// deps is a seam for the test suite: {getFile, putFile}. Production uses _store.
+const NS_RE = /^[a-z0-9-]{1,64}$/;
+
+// deps is a seam for the test suite: {getFile, putFile, listDir}. Production uses _store.
 async function supersede(opts, deps = store) {
   const ns = opts.namespace;
+  // Shape check first, before any network call: a malformed name never
+  // reaches the store (no path built from it, no GET issued).
+  if (typeof ns !== "string" || !NS_RE.test(ns)) {
+    return { ok: false, refused: "malformed-namespace", detail: `namespace ${JSON.stringify(ns)} is missing or malformed` };
+  }
   if (!tns.isTestNamespace(ns) && !opts.anyNamespace) {
     return { ok: false, refused: "not-a-test-namespace",
       detail: `${ns} has no test prefix (${tns.RESERVED_TEST_PREFIX}); pass --any-namespace to supersede it deliberately` };
@@ -44,8 +51,23 @@ async function supersede(opts, deps = store) {
   if (await deps.getFile(path)) {
     return { ok: false, refused: "already-superseded", detail: `${path} already exists; it is left as published` };
   }
+  // last_seq is a statement that nothing was cut off after it, so it is never
+  // guessed. latest.json missing or with a non-integer seq is only a true 0
+  // when the namespace has no numbered pins at all; otherwise refuse.
   const latest = await deps.getFile(`pins/${ns}/latest.json`);
-  const lastSeq = latest && Number.isInteger(latest.json.seq) ? latest.json.seq : 0;
+  const seq = latest && latest.json ? latest.json.seq : undefined;
+  let lastSeq;
+  if (Number.isInteger(seq) && seq >= 0) {
+    lastSeq = seq;
+  } else {
+    const entries = await deps.listDir(`pins/${ns}`);
+    const numbered = (entries || []).filter((e) => e && /^\d+\.json$/.test(e.name));
+    if (numbered.length > 0) {
+      return { ok: false, refused: "latest-unreadable",
+        detail: `pins/${ns}/latest.json is ${latest ? "present but its seq is not an integer" : "missing"} while ${numbered.length} numbered pin file(s) exist; last_seq cannot be stated, nothing published` };
+    }
+    lastSeq = 0;
+  }
   const record = tns.buildSupersedeRecord({
     namespace: ns, reason: opts.reason, lastSeq,
     now: opts.now || new Date().toISOString(),
