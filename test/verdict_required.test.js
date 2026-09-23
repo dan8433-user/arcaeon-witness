@@ -273,3 +273,39 @@ test("UNBOUND GREEN: success() refuses every green that did not come out of a ju
   // control: the real one still renders
   assert.deepEqual(verdict.success(real, { rows: 12 }), { ok: true, rows: 12 });
 });
+
+// ---- rule 6: a verdict gates only the record it was judged from ----
+
+test("RULE 6 / WHAT BINDING: a green judged from one record cannot gate an answer about another when the caller names its record", () => {
+  const pin = (seq) => ({ json: { namespace: "demo", rows: 10, chain: "deadbeef", seq }, sha: "s" });
+  const head = verdict.judgePin(pin(3), { what: "pins/demo/latest.json", namespace: "demo" });
+  const older = verdict.judgePin(pin(2), { what: "pins/demo/00000002.json", namespace: "demo" });
+  assert.equal(head.ok, true);
+  assert.equal(older.ok, true);
+
+  // the head's green offered as the gate for an answer about the older record
+  for (const fn of [
+    () => verdict.success(head, { witnessed: true }, "verify", { what: "pins/demo/00000002.json" }),
+    () => verdict.requireGreen(head, "verify", { what: "pins/demo/00000002.json" }),
+    () => verdict.requireVerdict(head, "verify", { what: "pins/demo/00000002.json" }),
+    () => verdict.isEmpty(head, "verify", { what: "pins/demo/00000002.json" }),
+  ]) {
+    assert.throws(fn, (err) => err instanceof verdict.VerdictMismatchError && err.code === "verdict_what_mismatch");
+  }
+  // a red about another record cannot be served as this record's refusal either
+  const otherRed = verdict.judgePin({ json: null, sha: "s" }, { what: "pins/other/latest.json" });
+  assert.throws(() => verdict.refusal(otherRed, "latest", { what: "pins/demo/latest.json" }), verdict.VerdictMismatchError);
+  // a counter's value comes out only under its own name
+  const bal = verdict.judgeCounter({ json: { balance: 4 }, sha: "s" }, "balance", { what: "credit balance" });
+  assert.throws(() => verdict.counterValue(bal, "meter", { what: "monthly usage counter" }), verdict.VerdictMismatchError);
+  assert.equal(verdict.counterValue(bal, "balance", { what: "credit balance" }), 4);
+
+  // a malformed expectation is a programming error, not a pass
+  assert.throws(() => verdict.requireGreen(head, "verify", { what: "" }), TypeError);
+  assert.throws(() => verdict.requireGreen(head, "verify", "pins/demo/latest.json"), TypeError);
+
+  // controls: each green renders under its own name, and with no expectation (opt-in)
+  assert.deepEqual(verdict.success(head, { a: 1 }, "verify", { what: "pins/demo/latest.json" }), { ok: true, a: 1 });
+  assert.deepEqual(verdict.success(older, { a: 1 }, "verify", { what: "pins/demo/00000002.json" }), { ok: true, a: 1 });
+  assert.deepEqual(verdict.success(head, { a: 1 }, "verify"), { ok: true, a: 1 });
+});

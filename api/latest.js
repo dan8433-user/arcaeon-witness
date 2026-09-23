@@ -107,16 +107,17 @@ module.exports = async (req, res) => {
   // computeCadenceFields and come out as 200 ok:true status:"legacy_no_deadline"
   // — a damaged head wearing the costume of an old one. It is a 503 now, and
   // the success body below cannot be built without the green verdict in hand.
+  const HEAD = { what: `pins/${ns}/latest.json` }; // lib/_verdict.js rule 6
   const pinVerdict = unparseable
-    ? verdict.red(`pins/${ns}/latest.json`, "not_json")
-    : verdict.judgePin(pinRead, { what: `pins/${ns}/latest.json`, namespace: ns });
-  if (verdict.isEmpty(pinVerdict, "latest")) {
+    ? verdict.red(HEAD.what, "not_json")
+    : verdict.judgePin(pinRead, { what: HEAD.what, namespace: ns });
+  if (verdict.isEmpty(pinVerdict, "latest", HEAD)) {
     // The one legitimate "nothing here": the store said 404. Reached through
     // the verdict, never by falling past it.
     return res.status(404).json({ error: `no pin recorded for namespace "${ns}"` });
   }
   if (!pinVerdict.ok) {
-    const refused = verdict.refusal(pinVerdict, "latest");
+    const refused = verdict.refusal(pinVerdict, "latest", HEAD);
     res.setHeader("cache-control", "no-store");
     return res.status(refused.status).json(refused.body);
   }
@@ -133,7 +134,7 @@ module.exports = async (req, res) => {
     freshness_note: `${note}; the authoritative record is the commit history at ${HISTORY_BASE}/pins/${ns}`,
     history: `${HISTORY_BASE}/pins/${ns}`,
     ...cadenceFields,
-  }, "latest");
+  }, "latest", HEAD);
 
   return res.status(200).json(out);
 };

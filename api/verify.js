@@ -129,7 +129,12 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   // `seq = 0` (a DEFAULT), walked nothing, and answered 200 ok:true
   // witnessed:false "reached the start of this namespace's history without a
   // match" — a conclusive refutation manufactured from a damaged file.
-  const headVerdict = verdict.judgePin(cur, { what: `pins/${ns}/latest.json`, namespace: ns });
+  const headWhat = `pins/${ns}/latest.json`;
+  // Every success below names the record it answers about ({what}), so a
+  // verdict judged from one record cannot gate an answer about another
+  // (lib/_verdict.js rule 6).
+  const HEAD = { what: headWhat };
+  const headVerdict = verdict.judgePin(cur, { what: headWhat, namespace: ns });
 
   if (verdict.isEmpty(headVerdict, "verify")) {
     // Verified empty: the store said 404. The only road to this answer.
@@ -143,10 +148,10 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         reason: "no_pin_recorded_for_namespace",
         note: `no pin has ever been recorded for namespace "${ns}" — the witness has no basis to confirm or refute this head`,
         history: historyUrl,
-      }, "verify"),
+      }, "verify", HEAD),
     };
   }
-  if (!headVerdict.ok) return verdict.refusal(headVerdict, "verify");
+  if (!headVerdict.ok) return verdict.refusal(headVerdict, "verify", HEAD);
 
   const latest = cur.json;
 
@@ -164,7 +169,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         ? "this is the namespace's current witnessed head"
         : "this exact (rows, chain) was witnessed, but the namespace has since advanced past it — this is a superseded historical head, not the current one; cadence fields below describe THIS record, not the namespace's live status",
       ...cadenceFields,
-    }, "verify");
+    }, "verify", { what: isCurrentHead ? headWhat : `pins/${ns}/${seqName(record.seq)}.json` });
   }
 
   // --- case 1: matches the current head ---
@@ -182,7 +187,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
         raw_record_url: rawRecordUrl(ns, latest.seq),
         history: historyUrl,
-      }, "verify"),
+      }, "verify", HEAD),
     };
   }
 
@@ -199,7 +204,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         note: `requested rows (${rows}) is ahead of the namespace's current witnessed head (${latest.rows}) — it cannot have been witnessed yet; not a refutation`,
         accepted_head: { rows: latest.rows, chain: latest.chain, seq: latest.seq },
         history: historyUrl,
-      }, "verify"),
+      }, "verify", HEAD),
     };
   }
 
@@ -242,7 +247,8 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         return { status: 502, body: { error: `pin store read error during history scan: ${err.message}` } };
       }
       scanned += 1;
-      const recVerdict = verdict.judgePin(got, { what: `pins/${ns}/${seqName(seq)}.json`, namespace: ns });
+      const recWhat = { what: `pins/${ns}/${seqName(seq)}.json` };
+      const recVerdict = verdict.judgePin(got, { what: recWhat.what, namespace: ns });
       if (!recVerdict.ok || verdict.isEmpty(recVerdict, "verify")) {
         // A gap in numbering shouldn't happen, and neither should a record that
         // is not a record. Don't loop forever on one — and don't pretend it was
@@ -266,7 +272,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
             scanned,
             raw_record_url: rawRecordUrl(ns, rec.seq),
             history: historyUrl,
-          }, "verify"),
+          }, "verify", recWhat),
         };
       }
       if (rec.rows < rows) {
@@ -282,7 +288,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
           scanned,
           history: historyUrl,
         };
-        return { status: 200, body: verdict.success(recVerdict, unreadable ? inconclusive(fields) : fields, "verify") };
+        return { status: 200, body: verdict.success(recVerdict, unreadable ? inconclusive(fields) : fields, "verify", recWhat) };
       }
       seq -= 1;
     }
@@ -306,7 +312,7 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   };
   return {
     status: 200,
-    body: verdict.success(headVerdict, unreadable && !boundReached ? inconclusive(tail) : tail, "verify"),
+    body: verdict.success(headVerdict, unreadable && !boundReached ? inconclusive(tail) : tail, "verify", HEAD),
   };
 }
 

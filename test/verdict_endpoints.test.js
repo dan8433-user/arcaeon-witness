@@ -304,6 +304,39 @@ test("STAMP BUDGET / DAMAGED vs EMPTY: a day counter with no readable count refu
   assert.equal(gh.putLog.length, writesBefore, "something was written over a damaged budget counter");
 });
 
+test("STAMP BUDGET / COUNTER NULL MID-WRITE: a day counter whose JSON turns into the literal null during the write is refused, not restarted at 0", async () => {
+  stamp._resetLimiterForTests();
+  const day = new Date().toISOString().slice(0, 10);
+  const path = `stamps/_meta/day-${day}.json`;
+  gh.seed(STAMP_REPO, path, { day, count: 0 }); // a readable counter under the free ceiling, so the stamp reaches the write
+
+  const realSleep = realStore._putRetry.sleep;
+  realStore._putRetry.sleep = async () => {};
+  const routed = global.fetch;
+  let planted = false;
+  let bytesAfterPlant = null;
+  global.fetch = async (url, opts) => {
+    if (!planted && opts && opts.method === "PUT" && String(url).includes(encodeURI(path))) {
+      planted = true;
+      gh.seed(STAMP_REPO, path, null); // present, new sha, content is the JSON literal null
+      bytesAfterPlant = gh._repoMap(STAMP_REPO).get(path).content;
+      return { status: 409, ok: false, json: async () => ({}), text: async () => "mock: moved" };
+    }
+    return routed(url, opts);
+  };
+  try {
+    const res = makeRes();
+    await stamp.handleStamp(makeReq({ method: "POST", body: { sha256: "e".repeat(64) }, headers: { "x-forwarded-for": "203.0.113.10" } }), res);
+    assert.equal(planted, true, "the fixture never planted the damage; the test proves nothing");
+    assert.equal(res._status, 503, `a present-but-null day counter must refuse the stamp: ${res._status} ${JSON.stringify(res._body)}`);
+    assert.equal(gh.putLog.filter((p) => p.path === path).length, 0, "a write landed on the day counter");
+    assert.equal(gh._repoMap(STAMP_REPO).get(path).content, bytesAfterPlant, "the day counter bytes changed");
+  } finally {
+    global.fetch = routed;
+    realStore._putRetry.sleep = realSleep;
+  }
+});
+
 // ------------------------------------------------------------------- listings
 
 test("LISTINGS / DAMAGED vs EMPTY: a 200 that is not a listing throws; a 404 is still an honest empty directory", async () => {
@@ -356,6 +389,46 @@ test("PIN / POINTER DAMAGED MID-WRITE: a pointer that turns unreadable between t
     assert.equal(planted, true, "the fixture never planted the damage; the test proves nothing");
     assert.deepEqual(gh.read(PIN_REPO, head), damaged,
       `the rebuild hook read a damaged pointer as seq 0 and wrote over it (handler answered ${res._status})`);
+  } finally {
+    global.fetch = routed;
+    realStore._putRetry.sleep = realSleep;
+  }
+});
+
+test("PIN / POINTER DAMAGED MID-WRITE (content = null): a pointer whose stored JSON is the literal null is refused by name, not rebuilt over as a 404", async () => {
+  // The 404 and the present-but-null read used to reach the rebuild hook as
+  // the same value (lib/_store.js passed `fresh ? fresh.json : null`), so a
+  // latest.json holding `null` read as "gone" and was overwritten at seq 0.
+  const ns = "demo-race-null";
+  const head = `pins/${ns}/latest.json`;
+  gh.seed(PIN_REPO, head, goodPin(ns, { rows: 10, seq: 1 }));
+  gh.seed(PIN_REPO, `pins/${ns}/00000001.json`, goodPin(ns, { rows: 10, seq: 1 }));
+
+  const realSleep = realStore._putRetry.sleep;
+  realStore._putRetry.sleep = async () => {};
+  const routed = global.fetch;
+  let planted = false;
+  let bytesAfterPlant = null;
+  global.fetch = async (url, opts) => {
+    if (!planted && opts && opts.method === "PUT" && String(url).includes(encodeURI(head))) {
+      planted = true;
+      gh.seed(PIN_REPO, head, null); // present, new sha, content is the JSON literal null
+      bytesAfterPlant = gh._repoMap(PIN_REPO).get(head).content;
+      return { status: 409, ok: false, json: async () => ({}), text: async () => "mock: moved" };
+    }
+    return routed(url, opts);
+  };
+  try {
+    const res = await call(pinHandler, {
+      method: "POST", headers: { authorization: "Bearer testkeyA" },
+      body: { namespace: ns, rows: 11, chain: "deadbeef" },
+    });
+    assert.equal(planted, true, "the fixture never planted the damage; the test proves nothing");
+    assert.equal(res._status, 503, `a present-but-null pointer must be refused, not answered ${res._status} ${JSON.stringify(res._body)}`);
+    assert.equal(res._body.ok, false);
+    assert.equal(res._body.reason, "not_a_json_object", "the refusal names its reason");
+    assert.equal(gh.putLog.filter((p) => p.path === head).length, 0, "a write landed on the pointer");
+    assert.equal(gh._repoMap(PIN_REPO).get(head).content, bytesAfterPlant, "the pointer bytes changed");
   } finally {
     global.fetch = routed;
     realStore._putRetry.sleep = realSleep;

@@ -92,18 +92,20 @@ async function putSeqRecord(namespace, seqName, record, message) {
 // still recorded at its own numbered path; nothing is lost and nothing is
 // clobbered. Only a strictly-behind latest is advanced.
 function latestPointerRebuild(record) {
-  return (freshJson) => {
-    // 0 only for a pointer that is verifiably GONE (putFile passes null for a
-    // 404). A pointer that is present but unreadable used to read as seq 0 and
-    // get overwritten; now this throws and the write fails instead
-    // (lib/_verdict.js).
+  return (freshRead) => {
+    // `freshRead` is the whole store read putFile made: null ONLY for a 404,
+    // {json, sha} for anything present. It is judged as-is. 0 only for a
+    // pointer that is verifiably GONE. A pointer that is present but
+    // unreadable (including one whose JSON is the literal null, which the
+    // bare-json hook of f12d0ed read as a 404) throws a RedVerdictError and
+    // the handler refuses the pin (503) instead of writing over it.
+    const what = `pins/${record.namespace}/latest.json`;
     const fresh = verdict.requireGreen(
-      verdict.judgePin(freshJson === null ? null : { json: freshJson }, {
-        what: `pins/${record.namespace}/latest.json`, namespace: record.namespace,
-      }),
-      "latest pointer rebuild"
+      verdict.judgePin(freshRead, { what, namespace: record.namespace }),
+      "latest pointer rebuild",
+      { what }
     );
-    const freshSeq = verdict.isEmpty(fresh) ? 0 : freshJson.seq;
+    const freshSeq = verdict.isEmpty(fresh) ? 0 : freshRead.json.seq;
     if (freshSeq >= record.seq) return null; // abandon — never rewind the pointer
     return record;
   };
@@ -842,6 +844,16 @@ module.exports = async (req, res) => {
   } catch (err) {
     if (err && err.wedged) {
       return res.status(409).json(orphanedSeqBody(namespace, err.seqName));
+    }
+    // A red verdict thrown from inside the write (the latest-pointer rebuild
+    // hook found the pointer present but unreadable after it moved) is a
+    // refusal with a named reason, not a generic store failure.
+    if (err instanceof verdict.RedVerdictError) {
+      const refused = verdict.refusal(err.verdict, "pin");
+      refused.body.note =
+        "the namespace's latest pointer moved during this write and what it now holds cannot be read as a pin " +
+        "record, so the pointer was NOT written over and the charge was refunded.";
+      return res.status(refused.status).json(refused.body);
     }
     // Generic store failure. err.message is deliberately short and carries no
     // upstream response body — api/_store.js logs the detail server-side.
