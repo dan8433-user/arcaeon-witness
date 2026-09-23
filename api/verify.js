@@ -66,6 +66,38 @@ function seqName(seq) {
   return String(seq).padStart(8, "0");
 }
 
+// W-3: rows is a decimal integer, as a JSON integer or a string of ASCII
+// digits only. "0x0a", "1e1", " 10 ", "10.0" are refused, never reinterpreted.
+function parseRows(raw) {
+  if (typeof raw === "number") return Number.isSafeInteger(raw) ? raw : NaN;
+  if (typeof raw === "string" && /^[0-9]{1,15}$/.test(raw)) return Number(raw);
+  return NaN;
+}
+
+// W-1 / W-2: a stored record only counts for the path it sits at when its
+// own body says the same thing. The path is where we looked; the record has
+// to agree. A disagreement is a store integrity problem, never a yes.
+function recordMismatch(rec, ns, expectedSeq) {
+  if (!rec || typeof rec !== "object" || Array.isArray(rec)) return "record_not_an_object";
+  if (rec.namespace !== ns) return "record_namespace_mismatch";
+  if (expectedSeq !== undefined && rec.seq !== expectedSeq) return "record_seq_mismatch";
+  return null;
+}
+
+function integrityBody(reason, where, historyUrl) {
+  return {
+    status: 409,
+    body: {
+      ok: false,
+      witnessed: null,
+      pin: null,
+      reason,
+      error: `the record at ${where} does not match its path; this is a store integrity problem, not a witness answer`,
+      history: historyUrl,
+    },
+  };
+}
+
 function rawRecordUrl(ns, seq) {
   return `${RAW_BASE}/pins/${ns}/${seqName(seq)}.json`;
 }
@@ -83,8 +115,8 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   }
 
   const rowsRaw = rawRows;
-  const rows = Number(rowsRaw);
-  if (!Number.isInteger(rows) || rows < 1 || String(rowsRaw).trim() === "") {
+  const rows = parseRows(rowsRaw);
+  if (!Number.isInteger(rows) || rows < 1) {
     return { status: 400, body: { error: "rows must be a positive integer" } };
   }
 
@@ -130,6 +162,8 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
   }
 
   const latest = cur.json;
+  const latestBad = recordMismatch(latest, ns);
+  if (latestBad) return integrityBody(latestBad, `pins/${ns}/latest.json`, historyUrl);
 
   function witnessedResponse(record, isCurrentHead) {
     const cadenceFields = store.computeCadenceFields(record);
@@ -208,6 +242,8 @@ async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
         continue;
       }
       const rec = got.json;
+      const recBad = recordMismatch(rec, ns, seq);
+      if (recBad) return integrityBody(recBad, `pins/${ns}/${seqName(seq)}.json`, historyUrl);
       if (Number.isInteger(rec.rows) && rec.rows === rows) {
         if (String(rec.chain).toLowerCase() === chainLower) {
           return { status: 200, body: witnessedResponse(rec, false) };
