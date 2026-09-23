@@ -57,3 +57,31 @@ A hundred contents reads per render (`MAX_RECORD_READS`) bounds the GitHub API c
 ## D12. A record filed under one namespace but targeting another is evidence for neither
 
 `checks/pin/<ns>/` is a filing convention; `target.ref` is the claim. When they disagree the record is counted as `misfiled` on the namespace it was filed under and ignored for both. Test: `a misfiled record is not evidence for its target either`.
+
+# Slice 2 (2026-09-22, branch `audit-state-slice2`)
+
+Same tie-break: a state is never upgraded without evidence. Tests are in `test/audit_state_slice2.test.js`.
+
+## D13. Outside records arrive by URL through the status reader, not through an endpoint
+
+The design (B8, "Out of slice 1") had a stranger submit a URL that we fetch, re-verify and commit. `api/` holds 12 functions, the Vercel Hobby cap (counted: badge, balance, credit, distill, fulfill, health, latest, pin, renew, status, stripe-webhook, verify), so there is no room for `api/check.js`. Instead the operator lists the stranger's own public location in `WITNESS_CHECK_SOURCES` and `lib/_audit_status.js` reads its `checks/**` on every render, read-only. Nothing is committed to the pins repo, so the part A log does not yet contain these records (a stranger can still hold their own signed file, which is the B4 defense). Test: `api/ is at its 12-function cap`.
+
+## D14. The key decides, not the location
+
+A record fetched from a stranger's URL is judged exactly like one in our repo. A record signed by a key in `OPERATOR_KEYS.json` is SELF-CHECKED at most wherever it was fetched from, and with the declaration unreadable nothing reaches CHECKED (D4 unchanged). A source cannot declare keys or withdraw tools; only our repo's two files can. Tests: `SOURCES NEVER UPGRADE`.
+
+## D15. An unlistable source blanks every namespace, not just "its" namespaces
+
+When a source cannot be listed (HTTP error, truncated tree, budget spent, refused URL), we do not know which namespaces it holds evidence about, and one of those could be a BROKEN. So every namespace renders NOT FULLY READ, with a note naming the source. The cost is real: one dead stranger repo takes every state off the page until the operator removes it from the env var. That is the chosen cost, because the alternative lets a failed read hide a red. A listed record that is not read (budget, size cap, read error) blanks only its own namespace. Tests: `SOURCES FAIL CLOSED`, `SOURCES BUDGET`, `BREAK ARM SOURCES BUDGET`.
+
+## D16. An outside BROKEN from a listed source goes red without being re-run
+
+B9 question 2 (re-run a BROKEN from its public inputs before it flips the badge) is still open for Daniel. Slice 1 could defer it because only the operator committed records; slice 2 lets a listed stranger's BROKEN reach the page. The choice: it goes red, per B3 ("any verifiable BROKEN, from anyone"). The operator's control is the source list itself; a source is listed only after its owner's records have been read by a person. Test: `a source BROKEN goes red`.
+
+## D17. The daily self-check refuses an undeclared key
+
+`tools/self_check_daily.js` will not build a record unless its signing key is in the OPERATOR_KEYS document it is handed. A self-check signed by an undeclared key would read as an outside check, which is our own look painted green (B5, B10 sock puppets). The break arm shows exactly that green appearing when the fence is bypassed. Tests: `DAILY FENCE`, `BREAK ARM DAILY`.
+
+## D18. The JSON twin prints no state for a namespace the page would not derive
+
+With the flag on, `/api/status.json` carries `audit` per namespace and a top-level `audit` summary, both from the same `gatherAuditStates` the page uses. A namespace the page renders NOT FULLY READ carries `state: "NOT_FULLY_READ"` and no counts, dates or keys, so a machine reader cannot pick a state out of a render the page refused to derive. Flag off: no `audit` key and no read of `checks/`. Tests: `JSON FLAG OFF`, `JSON FLAG ON`, `a NOT FULLY READ namespace carries no state word at all`.
