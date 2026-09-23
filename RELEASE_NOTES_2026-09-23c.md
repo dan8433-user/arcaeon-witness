@@ -67,7 +67,7 @@ Break arms, each run against the full suite on this tree and restored byte for b
 | Forged proof | `lib/_merkle.js` `verifyInclusion` accepts any proof | **39** |
 | Rewritten store | `lib/_stamp.js` `recordMatches` always true (a stamp stored at another record's path) | **6** (the S-1 CONTRACT 409 `record_mismatch` cases) |
 | Rewritten store | `lib/_verdict.js` `judgeRead` returns null (a present-but-damaged read goes on) | **230** |
-| Supersede | any file at `superseded/<ns>.json` is taken as a supersede record | **6** (every fail-direction case) |
+| Supersede | any file at `superseded/<ns>.json` is taken as a supersede record | **6** (fail-direction cases; the non-JSON case is not among them) |
 | Supersede | superseded rows stay in the totals | **2** |
 
 (Arm counts differ from release two's because the suite grew: derive-always-CHECKED was 29 at 646 tests, judgeRead-null 166.)
