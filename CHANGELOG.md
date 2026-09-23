@@ -1,5 +1,13 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 — release tree three: slice 2 + vocabulary merged; `velouria-selftest` superseded as a test namespace on the audit surfaces (branch `release-candidate-2026-09-23b`, local only, NOT deployed, flag still off)
+
+- **Merged** `audit-state-slice2` (`f4ab63d`) and `vocabulary-2026-09-23` (`9eac76a`). Two conflicts, both in wording: this file (both entries kept) and `lib/_audit_status.js` (slice 2's outside-sources comment and partial cell kept, with the vocabulary pass's COULD NOT LOOK on the human text). The JSON twin's machine value `state: "NOT_FULLY_READ"` and its `badge` text are unchanged: the vocabulary pass moves no JSON field and no exit code.
+- **Superseded test namespaces (the helm's call on design B10 item 5).** `lib/_audit_status.js` now reads `superseded/<ns>.json` from the same tree listing, flag on only. A namespace with a readable v1 supersede record for itself keeps its row and its DERIVED state (no sixth state word; a BROKEN is permanent, D1), gains a grey "superseded test namespace" tag, and is left out of the headline and the BLIND-first aggregate, with one sentence in the summary naming it, its state, the record and the reason. JSON: the namespace keeps `state` and gains `superseded` (`counted: false`); the summary gains `counts.superseded_test` and `superseded_test_namespaces`. A supersede file that is present but not a readable supersede record for that namespace is ignored and noted, so the row stays COUNTED. D19.
+- **`tools/install_self_check_task.ps1`**: the daily self-check as a scheduled task (03:30, after the checkpoint and the anchor), modelled on velouria's `install_logtree_checkpoint_task.ps1`. Not registered. It writes records to a local out dir; nothing publishes them into `checks/` yet, which the header says.
+- **Tests:** `test/audit_superseded.test.js` (11). Suite 678 after the merges, 689 now, 0 fail, 0 todo. Break arms: accepting any supersede file fails 6; keeping superseded rows in the totals fails 2.
+- **Flag off:** `/status` and `/api/status.json` byte-identical to production (`8242bfa`) on a healthy and a mixed store, including with `checks/` and `superseded/` files present in the store (the flag-off render reads neither: same 22 store reads).
+
 ## 2026-09-23 — vocabulary pass: the note says VERIFIED / BROKEN / COULD NOT LOOK (branch `vocabulary-2026-09-23`, local only, NOT deployed)
 
 The Fable audit (2026-09-22, section 1) found four verdict languages across the Arcaeon tools; `witnessed: null`, UNDETERMINED and COULD NOT LOOK were three names for "did not get to look". The helm's decision: one word per meaning, on every surface.
