@@ -223,3 +223,50 @@ checks/pin/velouria-selftest/2026-09-23T13-40-45Z-d751d8aa.json   (BROKEN)
 - That the token in velouria's `.env` still has contents-write on the pins repo (the genesis checkpoint used it; not re-checked, since checking means a network call with the token).
 - The `rerun` field of today's records names a local path (`C:/Users/USER/velouria/projects/online_business/verifier_two/verify.py`). Publishing puts that string in a public repo: it shows a Windows user folder name and repeats the unpublished-verifier problem under "Before deploying". Not changed: the records are signed, and changing the field means changing the writer and re-running it.
 - The session scratchpad holds two other record sets: 06:13:45Z today (same key) and 2026-09-22 19:45:00Z (a different key, `28865cfd`, not in `OPERATOR_KEYS.json`; the publisher would refuse it). Only the 13:40:45Z set is the one these notes name. A folder holding two runs of one day publishes both; the scheduled task's `-OutDir` holds only the task's own runs.
+
+## Addendum: the two go-live blockers fixed (reader budget, local path in `rerun`); nothing published, nothing deployed
+
+Commit `d903748` (code and tests) plus the commit that adds this addendum (docs). Still local only: no push, no deploy, no env write, task not registered, nothing in the pins repo.
+
+### 1. The reader reads each key's newest records (D20)
+
+`lib/_audit_status.js`, behind the same flag. Per namespace the record files are grouped by checker key (the `keyid8` in the file name), ordered newest first by the file-name timestamp, and the newest 3 of each key are read. Older same-key records are superseded (each check is a full re-run over the whole history) and do **not** make a namespace COULD NOT LOOK; the cell says "N older records not read: each checker key's newest 3 were, and a key's newer check supersedes its older ones", and the JSON twin carries `records_older_not_read`. Global cap `recordReadCap(n) = n * 13` (104 for 8 namespaces), a safety net only.
+
+**One deliberate departure from the brief:** slots are per key, not per namespace. With K per namespace, our own daily self-check would push an outside BROKEN out of the read set within 3 days (D1 broken by our own schedule). Residual, pinned by a test and written up in D20: a key's own BROKEN followed by 3 later records from the same key is no longer read. If the helm wants D1 literal, the fix is the result in the file name (nothing is published yet, so the path scheme is still free) or a BROKEN index.
+
+Measured on the mock store: 8 namespaces x 30 days (4 own-key only, 4 with an outside key as well) all derive, 4 SELF-CHECKED and 4 CHECKED, 0 COULD NOT LOOK, 36 reads; 8 x 60 days, all SELF-CHECKED, 24 reads.
+
+### 2. `rerun` is portable (D21)
+
+`lib/_check_record.js` refuses a backslash, a drive letter, or a home-directory path in `rerun` (`rerun_not_portable`) at sign and verify; the publisher checks it again in pre-flight. The writer (`tools/check_and_sign.js`, used by `self_check_daily.js`) writes `PUBLIC_VERIFIER` = `verify.py` instead of the local path. **Verifier two is not published anywhere** (pins repo `main` and `operator-keys-2026-09-23` trees, its README, this repo's docs, the design page all checked), so `verify.py` is the placeholder the page's `rerunCommand` already printed; when it has a public home, that one constant changes. The "Before deploying" item about the door painted on a wall still stands.
+
+Writer re-run today into the session scratchpad (`scratchpad/self_check_out_rc3b_fix`, not the pins repo): 8 records at 14:44:51Z, 7 VERIFIED, 1 BROKEN (`velouria-selftest`), 0 skipped. Every `rerun` now reads `py verify.py https://github.com/dan8433-user/arcaeon-witness-pins --json > out.json && node tools/check_and_sign.js --from-json out.json --verify-py verify.py --repo https://github.com/dan8433-user/arcaeon-witness-pins --namespace <ns> --key your.pem`. `publish_self_checks.js --dry-run --date 2026-09-23` on them: 8 paths, 13935 bytes, exit 0:
+
+```
+checks/pin/test-freeplan-smoke/2026-09-23T14-44-51Z-d751d8aa.json
+checks/pin/velouria-audit-20260819/2026-09-23T14-44-51Z-d751d8aa.json
+checks/pin/velouria-cadence-verify/2026-09-23T14-44-51Z-d751d8aa.json
+checks/pin/velouria-canon/2026-09-23T14-44-51Z-d751d8aa.json
+checks/pin/velouria-demo/2026-09-23T14-44-51Z-d751d8aa.json
+checks/pin/velouria-metersmoke-1786722009/2026-09-23T14-44-51Z-d751d8aa.json
+checks/pin/velouria-metersmoke-final/2026-09-23T14-44-51Z-d751d8aa.json
+checks/pin/velouria-selftest/2026-09-23T14-44-51Z-d751d8aa.json   (BROKEN)
+```
+
+The same dry run on the earlier 13:40:45Z set refuses all 8 as `rerun_not_portable (rerun)`, exit 2: those records must never be published. The task's `-OutDir` (`%USERPROFILE%\.arcaeon\self_check_out`) does not exist yet, so no old record sits in its 7-day window.
+
+### Tests and arms
+
+`npm test`: **713 tests, 713 pass, 0 fail** (701 before; +8 `test/audit_reader_newest.test.js`, +4 `test/rerun_portable.test.js`; the old budget test now fills the cap with many keys). Flag-off: 8 namespaces x 30 days of records change nothing on `/status` or `/api/status.json` (same before/after pattern as the supersede test, clock text masked), and no `checks/` path is read.
+
+Break arms, each restored by `git checkout` (tree clean after): oldest-first within a key fails **4**; per-namespace slots (one key for all) fails **4**; the `rerun` fence removed from `lib/_check_record.js` fails **1** (the publisher's own pre-flight still refuses, by design); the writer using a local path fails **7**.
+
+### Export
+
+`C:/Users/USER/velouria/bridge/tmp/witness_release_2026-09-23c` deleted and re-made from the branch tip that carries this addendum, with `.vercel/project.json`, as in "Deploy" above.
+
+### Still not confirmed
+
+- The per-key residual above is a D1 reading the helm has not ruled on.
+- Outside sources (`WITNESS_CHECK_SOURCES`) still read every listed record under the 40-fetch budget; a stranger who publishes daily fills it in about 40 days. Unset today, so not a go-live blocker; not changed.
+- Everything in the earlier "Still not confirmed" list stands (no live GitHub call, token scope unchecked).
