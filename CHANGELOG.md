@@ -1,5 +1,14 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 — vocabulary pass: the note says VERIFIED / BROKEN / COULD NOT LOOK (branch `vocabulary-2026-09-23`, local only, NOT deployed)
+
+The Fable audit (2026-09-22, section 1) found four verdict languages across the Arcaeon tools; `witnessed: null`, UNDETERMINED and COULD NOT LOOK were three names for "did not get to look". The helm's decision: one word per meaning, on every surface.
+
+- **`api/verify.js`: no JSON field moves.** `witnessed` is still `true` / `false` / `null`, every `reason`, every status code and every other field is unchanged, so no client breaks. The human text beside them now opens with the word: the `note` (or, with no note, the `error`) starts `VERIFIED: ` for `true`, `BROKEN: ` for `false` (the record contradicts the head asked about), `COULD NOT LOOK: ` for `null` and for a `409` / `5xx` with a reason. A `400` (the question was malformed) carries no word. Done in one wrapper (`speak()` around the renamed `judgeItem()`), so single and bulk answers get the same words.
+- **`lib/_audit_status.js` (behind `WITNESS_AUDIT_STATE`, off):** "NOT FULLY READ" is now COULD NOT LOOK, and "N attempted checks could not complete" is "N attempted checks: COULD NOT LOOK". The state words (BLIND / SELF-CHECKED / CHECKED / STALE / BROKEN) and the check-record `result` values are unchanged.
+- **README:** the tri-state paragraph names the word beside each value, adds `history_unreadable`, and says a 503 / 409 with a reason is a third answer, not an outage.
+- **Tests:** new `test/verify_vocabulary.test.js` (6) pins the word AND the unchanged field for true, false, null, a 503 refusal, a 400 (no word) and no double prefix; `test/audit_status_page.test.js` asserts the new words. Suite 646 before, 652 after, 0 fail, 0 todo.
+
 ## 2026-09-22 — audit state slice 2: operator keys, daily self-check, outside records by URL, JSON twin (branch `audit-state-slice2` from `release-candidate-2026-09-23b`, local only, NOT deployed, flag still off)
 
 Slice 1 (live behind `WITNESS_AUDIT_STATE` unset) could render BLIND and SELF-CHECKED but nothing let CHECKED happen: no key declaration existed, no self-check writer existed, and an outside record could only arrive by a commit of ours. Design page B10 addendum; interpretive choices D13 to D18 in `DISAGREEMENTS_audit_state.md`.

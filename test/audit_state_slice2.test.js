@@ -325,7 +325,7 @@ test("SOURCES FAIL CLOSED: an unlistable, truncated, or refused source leaves EV
     const audit = await gather(["acme-prod", "velouria-demo"], src, { env });
     for (const ns of ["acme-prod", "velouria-demo"]) {
       assert.equal(audit.byNs[ns].partial, true, `${label}: ${ns}`);
-      assert.ok(auditStatus.renderAuditCell(audit.byNs[ns]).includes("NOT FULLY READ"), label);
+      assert.ok(auditStatus.renderAuditCell(audit.byNs[ns]).includes("COULD NOT LOOK"), label);
       assert.ok(!auditStatus.renderAuditCell(audit.byNs[ns]).includes("UNALTERED"), label);
     }
     assert.ok(audit.notes.some((n) => /could not be listed|was refused/.test(n)), label);

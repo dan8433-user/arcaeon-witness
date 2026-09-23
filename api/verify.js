@@ -111,7 +111,39 @@ function rawRecordUrl(ns, seq) {
 // mode can use it. Every failure mode of the STORE returns a body. The one
 // thing that throws is a programming error: building an ok:true body without
 // a green verdict in hand (lib/_verdict.js) — deliberately, fail closed.
+// Vocabulary pass (2026-09-23). Every JSON field stays exactly as it was:
+// `witnessed` is still true / false / null, status codes and `reason` values
+// are unchanged, so no client breaks. What changes is the human text beside
+// them: the note (or, with no note, the error) now opens with the one word a
+// person reads on every Arcaeon surface. true is VERIFIED, false is BROKEN (the
+// record contradicts the head asked about), null is COULD NOT LOOK, and so is
+// a 409 / 5xx with a reason: a third answer, not an outage. A 400 is a usage
+// error about the question, not an answer, and carries no word.
+const WORD_FOR_WITNESSED = new Map([[true, "VERIFIED"], [false, "BROKEN"], [null, "COULD NOT LOOK"]]);
+
+function verdictWord(status, body) {
+  if (Object.prototype.hasOwnProperty.call(body, "witnessed") && WORD_FOR_WITNESSED.has(body.witnessed)) {
+    return WORD_FOR_WITNESSED.get(body.witnessed);
+  }
+  if (status === 409 || status >= 500) return "COULD NOT LOOK";
+  return null;
+}
+
+function speak(result) {
+  const body = result && result.body;
+  if (!body || typeof body !== "object" || Array.isArray(body)) return result;
+  const word = verdictWord(result.status, body);
+  if (!word) return result;
+  const key = typeof body.note === "string" ? "note" : typeof body.error === "string" ? "error" : null;
+  if (key && !body[key].startsWith(word + ":")) body[key] = `${word}: ${body[key]}`;
+  return result;
+}
+
 async function verifyItem(rawNs, rawRows, rawChain, rawDigest) {
+  return speak(await judgeItem(rawNs, rawRows, rawChain, rawDigest));
+}
+
+async function judgeItem(rawNs, rawRows, rawChain, rawDigest) {
   const ns = rawNs || "";
   if (!store.NS_RE.test(ns)) {
     return { status: 400, body: { error: "ns must match [a-z0-9-]{1,64}" } };

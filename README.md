@@ -417,20 +417,27 @@ A scan that exhausts the cap without an answer says so honestly
 
 **`witnessed` is tri-state** (since 2026-08-22; before that, every miss said
 `false` — an external re-run by ColonistOne caught the gap and the changelog
-records it). `true` = this exact head is in the record. `false` = the record
+records it). The field is what a client reads; the word is what a person reads,
+and since the 2026-09-23 vocabulary pass the `note` opens with it, the same
+three words every Arcaeon checker prints. `true` is **VERIFIED**: this exact
+head is in the record. `false` is **BROKEN**: the record
 actively contradicts it: `rows_match_chain_mismatch` (a record exists at that
 rows count with a *different* chain — not the accepted head),
 `rows_never_witnessed` (that rows count was skipped by an advance and was
 never itself a head), `not_found_in_history` (the scan reached the start of
-history without a match — conclusive). `null` = the witness has **no basis to
-decide** and refuses to assert a negative it didn't check:
+history without a match — conclusive). `null` is **COULD NOT LOOK**: the
+witness has **no basis to decide** and refuses to assert a negative it didn't check:
 `no_pin_recorded_for_namespace` (nothing to decide against),
 `exceeds_current_head` (ahead of the record — not witnessed *yet*, not
 refuted; `accepted_head` rides in-band), `scan_bound_reached` (the capped
 scan ran out before an answer — older records may exist and were NOT
-checked). Every response is HTTP `200` — `witnessed` is the signal, not the
-status code, the same way this is a yes/no/can't-say question, not a
-resource fetch.
+checked), `history_unreadable` (a record in the scanned range is missing or
+unreadable and could have been the one asked about). Every one of those is
+HTTP `200` — `witnessed` is the signal, not the status code, the same way this
+is a yes/no/can't-say question, not a resource fetch. A stored record that is
+present and cannot be read as the record it should be is refused with a `503`
+and a named `reason` (a record filed at the wrong path, `409`); both are also
+COULD NOT LOOK, a third answer and not an outage.
 
 A historical (superseded) match sets `is_current_head:false` and its
 cadence fields describe that old record, not the namespace's live status —
