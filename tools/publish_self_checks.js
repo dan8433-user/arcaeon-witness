@@ -6,7 +6,7 @@
 //
 //   node tools/publish_self_checks.js --dir OUT --operator-keys OPERATOR_KEYS.json
 //        (--dry-run | --publish) [--date YYYY-MM-DD] [--days N] [--show-bytes]
-//        [--env-file PATH] [--now ISO] [--break-battery]
+//        [--env-file PATH] [--now ISO] [--break-battery] [--break-plants [FENCE]]
 //
 // THE READER IS THE CONTRACT. lib/_audit_status.js lists the repo tree,
 // takes the blobs matching checks/(pin|observation)/<ns>/<file>.json, one
@@ -36,6 +36,16 @@
 //   defined = parsed from this file's source, called = recorded by the runner).
 //   K > 0 is REFUSED, exit 2. --break-battery adds one never-called check to
 //   the source the inventory reads, to show the red.
+//   Defined and called cannot see a fence that ran and saw nothing, so every
+//   run also PLANTS (lib/_battery_plants.js): each fence gets one in-memory
+//   record it alone must refuse, and the whole battery gets one good record
+//   it must pass. It prints `plants: P planted, Q caught, R missed [fences]`
+//   right after the battery line; R > 0 prints `REFUSED: plants: ...` naming
+//   the fence and the plant, exit 2. Plants are never written anywhere and
+//   never join the records to publish. --break-plants FENCE (default
+//   check_record_verifies) swaps that fence for a blind one of the same name,
+//   for the real records and the plants alike, to show the red: the battery
+//   line stays green, the plants line does not.
 //
 // Create-only and idempotent. Live mode GETs every target path first:
 // absent -> created; present with the same git blob sha -> already
@@ -61,6 +71,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const cr = require("../lib/_check_record.js");
 const battery = require("../lib/_battery_inventory.js");
+const plantsLib = require("../lib/_battery_plants.js");
 
 const REPO = "dan8433-user/arcaeon-witness-pins";
 const BRANCH = "main";
@@ -228,6 +239,8 @@ function planPublish({ dir, dates, ownKeys, nowSeconds, checks = CHECKS }) {
 // The break arm's extra check: a real function, defined in the source the
 // inventory reads (appended, never written to disk) and never called.
 const BREAK_ARM_SOURCE = "\nfunction check_break_arm_never_called(ctx) {\n  return null;\n}\n";
+// The plants' break arm blinds this fence unless told which.
+const BREAK_PLANTS_DEFAULT = "check_record_verifies";
 
 function readToken(envFile) {
   for (const line of fs.readFileSync(envFile, "utf-8").split(/\r?\n/)) {
@@ -335,6 +348,9 @@ function parseArgs(argv) {
     else if (k === "--publish") a.publish = true;
     else if (k === "--show-bytes") a.showBytes = true;
     else if (k === "--break-battery") a.breakBattery = true;
+    else if (k === "--break-plants") {
+      a.breakPlants = i + 1 < argv.length && !argv[i + 1].startsWith("--") ? argv[++i] : BREAK_PLANTS_DEFAULT;
+    }
     else if (k === "--help" || k === "-h") a.help = true;
     else throw new Error(`unknown argument ${k}`);
   }
@@ -346,7 +362,7 @@ function parseArgs(argv) {
 async function main(argv, io = { out: (s) => process.stdout.write(s), err: (s) => process.stderr.write(s) }, deps = {}) {
   const a = parseArgs(argv);
   if (a.help) {
-    io.out(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 54).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
+    io.out(fs.readFileSync(__filename, "utf-8").split("\n").filter((l) => l.startsWith("//")).slice(0, 64).map((l) => l.replace(/^\/\/ ?/, "")).join("\n") + "\n");
     return 0;
   }
   if (!a.dir) throw new Error("--dir is required (the self-check --out directory)");
@@ -361,13 +377,23 @@ async function main(argv, io = { out: (s) => process.stdout.write(s), err: (s) =
   const dates = datesFor(date, a.days);
   const ownKeys = declaredKeys(JSON.parse(fs.readFileSync(a.operatorKeys, "utf-8")));
 
-  const { files, refused, called } = planPublish({ dir: a.dir, dates, ownKeys, nowSeconds });
+  // The battery this run uses: CHECKS, or a test's, or with one fence blinded.
+  let checks = deps.checks || CHECKS;
+  if (a.breakPlants) checks = plantsLib.blindFence(checks, a.breakPlants);
+  const { files, refused, called } = planPublish({ dir: a.dir, dates, ownKeys, nowSeconds, checks });
   const span = dates.length === 1 ? dates[0] : `${dates[dates.length - 1]}..${dates[0]}`;
   for (const r of refused) io.err(`REFUSED  ${r.rel}  ${r.reason}${r.field ? ` (${r.field})` : ""}\n`);
   // The battery line, every run, before any verdict on the day.
   const source = (deps.batterySource || batterySource)() + (a.breakBattery ? BREAK_ARM_SOURCE : "");
   const inv = battery.inventory({ source, called });
   io.err(`${inv.line}\n`);
+  // The plants line, every run, right after it. Plants are judged in memory
+  // and never join `files`.
+  const pl = plantsLib.runPlants({ checks, nowSeconds, plants: deps.plants });
+  io.err(`${pl.line}\n`);
+  if (!pl.ok) {
+    io.err(`REFUSED: plants: ${plantsLib.describeMissed(pl.missed)}; a fence that does not refuse its planted record cannot be trusted to refuse a real one. Nothing published.\n`);
+  }
   if (refused.length) {
     io.err(`${refused.length} record(s) for ${span} failed validation; nothing published.\n`);
     return 2;
@@ -383,6 +409,7 @@ async function main(argv, io = { out: (s) => process.stdout.write(s), err: (s) =
     io.err(`REFUSED: battery: ${why}; a fence that did not run cannot pass a record. Nothing published.\n`);
     return 2;
   }
+  if (!pl.ok) return 2;
 
   if (a.dryRun) {
     let total = 0;
@@ -420,7 +447,7 @@ if (require.main === module) {
 }
 
 module.exports = {
-  REPO, BRANCH, API, OPERATOR_KEYS_REL, CHECKS, BREAK_ARM_SOURCE, batterySource,
+  REPO, BRANCH, API, OPERATOR_KEYS_REL, CHECKS, BREAK_ARM_SOURCE, BREAK_PLANTS_DEFAULT, batterySource,
   sha256hex, gitBlobSha, declaredKeys, datesFor, collectRecords, validateRecordFile,
   planPublish, publishPlan, readToken, parseArgs, main, Refused,
 };
