@@ -1,5 +1,14 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-23 (night): the locked Arcaeon mark on every witness page (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
+
+- **Why.** The mark inventory (velouria `bridge/tmp/MARK_EVERYWHERE_INVENTORY_2026-09-23.md`) found no witness page carrying the mark: `lib/_page.js` said there was "no logo asset" and fell back to a text wordmark, and the reconcile page had no branding at all. arcaeon.io got the locked C2 mark the same day; this is the witness half.
+- **`lib/_brand_mark.js` (new).** The one copy of the mark here: `markSvg(px, ground)`, `headerMark(ground)` (30 px), `footerMark(ground)` (20 px plus "arcaeon.io"), `FAVICON_LINK`. Geometry is `brand/arcaeon_mark_C2.svg` exactly (gold #e0a73c outer stroke 9, inner stroke 6.5, #e8eef3 on dark and #13233A on light, miter joins, square caps). Grounds `dark`, `light`, `dark-auto`, `light-auto`: the auto ones flip the inner chevron with the page's own colour-scheme media query. Twin of arcaeon.io's `brand_mark.py`.
+- **Pages.** the /status page, the navy shell every fulfill and balance page renders through (`lib/_page.js` `pageShell`): header mark 30 px beside the wordmark, footer mark 20 px plus "arcaeon.io", and `<link rel="icon" type="image/svg+xml" href="/favicon.svg">` in the head. The shell keeps its `<div class="wordmark">Arcaeon</div>` byte for byte, now inside a centred row with the mark.
+- **`favicon.svg` (new, deployment root).** A byte copy of arcaeon.io's favicon: the mark on navy #13233A with 20 percent rounded corners. It sits at the root, next to PRACTICES.md, and not in a `public/` folder on purpose: with no framework preset Vercel would take a `public/` folder as the whole output directory and stop serving the root files (/PRACTICES.md is served from the root today). The new test pins that no `public/` exists.
+- **Not changed:** no JSON, no API response, no verdict text, no vocabulary word. The welcome email (`lib/_welcome_email.js`) is not branded: it is an email, not a served page, and mail clients such as Gmail strip inline SVG.
+- **Tests:** `test/brand_mark.test.js` (new, same file in both witness trees): the helper's geometry on each ground; favicon.svg's rect and paths; and every served HTML page carries the outer and inner mark paths exactly twice (header + footer), one 30 px and one 20 px mark in that order, "arcaeon.io" in the footer, and the favicon link exactly once, in the head. Suite 730 pass -> 736 pass + 1 skipped (the reconcile-page case; this tree has no reconcile page), 0 fail.
+
 ## 2026-09-23 (evening): the audit headline says COULD NOT LOOK, the badge's spelling (branch `release-candidate-2026-09-23b`, local only, NOT deployed)
 
 - **Why.** The Fable audit's item 1 example: on one status page the badge for a namespace the render did not fully read said COULD NOT LOOK while the headline above it said "N not fully read." One page, two spellings for one fact.

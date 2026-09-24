@@ -22,6 +22,9 @@ const { gatherStatusData, humanDuration, BLOB, TREE, REPO_URL } = require("../li
 // (default off): with the flag off nothing below this line changes what the
 // page renders. See lib/_audit_status.js.
 const auditStatus = require("../lib/_audit_status.js");
+// The locked Arcaeon mark (header 30 px, footer 20 px + "arcaeon.io") and the
+// /favicon.svg head link. Light page with a dark media flip, so "light-auto".
+const brandMark = require("../lib/_brand_mark.js");
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
@@ -203,6 +206,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>arcaeon-witness — status</title>
+${brandMark.FAVICON_LINK}
 <meta name="robots" content="index,follow">
 <style>
   :root{
@@ -230,6 +234,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   .wrap{max-width:960px;margin:0 auto}
   header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:.5rem;margin-bottom:.25rem}
   h1{font-size:1.4rem;margin:0}
+  h1.arc-h1{display:flex;align-items:center;gap:10px}
   h2{font-size:1.05rem;margin:2rem 0 .5rem;border-bottom:1px solid var(--line);padding-bottom:.3rem}
   .sub{color:var(--muted);font-size:.9rem;margin:.25rem 0 1.5rem}
   .panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:1rem 1.25rem;margin-bottom:1.25rem}
@@ -279,7 +284,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
 <body>
 <div class="wrap">
   <header>
-    <h1>arcaeon-witness &mdash; status</h1>
+    <h1 class="arc-h1">${brandMark.headerMark("light-auto")}<span>arcaeon-witness &mdash; status</span></h1>
     ${overallOk
       ? `<span class="badge badge-green" style="font-size:.95rem">OK</span>`
       : degraded
@@ -346,6 +351,7 @@ ots verify anchors/${esc(anchor.date)}-head.txt.ots</pre>
   <div class="panel">${anchorHtml}</div>
 
   <footer>
+    <p>${brandMark.footerMark("light-auto")}</p>
     <p><strong>What this page proves:</strong> the pins are public, the cadence math is reproducible by anyone, and the conflict log can't quietly disappear a detected problem. Every link above goes to the same GitHub history a stranger can clone and check independently &mdash; nothing here is asserted from a database only we can read.</p>
     <p><strong>Auth honesty (Stage-0):</strong> every write here &mdash; pin <em>and</em> renewal &mdash; is authorized by a bearer key and nothing else. That is not owner-signature auth: it proves a key-holder acted, not that the log's owner did. A deadline write (renewal or first arm) additionally requires the key bound as that namespace's <em>deadline owner</em> in <code>owners/&lt;namespace&gt;.json</code> &mdash; so another issued key whose prefix covers the namespace cannot renew it &mdash; but that closes the <em>other</em> key, not the <em>stolen</em> one: anyone holding the bound key can still renew a deadline. Owner-signature auth is the Stage-1 requirement and is <strong>not built yet</strong>; until it is, read <code>heartbeat</code> as "a key-holder was alive and asserting nothing changed." Responses carry <code>auth_level:"bearer-stage0"</code> so this can't be mistaken for something stronger.</p>
     <p><strong>What it does not prove:</strong> that logged content is true (a chain notarizes a fingerprint, not a fact), anything about the gap between pins (a witness only sees what's sent to it), or that we never lose data. Full scope and the standing challenge to break this: <a href="/PRACTICES.md">PRACTICES.md</a>.</p>
