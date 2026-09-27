@@ -746,29 +746,53 @@ and registration answers `501 not_configured` until they are):
 All on `api/fulfill.js` (the function that already mints keys; api/ is at the
 12-function cap). Logic in `lib/_register.js`; disposable-domain list in
 `lib/_disposable_domains.js`. Decision: velouria
-`memory/PRICING_DECISION_2026-09-17.md`, 2026-09-27 8:47 AM entry.
+`memory/PRICING_DECISION_2026-09-17.md`, 2026-09-27 8:47 AM entry. Hardened
+the same day against a ten-point review (numbers below are that review's).
 
-- `POST /api/fulfill?op=register` body `{email, agent?}` -> `202 {state:"pending"}`
-  and a confirm link to the address. An agent may start it; only the human's
-  click mints. Refusals: `400 bad_email`, `400 disposable_email`,
-  `429 ip_registration_window` (more than 3 per salted IP hash in a rolling
-  30 days, counted in `registrations/_ip/<ip_hash>/<YYYY-MM>.json`). A
-  confirmed email answers `200 {state:"confirmed"}` and sends nothing. A
-  pending email gets a fresh link (the old one stops working) and spends
-  another IP slot. Identity is the normalised email: lowercased, plus-suffix
-  dropped, and for Gmail dots dropped and googlemail.com folded in.
-- `GET /api/fulfill?op=confirm&t=<token>` -> mints the key (plan `grant`),
-  grants 500 credits idempotent on `reg-<emailHash>`, shows the key on the
-  page. Revisiting the link re-shows the same key and grants nothing; the link
-  is a bearer of the key, like the Stripe receipt URL. Links expire after
-  48 hours while pending. The key is never in the email.
-- `GET /api/fulfill?op=register-status&email=...` -> `{state}` only
-  (`none` | `pending` | `confirmed`), never the key. Note: this answers
-  whether an address has registered; it is behind the per-IP read limiter.
-- `GET /api/fulfill?op=register-report` (Bearer `WITNESS_ADMIN_KEY`) -> the
-  reader: 14 days of registrations per day (with confirmed, distinct IP
-  hashes, distinct domains) and the top 10 IP hashes and email domains with
-  share. Flip rule: one IP hash or domain over 5% share means card gate first.
+- `POST /api/fulfill?op=register` body `{email, agent?}` -> `200
+  {state:"pending", sent:true, t8, status_url}` and a link to the address. An
+  agent may start it; only the human mints. Identity is the normalised email
+  (lowercased, plus-suffix dropped; for Gmail dots dropped and googlemail.com
+  folded in). Refusals: `400 bad_email`, `400 disposable_email`, `400
+  bad_agent` (the label is `[A-Za-z0-9 ._-]{0,32}`, stored on the record,
+  never put in the mail; 7), `429 ip_registration_window`, `429
+  domain_registration_window`, `502 mail_failed` (nothing consumed; 6).
+- **No oracle (4).** An address that already has its key gets the same `200`
+  a fresh one gets, with a decoy `t8`; no mail is sent and no slot spent. The
+  read-only window checks run first for both.
+- **Windows (1, 6).** Per NETWORK, not per address: IPv4 whole address, IPv6
+  the /64, both 3 per rolling 30 days, plus the IPv6 /48 at 10. Salted
+  (`REGISTER_IP_SALT`), never the raw IP, in
+  `registrations/_ip/<hash>/<YYYY-MM>.json`. Checked before the send, spent
+  only after the mail goes out; if a concurrent register took the last slot
+  meanwhile, the just-sent link is voided and the answer is 429. Per email
+  DOMAIN, outside a list of major mailbox providers: 5 grants per 30 days in
+  `registrations/_domain/<domain>/<YYYY-MM>.json`, spent at mint (so fake
+  registrations at someone's domain cannot use it up), read at register.
+- **The link does not mint (3).** `GET ?op=confirm&t=<token>` shows one form
+  button, "Show my key", and writes nothing (mail scanners GET, they do not
+  POST). `POST ?op=confirm` body `{t}` mints (plan `grant`), grants 500
+  credits, marks the registration confirmed with `key_shown_at`, shows the
+  raw key ONCE, then removes it from `fulfillments/reg-<emailHash>.json`. A
+  second POST answers `409 already_claimed`: "already claimed on <time>; the
+  key was shown once; if you lost it, register again with another address or
+  email hello@arcaeon.io". The key is never in the email.
+- **Confirm hardening (2).** The in-memory per-IP pre-filter, plus a durable
+  per-network CLAIM window (same buckets and limits,
+  `registrations/_ipc/`) spent only when a key is minted. A token that does
+  not match (malformed, unknown, replaced) is a bare `404 {error:"not
+  found"}` costing at most one store read. A confirmed registration is
+  answered from its record alone, with no write.
+- **Grant gate (9).** The registration record's `granted` flag gates
+  `grantCredits`; `applied_events` on `reg-<emailHash>` is the second layer.
+- `GET ?op=register-status&e=<emailHash>&t8=<t8>` (or `email=`) -> `{state}`:
+  `pending_or_unknown` for both unknown and pending; `confirmed` only with the
+  matching `t8`. Never the key. `status_url` and every log line carry the
+  email hash, never the address (10).
+- `GET ?op=register-report` (Bearer `WITNESS_ADMIN_KEY`) -> the reader: 14
+  days of registrations per day (with confirmed, distinct network hashes,
+  distinct domains) and the top 10 network hashes and email domains with
+  share. Flip rule: one network or domain over 5% share means card gate first.
 
 Plan `grant`: `PLAN_CAPS.grant = 0`, no monthly free pins, every pin debits a
 credit; an empty balance answers `402`. `ever_purchased` is now a `purchased`
@@ -776,11 +800,15 @@ field in the balance file set only by a purchase (packs `registration` and
 `refund` do not set it); a pre-existing balance file without the field reads
 as purchased, as before.
 
-Pins also carry a DURABLE per-key limit of 60 per UTC hour
-(`usage/<hash>/hour-<YYYY-MM-DDTHH>.json`, CAS increment) behind the old
-in-memory 60/hour pre-filter. It runs only on a pin that will be recorded
-(refusals still write nothing) and fails closed: `503 rate_limit_store_error`.
-Cost: one more private-repo commit per pin.
+Plan `grant` keys also carry a DURABLE limit of 60 pins per key per UTC hour
+(`usage/<hash>/hour-<YYYY-MM-DDTHH>.json`), checked BEFORE the write (a key at
+the limit is refused on a read) behind the in-memory 60/hour pre-filter. It
+runs only on a pin that will be recorded and fails closed: `503
+rate_limit_store_error`. Env, free-plan and Stripe keys keep the in-memory
+check only, so their write cost and failure modes are unchanged (5).
+
+Every per-IP decision in this service (`lib/_ratelimit.js`, registration,
+stamps) now reads the RIGHTMOST x-forwarded-for hop (8).
 
 ## Testing
 

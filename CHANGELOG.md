@@ -1,5 +1,20 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-27 (later) — registration grant hardened against the ten-point review (branch `register-grant-2026-09-27`, rebased onto `release-candidate-2026-09-23b` a9d8fce, local only, NOT deployed)
+
+One commit per finding, each with its tests; README "Registration grant" carries the resulting contract.
+
+- (1) networks, not addresses: IPv4 whole, IPv6 /64 at 3 plus /48 at 10; per-domain grant window, 5 per 30 days outside major providers, spent at mint.
+- (2) confirm: in-memory pre-filter plus a durable per-network claim window; non-matching token = bare 404, at most one read (a replaced token's index is voided at rotation); confirmed revisits write nothing.
+- (3) the GET link never mints: a "Show my key" form; the POST shows the key once, records key_shown_at, removes the raw key from the store; a second claim is 409 already_claimed.
+- (4) no oracle: confirmed and fresh registrations answer the same 200 (decoy t8, no mail, no slot); status is pending_or_unknown unless the caller proves t8.
+- (5) durable hour limit checked before the write, plan grant only; free, env and Stripe keys unchanged.
+- (6) IP slot spent only after the mail is out; send failure 502 mail_failed consumes nothing; a lost slot race voids the link.
+- (7) agent label out of the mail, record only, [A-Za-z0-9 ._-]{0,32}.
+- (8) lib/_ratelimit.js reads the rightmost x-forwarded-for hop (its old contract test asserted leftmost and was changed with it).
+- (9) the registration's granted flag gates grantCredits; applied_events is the second layer.
+- (10) status_url and log lines carry the email hash only; the Resend and mail-failure logs no longer print upstream error text.
+
 ## 2026-09-27 — registration grant: verified email -> one key, 500 credits, once (branch `register-grant-2026-09-27` from origin/main `8242bfa`, local only, NOT deployed)
 
 The pricing decision of 2026-09-27 8:47 AM (velouria `memory/PRICING_DECISION_2026-09-17.md`): every new key comes with 500 credits once, at verified registration; the 100/month free tier is retired for new keys; farming is stopped by verification, one grant per email, a per-IP window and a durable per-key hour cap.
