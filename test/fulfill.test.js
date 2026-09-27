@@ -895,3 +895,29 @@ test("BREAK ARM: a hand-built green carrying a prefix cannot reach the page; onl
     assert.throws(() => fulfill.renderPrefix(redV), (e) => e instanceof verdictLib.RedVerdictError);
   });
 });
+
+// ---------------------------------------------------------------------
+// 2026-09-27: new keys have no monthly free pins (the 100/month tier is
+// retired for NEW keys, Stripe-minted included). Existing records untouched.
+// ---------------------------------------------------------------------
+
+test("NEW STRIPE KEY: mints as plan grant; JSON and page say no monthly free allowance; welcome email too", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const res = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(res._status, 200);
+  assert.equal(res._body.plan, "grant");
+  assert.equal(res._body.free_tier_monthly_cap, 0);
+  const rec = gh.read(USAGE, `keys/${keys.keyHash(res._body.key)}.json`);
+  assert.equal(rec.plan, "grant");
+
+  const page = await call({ query: { session_id: id } });
+  const html = String(page._body);
+  assert.ok(!html.includes("100 pins/month"), "no retired free-tier promise on the key page");
+  assert.ok(html.includes("no monthly free allowance"));
+
+  const welcome = require("../lib/_welcome_email.js");
+  const fr = gh.read(USAGE, `fulfillments/${id}.json`);
+  assert.ok(!welcome.renderWelcomeEmailHtml(fr).includes("100 pins/month"));
+  assert.ok(!welcome.renderWelcomeEmailText(fr).includes("100 pins/month"));
+});

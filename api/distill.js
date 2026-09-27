@@ -119,7 +119,9 @@ async function meterAndCharge(key) {
           reason: "over_cap",
           plan: m.plan, used: m.used, cap: m.cap, month: m.month,
           top_up_available: true, packs: balance.PACKS,
-          note: "the free tier is shared across all metered witness endpoints (pin, distill) per key",
+          note: typeof m.cap === "number" && m.cap > 0
+            ? "this key's monthly allowance is shared across the metered witness endpoints (pin, distill)"
+            : "no credits left on the key: buy a pack",
         },
       },
       headers,
@@ -238,3 +240,6 @@ module.exports = async (req, res) => {
     note: "this endpoint runs a JS port of arcaeon_distill for the hosted try-before-pip demo — not the pip package itself; pip install arcaeon-distill for the canonical implementation",
   });
 };
+
+// Exported for tests: the metering/charge step and its refusal wording.
+module.exports.meterAndCharge = meterAndCharge;

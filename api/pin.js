@@ -222,7 +222,9 @@ async function meterAndCharge(key, planHint) {
         deny: {
           status: 402,
           body: {
-            error: "credit balance exhausted — top up to continue",
+            error: typeof m.cap === "number" && m.cap > 0
+              ? "this key's monthly allowance and its credits are used up: buy a pack to continue"
+              : "no credits left on the key: buy a pack",
             reason: "credit_exhausted",
             credit_balance: 0,
             plan: m.plan, free_tier_used: m.used, free_tier_cap: m.cap, month: m.month,

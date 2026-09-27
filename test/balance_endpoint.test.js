@@ -200,3 +200,29 @@ test("REGRESSION (extraction): lib/_page.js pageShell/copyBox render the ceremon
   assert.ok(html.includes("support@arcaeon.io"));
   assert.equal(page.esc('<a b="c">&'), "&lt;a b=&quot;c&quot;&gt;&amp;");
 });
+
+// 2026-09-27: the monthly line shows only for a plan that has a monthly cap.
+test("GRANT KEY: balance page shows no monthly line, the credits it holds, and 'buy a pack' when empty", async () => {
+  const key = "wk_" + "d".repeat(48);
+  const h = balanceLib.keyHash(key);
+  gh.seed("test-owner/test-usage", `keys/${h}.json`, { key_hash: h, namespace_prefix: "wk-grant01-", plan: "grant", source: "register" });
+  await balanceLib.grantCredits(h, 500, "registration", "reg-test", "register");
+  let html = String((await call({ method: "POST", headers: { accept: BROWSER_ACCEPT }, body: { key } }))._body);
+  assert.ok(html.includes("No monthly free pins on this key"));
+  assert.ok(!html.includes("of 0 used"), "no monthly counter for a cap-0 plan");
+  assert.ok(html.includes("500 prepaid pins"));
+  const json = await call({ headers: { authorization: `Bearer ${key}` } });
+  assert.equal(json._body.free_tier.plan, "grant");
+  assert.equal(json._body.free_tier.cap, 0);
+  assert.equal(json._body.credit_ever_purchased, false);
+
+  gh.seed("test-owner/test-usage", balanceLib.balancePath(h), { ...gh.read("test-owner/test-usage", balanceLib.balancePath(h)), balance: 0 });
+  html = String((await call({ method: "POST", headers: { accept: BROWSER_ACCEPT }, body: { key } }))._body);
+  assert.ok(html.includes("no credits left on the key: buy a pack"));
+});
+
+test("FREE KEY, no credits: the page says this key's monthly allowance still applies", async () => {
+  const html = String((await call({ method: "POST", headers: { accept: BROWSER_ACCEPT }, body: { key: KEY } }))._body);
+  assert.ok(html.includes("this key's monthly allowance below still applies"));
+  assert.ok(html.includes("of 100 used"));
+});

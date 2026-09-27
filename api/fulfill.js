@@ -224,7 +224,7 @@ function successHtml(record, creditBalance, consentStored) {
     "Your Arcaeon witness key",
     `<h1>Payment verified — your witness key</h1>
 ${copyBox("key", record.key)}
-<p><b>${esc(String(record.credits))} prepaid pins</b> are on your balance (plus the free tier: 100 pins/month). Your key pins any namespace starting with <code>${esc(ns)}</code>.</p>
+<p><b>${esc(String(record.credits))} prepaid pins</b> are on your balance (one credit = one pin; new keys have no monthly free allowance). Your key pins any namespace starting with <code>${esc(ns)}</code>.</p>
 <p class="muted">Check your balance any time at <a href="${esc(BASE_URL)}/api/balance">${esc(BASE_URL)}/api/balance</a> — you paste the key on the page; the link itself carries nothing.</p>
 <p class="warn">Save this key now. This page re-shows it any time via your Stripe receipt link — treat that link like the key itself.</p>
 <h2>Install the client</h2>
@@ -677,7 +677,10 @@ module.exports = async (req, res) => {
       key_hash: record.key_hash,
       key_id: record.key_hash.slice(0, 12),
       namespace_prefix: record.namespace_prefix,
-      plan: "free", // free monthly tier on top of purchased credits (meter default)
+      // New keys have no monthly free pins (pricing decision 2026-09-27: the
+      // 100/month tier is retired for NEW keys, Stripe-minted included); every
+      // pin debits a credit. Create-only, so keys minted before this keep "free".
+      plan: "grant",
       org: record.org,
       pool_id: record.pool_id,
       source: "stripe-fulfill",
@@ -743,7 +746,8 @@ module.exports = async (req, res) => {
       pool_id: record.pool_id,
       org: record.org,
       credit_balance: grant.balance_after,
-      free_tier_monthly_cap: meter.PLAN_CAPS.free,
+      plan: "grant",
+      free_tier_monthly_cap: meter.PLAN_CAPS.grant, // 0: new keys have no monthly free pins
       already_fulfilled: !firstVisit,
       ...(grant.ledger_write_failed ? { ledger_write_failed: true } : {}),
       consent_product_updates: consentStored,

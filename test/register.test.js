@@ -341,7 +341,38 @@ test("GRANT PLAN: an empty grant balance is 402 top-up, and the key still reads 
   await pin(pinReq(c.key, `${c.namespace}main`, 1), res);
   assert.equal(res._status, 402);
   assert.equal(res._body.reason, "credit_exhausted");
+  assert.equal(res._body.error, "no credits left on the key: buy a pack");
   assert.equal((await balance.readBalance(h)).ever_purchased, false);
+});
+
+test("OVER-CAP WORDING: pin and distill say 'monthly allowance' only for a capped plan, else 'buy a pack'", async () => {
+  const distill = require("../api/distill.js");
+  const capped = "capped-key", uncapped = "zero-key", buyer = "buyer-key";
+  process.env.WITNESS_PLANS = JSON.stringify({
+    [keys.keyHash(capped)]: { plan: "free", monthly_cap: 1 },
+    [keys.keyHash(uncapped)]: { plan: "free", monthly_cap: 0 },
+    [keys.keyHash(buyer)]: { plan: "free", monthly_cap: 1 },
+  });
+  try {
+    const month = new Date().toISOString().slice(0, 7);
+    for (const k of [capped, buyer]) gh.seed(USAGE, `usage/${keys.keyHash(k)}/${month}.json`, { used: 1, month });
+    const a = await distill.meterAndCharge(capped);
+    assert.equal(a.deny.status, 429);
+    assert.match(a.deny.body.note, /this key's monthly allowance/);
+    const b = await distill.meterAndCharge(uncapped);
+    assert.equal(b.deny.body.note, "no credits left on the key: buy a pack");
+
+    // a capped key that bought and spent everything: pin's 402 names the allowance
+    const bh = keys.keyHash(buyer);
+    gh.seed(USAGE, balance.balancePath(bh), { key_hash: bh, balance: 0, seq: 2, purchased: true, applied_events: [] });
+    gh.seed(USAGE, keys.issuedKeyPath(bh), { key_hash: bh, namespace_prefix: "buyerco-", plan: "free" });
+    const res = makeRes();
+    await pin(pinReq(buyer, "buyerco-main", 1), res);
+    assert.equal(res._status, 402);
+    assert.match(res._body.error, /this key's monthly allowance and its credits are used up/);
+  } finally {
+    delete process.env.WITNESS_PLANS;
+  }
 });
 
 test("FREE PLAN UNCHANGED: a Stripe-style issued key with plan free still gets the monthly free pin", async () => {

@@ -88,15 +88,20 @@ ${errorBlock}
 // prefix the auth lookup already resolved), zero extra reads, and the raw
 // key never appears anywhere in the page.
 function balanceHtml(prefix, bal, freeTier) {
+  // The monthly line shows only for a plan that HAS a monthly cap (existing
+  // "free" keys). A grant key (cap 0) has none, so it gets one plain sentence.
+  const capped = typeof freeTier.cap === "number" && freeTier.cap > 0;
   const freeLine =
-    freeTier.plan === "grant"
-      ? `Registration key (<b>grant</b> plan): no monthly free pins; every pin uses one credit.`
+    !capped && freeTier.cap !== null
+      ? `No monthly free pins on this key; every pin uses one credit.`
       : freeTier.cap === null
       ? `Free tier: plan <b>${esc(freeTier.plan)}</b> — no monthly cap configured.`
       : `Free tier (<b>${esc(freeTier.plan)}</b> plan, ${esc(freeTier.month)}): ${esc(String(freeTier.used))} of ${esc(String(freeTier.cap))} used — <b>${esc(String(Math.max(0, freeTier.cap - freeTier.used)))} remaining</b> this month.`;
   const creditLine = bal.ever_purchased || bal.balance > 0
     ? `<b>${esc(String(bal.balance))} prepaid pins</b> remaining${bal.updated_at ? ` <span class="muted">(updated ${esc(bal.updated_at)})</span>` : ""}.`
-    : `<b>0 prepaid pins</b> — no credit pack purchased yet (the free tier below still applies).`;
+    : capped
+      ? `<b>0 prepaid pins</b> — no credit pack purchased yet (this key's monthly allowance below still applies).`
+      : `<b>0 credits</b> — no credits left on the key: buy a pack.`;
   return pageShell(
     "Your balance",
     `<h1>Your balance</h1>
