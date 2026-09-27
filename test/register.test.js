@@ -64,7 +64,7 @@ afterEach(() => {
 let ipCounter = 0;
 function freshIp() {
   ipCounter += 1;
-  return `203.0.113.${ipCounter % 250}`;
+  return `10.${(ipCounter >> 16) & 255}.${(ipCounter >> 8) & 255}.${ipCounter & 255}`; // unique per call
 }
 
 async function call(req) {
@@ -92,10 +92,12 @@ function tokenFrom(msg) {
 
 // The claim: POST with the token in the body (review 3: the GET link never mints).
 function confirmReq(t, json = true) {
-  return makeReq({ method: "POST", headers: json ? { accept: "application/json" } : { accept: "text/html" }, query: { op: "confirm" }, body: { t } });
+  const accept = json ? "application/json" : "text/html";
+  return makeReq({ method: "POST", headers: { accept, "x-forwarded-for": freshIp() }, query: { op: "confirm" }, body: { t } });
 }
 function confirmGetReq(t, json = false) {
-  return makeReq({ method: "GET", headers: json ? { accept: "application/json" } : { accept: "text/html" }, query: { op: "confirm", t } });
+  const accept = json ? "application/json" : "text/html";
+  return makeReq({ method: "GET", headers: { accept, "x-forwarded-for": freshIp() }, query: { op: "confirm", t } });
 }
 
 function statusReq(email) {
@@ -136,7 +138,7 @@ test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credi
   assert.match(reg.token_hash, /^[0-9a-f]{64}$/);
   assert.match(reg.ip_hash, /^[0-9a-f]{64}$/);
   assert.ok(!JSON.stringify(reg).includes("jane@"), "the registration stores no raw email");
-  assert.ok(!JSON.stringify(reg).includes("203.0.113."), "the registration stores no raw IP");
+  assert.ok(!/"10\.\d+\.\d+\.\d+"/.test(JSON.stringify(reg)), "the registration stores no raw IP");
 
   const s1 = await call(statusReq("jane@example.com"));
   assert.deepEqual(s1._body, { state: "pending_or_unknown" });
@@ -204,6 +206,32 @@ test("THE LINK DOES NOT MINT: GET shows one 'Show my key' form; nothing is writt
   assert.ok(!/wk_[0-9a-f]{48}/.test(again._body));
 });
 
+test("CONFIRM RATE LIMIT: the in-memory per-IP pre-filter covers confirm (GET and POST)", async () => {
+  const ip = "198.51.100.150";
+  let last;
+  for (let i = 0; i <= 30; i++) {
+    last = makeRes();
+    await fulfill(makeReq({ method: "GET", headers: { "x-forwarded-for": ip }, query: { op: "confirm", t: "b".repeat(64) } }), last);
+  }
+  assert.equal(last._status, 429);
+  assert.equal(last._body.reason, "rate_limited");
+});
+
+test("CLAIM WINDOW: the 4th key claimed from one network in 30 days is 429 and mints nothing", async () => {
+  const claimIp = "198.51.100.160";
+  const tokens = [];
+  for (let i = 1; i <= 4; i++) {
+    await call(registerReq(`claimer${i}@example.com`));
+    tokens.push(tokenFrom(sent[sent.length - 1]));
+  }
+  const claim = (t) => makeReq({ method: "POST", headers: { accept: "application/json", "x-forwarded-for": claimIp }, query: { op: "confirm" }, body: { t } });
+  for (let i = 0; i < 3; i++) assert.equal((await call(claim(tokens[i])))._status, 200, `claim ${i + 1}`);
+  const fourth = await call(claim(tokens[3]));
+  assert.equal(fourth._status, 429);
+  assert.equal(fourth._body.reason, "ip_claim_window");
+  assert.equal(gh.has(USAGE, keys.fulfillmentPath(register.fulfillId(register.sha256("claimer4@example.com")))), false);
+});
+
 test("CLAIM RESUMES AFTER A CRASH: minted but not marked -> the next POST shows that key once, grants once", async () => {
   await call(registerReq("crash@example.com"));
   const t = tokenFrom(sent[0]);
@@ -219,18 +247,27 @@ test("CLAIM RESUMES AFTER A CRASH: minted but not marked -> the next POST shows 
   assert.equal((await balance.readBalance(keys.keyHash(minted.key))).balance, 500);
 });
 
-test("CONFIRM: malformed 400, unknown 404, superseded 410, expired 410", async () => {
-  assert.equal((await call(confirmReq("nothex")))._status, 400);
-  assert.equal((await call(confirmReq("a".repeat(64))))._status, 404);
+test("CONFIRM: malformed, unknown and superseded tokens are one bare 404 costing at most one read; expired is 410", async () => {
+  const mal = await call(confirmReq("nothex"));
+  assert.equal(mal._status, 404);
+  assert.deepEqual(mal._body, { error: "not found" });
+  const readsBefore = gh.getLog.length;
+  const unk = await call(confirmReq("a".repeat(64)));
+  assert.equal(unk._status, 404);
+  assert.deepEqual(unk._body, { error: "not found" });
+  assert.equal(gh.getLog.length - readsBefore, 1, "an unknown token costs one GET");
+  assert.equal(gh.putLog.filter((w) => w.path.startsWith("registrations/")).length, 0);
 
   const ip = freshIp();
   await call(registerReq("rot@example.com", { ip }));
   const oldT = tokenFrom(sent[0]);
   await call(registerReq("rot@example.com", { ip }));
   assert.equal(sent.length, 2, "a pending email gets a fresh link");
+  const readsBefore2 = gh.getLog.length;
   const old = await call(confirmReq(oldT));
-  assert.equal(old._status, 410);
-  assert.equal(old._body.reason, "superseded_token");
+  assert.equal(old._status, 404);
+  assert.deepEqual(old._body, { error: "not found" }, "a replaced link says nothing about why");
+  assert.equal(gh.getLog.length - readsBefore2, 1, "a replaced token stops at its voided index: one GET");
 
   await call(registerReq("late@example.com"));
   const t = tokenFrom(sent[2]);
