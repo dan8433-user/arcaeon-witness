@@ -248,19 +248,21 @@ test("CONFIRM RATE LIMIT: the in-memory per-IP pre-filter covers confirm (GET an
   assert.equal(last._body.reason, "rate_limited");
 });
 
-test("CLAIM WINDOW: the 4th key claimed from one network in 30 days is 429 and mints nothing", async () => {
+test("CLAIM WINDOW: the 11th key claimed from one IPv4 address in 30 days is 429 and mints nothing", async () => {
   const claimIp = "198.51.100.160";
+  const L = register.IP_WINDOW_LIMIT;
+  assert.equal(L, 10);
   const tokens = [];
-  for (let i = 1; i <= 4; i++) {
+  for (let i = 1; i <= L + 1; i++) {
     await call(registerReq(`claimer${i}@example.com`));
     tokens.push(tokenFrom(sent[sent.length - 1]));
   }
   const claim = (t) => makeReq({ method: "POST", headers: { accept: "application/json", "x-forwarded-for": claimIp }, query: { op: "confirm" }, body: { t } });
-  for (let i = 0; i < 3; i++) assert.equal((await call(claim(tokens[i])))._status, 200, `claim ${i + 1}`);
-  const fourth = await call(claim(tokens[3]));
-  assert.equal(fourth._status, 429);
-  assert.equal(fourth._body.reason, "ip_claim_window");
-  assert.equal(gh.has(USAGE, keys.fulfillmentPath(register.fulfillId(register.sha256("claimer4@example.com")))), false);
+  for (let i = 0; i < L; i++) assert.equal((await call(claim(tokens[i])))._status, 200, `claim ${i + 1}`);
+  const over = await call(claim(tokens[L]));
+  assert.equal(over._status, 429);
+  assert.equal(over._body.reason, "ip_claim_window");
+  assert.equal(gh.has(USAGE, keys.fulfillmentPath(register.fulfillId(register.sha256(`claimer${L + 1}@example.com`)))), false);
 });
 
 test("GRANT GATE: the registration's granted flag stops a second grant even when applied_events no longer holds the id", async () => {
@@ -448,34 +450,36 @@ test("PLUS-ALIAS COLLAPSE: a+1@x and a@x are one identity; gmail dots and google
 
 // ---------------------------------------------------------- per-IP window
 
-test("IP WINDOW: the 4th registration from one ip_hash in 30 days is 429; another IP is not", async () => {
+test("IP WINDOW: the 11th registration from one IPv4 address in 30 days is 429; another IP is not", async () => {
   const ip = "198.51.100.7";
-  for (let i = 1; i <= 3; i++) {
+  const L = register.IP_WINDOW_LIMIT;
+  for (let i = 1; i <= L; i++) {
     const r = await call(registerReq(`ipuser${i}@example.com`, { ip }));
     assert.equal(r._status, 200, `registration ${i}`);
   }
-  const fourth = await call(registerReq("ipuser4@example.com", { ip }));
-  assert.equal(fourth._status, 429);
-  assert.equal(fourth._body.reason, "ip_registration_window");
-  assert.equal(sent.length, 3, "the refused one sent nothing");
+  const over = await call(registerReq("ipuserX@example.com", { ip }));
+  assert.equal(over._status, 429);
+  assert.equal(over._body.reason, "ip_registration_window");
+  assert.equal(over._body.limit, 10);
+  assert.equal(sent.length, L, "the refused one sent nothing");
 
-  const other = await call(registerReq("ipuser4@example.com", { ip: "198.51.100.8" }));
+  const other = await call(registerReq("ipuserX@example.com", { ip: "198.51.100.8" }));
   assert.equal(other._status, 200);
 
   const iph = register.ipHash(ip);
   const month = new Date().toISOString().slice(0, 7);
   const file = gh.read(USAGE, register.ipPath(iph, month));
-  assert.equal(file.events.length, 3);
+  assert.equal(file.events.length, L);
   assert.ok(!JSON.stringify(file).includes(ip), "no raw IP at rest");
 });
 
 test("IP WINDOW: a spoofed LEFTMOST x-forwarded-for hop does not buy a new window (rightmost is used)", async () => {
   const real = "192.0.2.50";
-  for (let i = 1; i <= 3; i++) {
+  for (let i = 1; i <= register.IP_WINDOW_LIMIT; i++) {
     const r = await call(registerReq(`spoof${i}@example.com`, { xff: `10.0.0.${i}, ${real}` }));
     assert.equal(r._status, 200);
   }
-  const r = await call(registerReq("spoof4@example.com", { xff: `10.9.9.9, ${real}` }));
+  const r = await call(registerReq("spoofX@example.com", { xff: `10.9.9.9, ${real}` }));
   assert.equal(r._status, 429);
   assert.equal(register.clientIp({ headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" } }), "2.2.2.2");
 });
@@ -487,7 +491,7 @@ test("IP WINDOW: last month's events inside 30 days still count (rolling, not ca
   const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15)).toISOString().slice(0, 7);
   const recent = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
   const old = new Date(Date.now() - 40 * 86400 * 1000).toISOString();
-  gh.seed(USAGE, register.ipPath(iph, prev), { ip_hash: iph, month: prev, events: [recent, recent, old] });
+  gh.seed(USAGE, register.ipPath(iph, prev), { ip_hash: iph, month: prev, events: Array(register.IP_WINDOW_LIMIT - 1).fill(recent).concat([old, old]) });
   assert.equal((await call(registerReq("roll1@example.com", { ip })))._status, 200);
   assert.equal((await call(registerReq("roll2@example.com", { ip })))._status, 429);
 });
@@ -498,13 +502,14 @@ test("SLOT RACE: a concurrent register taking the last slot between our read and
   const month = new Date().toISOString().slice(0, 7);
   const p = register.ipPath(iph, month);
   const now = new Date().toISOString();
-  gh.seed(USAGE, p, { ip_hash: iph, month, events: [now, now] });
+  const L = register.IP_WINDOW_LIMIT;
+  gh.seed(USAGE, p, { ip_hash: iph, month, events: Array(L - 1).fill(now) });
   const orig = gh.handleFetch.bind(gh);
   let raced = false;
   gh.handleFetch = async (url, opts) => {
     if (!raced && opts && opts.method === "PUT" && String(url).includes(p)) {
       raced = true; // a concurrent register lands first: the file (and its sha) moves
-      gh.seed(USAGE, p, { ...gh.read(USAGE, p), events: [now, now, now] });
+      gh.seed(USAGE, p, { ...gh.read(USAGE, p), events: Array(L).fill(now) });
     }
     return orig(url, opts);
   };
@@ -514,7 +519,7 @@ test("SLOT RACE: a concurrent register taking the last slot between our read and
   assert.equal(r._status, 429, JSON.stringify(r._body));
   assert.equal(r._body.reason, "ip_registration_window");
   assert.equal(sent.length, 0, "the slot is reserved before the mail, so the loser mails nothing");
-  assert.equal(gh.read(USAGE, p).events.length, 3);
+  assert.equal(gh.read(USAGE, p).events.length, L);
   assert.equal(gh.has(USAGE, register.regPath(register.sha256("race@example.com"))), false, "no record written");
 });
 
@@ -554,27 +559,29 @@ test("NETWORKS: IPv6 hashes the /64 (and the /48); IPv4-mapped IPv6 is the IPv4 
   assert.notEqual(a[0].hash, c[0].hash, "different /64");
   assert.equal(a[1].scope, "v6/48");
   assert.equal(a[1].hash, c[1].hash, "same /48 bucket across /64s");
-  assert.equal(a[1].limit, 10);
+  assert.equal(a[0].limit, 10);
+  assert.equal(a[1].limit, 30);
+  assert.equal(register.networkBuckets("192.0.2.1")[0].limit, 10);
   assert.equal(register.networkBuckets("::ffff:192.0.2.9")[0].hash, register.networkBuckets("192.0.2.9")[0].hash);
 });
 
-test("NETWORKS: a 4th registration from ANY address in one IPv6 /64 is 429", async () => {
-  for (let i = 1; i <= 3; i++) {
+test("NETWORKS: an 11th registration from ANY address in one IPv6 /64 is 429", async () => {
+  for (let i = 1; i <= register.V6_64_LIMIT; i++) {
     const r = await call(registerReq(`v6user${i}@example.com`, { ip: `2001:db8:aa:1::${i}` }));
     assert.equal(r._status, 200, `registration ${i}`);
   }
-  const r = await call(registerReq("v6user4@example.com", { ip: "2001:db8:aa:1:dead:beef:0:4" }));
+  const r = await call(registerReq("v6userX@example.com", { ip: "2001:db8:aa:1:dead:beef:0:4" }));
   assert.equal(r._status, 429);
   assert.equal(r._body.scope, "v6/64");
 });
 
-test("NETWORKS: a /48 caps at 10 per 30 days even when each /64 is under its own 3", async () => {
+test("NETWORKS: a /48 caps at 30 per 30 days even when each /64 is under its own 10", async () => {
   let n = 0;
   for (let net = 1; net <= 4; net++) {
-    for (let i = 1; i <= 3; i++) {
+    for (let i = 1; i <= 8; i++) {
       n += 1;
       const r = await call(registerReq(`v48user${n}@example.com`, { ip: `2001:db8:bb:${net}::${i}` }));
-      if (n <= 10) assert.equal(r._status, 200, `registration ${n}`);
+      if (n <= 30) assert.equal(r._status, 200, `registration ${n}`);
       else {
         assert.equal(r._status, 429, `registration ${n}`);
         assert.equal(r._body.scope, "v6/48");
@@ -583,21 +590,50 @@ test("NETWORKS: a /48 caps at 10 per 30 days even when each /64 is under its own
   }
 });
 
-test("DOMAIN WINDOW: a non-major domain gets 5 grants per 30 days; the 6th confirm and the next register are 429", async () => {
+test("DOMAIN WINDOW: a non-major domain gets 20 grants per 30 days; the 21st confirm and the next register are 429", async () => {
+  const L = register.DOMAIN_WINDOW_LIMIT;
+  assert.equal(L, 20);
   const tokens = [];
-  for (let i = 1; i <= 6; i++) {
+  for (let i = 1; i <= L + 1; i++) {
     const r = await call(registerReq(`staff${i}@smallco.example`));
     assert.equal(r._status, 200, `register ${i} (pending registrations spend no domain slot)`);
     tokens.push(tokenFrom(sent[sent.length - 1]));
   }
-  for (let i = 0; i < 5; i++) assert.equal((await call(confirmReq(tokens[i])))._status, 200, `grant ${i + 1}`);
-  const sixth = await call(confirmReq(tokens[5]));
-  assert.equal(sixth._status, 429);
-  assert.equal(sixth._body.reason, "domain_registration_window");
-  const more = await call(registerReq("staff7@smallco.example"));
+  for (let i = 0; i < L; i++) assert.equal((await call(confirmReq(tokens[i])))._status, 200, `grant ${i + 1}`);
+  const over = await call(confirmReq(tokens[L]));
+  assert.equal(over._status, 429);
+  assert.equal(over._body.reason, "domain_registration_window");
+  const more = await call(registerReq("staffX@smallco.example"));
   assert.equal(more._status, 429);
   assert.equal(more._body.reason, "domain_registration_window");
-  assert.equal(sent.length, 6, "no link mailed once the domain is full");
+  assert.equal(sent.length, L + 1, "no link mailed once the domain is full");
+});
+
+test("ALLOWLIST: WITNESS_REGISTER_ALLOW domains and exact IPs skip the windows; CIDR entries are ignored", async () => {
+  process.env.WITNESS_REGISTER_ALLOW = " partner.example , 203.0.113.9, 2001:DB8:dd:1::5, 198.51.100.0/24";
+  try {
+    assert.equal(register.isAllowed("staff.partner.example", "1.2.3.4"), true, "registrable domain match");
+    assert.equal(register.isAllowed("other.example", "203.0.113.9"), true, "exact IP match");
+    assert.equal(register.isAllowed("other.example", "2001:db8:dd:1:0:0:0:5"), true, "IPv6 compared expanded");
+    assert.equal(register.isAllowed("other.example", "198.51.100.7"), false, "CIDR is not supported");
+    assert.equal(register.isAllowed("other.example", "203.0.113.10"), false);
+    const month = new Date().toISOString().slice(0, 7);
+    const ip = "203.0.113.9";
+    for (let i = 1; i <= register.IP_WINDOW_LIMIT + 2; i++) {
+      const r = await call(registerReq(`p${i}@other.example`, { ip }));
+      assert.equal(r._status, 200, `allowlisted IP registration ${i}`);
+    }
+    assert.equal(gh.has(USAGE, register.ipPath(register.ipHash(ip), month)), false, "no window spent for an allowlisted IP");
+    const tokens = [];
+    for (let i = 1; i <= register.DOMAIN_WINDOW_LIMIT + 1; i++) {
+      await call(registerReq(`s${i}@partner.example`));
+      tokens.push(tokenFrom(sent[sent.length - 1]));
+    }
+    for (const t of tokens) assert.equal((await call(confirmReq(t)))._status, 200);
+    assert.equal(gh.has(USAGE, register.domainPath("partner.example", month)), false, "no domain window spent");
+  } finally {
+    delete process.env.WITNESS_REGISTER_ALLOW;
+  }
 });
 
 test("DOMAIN WINDOW: the major-provider exemption is an exact list, no prefix or regional matching", async () => {

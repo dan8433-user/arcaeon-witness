@@ -740,6 +740,13 @@ and registration answers `501 not_configured` until they are):
 - `RESEND_FROM` — the sender, e.g. `Arcaeon <keys@arcaeon.io>`; the domain must
   be verified in Resend.
 - `WITNESS_ADMIN_KEY` (existing) also gates `op=register-report`.
+- `WITNESS_REGISTER_ALLOW` (optional, for partners) — comma-separated
+  entries, each a DOMAIN or an EXACT IP address (no CIDR ranges; an entry
+  with `/` is ignored). A registration or claim whose email domain (or its
+  registrable domain) or caller IP matches skips every durable window
+  (network register, network claim, domain). Verification, the disposable
+  refusal, one grant per email, the in-memory pre-filter and the timing floor
+  still apply. Read per request; no redeploy needed to change it.
 
 ## Registration grant (verified email -> one key, 500 credits, once)
 
@@ -760,8 +767,9 @@ the same day against a ten-point review (numbers below are that review's).
 - **No oracle (4).** An address that already has its key gets the same `200`
   a fresh one gets, with a decoy `t8`; no mail is sent and no slot spent. The
   read-only window checks run first for both.
-- **Windows (1, 6).** Per NETWORK, not per address: IPv4 whole address, IPv6
-  the /64, both 3 per rolling 30 days, plus the IPv6 /48 at 10. Salted
+- **Windows (1, 6).** Per NETWORK, not per address, sized for shared
+  networks (offices, campuses, carrier NAT): IPv4 whole address 10 per
+  rolling 30 days, IPv6 /64 10, plus the IPv6 /48 at 30. Salted
   (`REGISTER_IP_SALT`), never the raw IP, in
   `registrations/_ip/<hash>/<YYYY-MM>.json`. Order: read-only checks, the
   confirmed-address answer (no slot), then the slot is RESERVED by CAS, then
@@ -779,7 +787,7 @@ the same day against a ten-point review (numbers below are that review's).
   163.com, 126.com, naver.com, daum.net, web.de, t-online.de, orange.fr,
   free.fr, comcast.net, att.net, verizon.net, sbcglobal.net, cox.net,
   fastmail.com, hey.com, tutanota.com, tuta.io, zoho.com; no prefix or
-  regional matching, so hotmail.co.uk has its own window): 5 grants per 30
+  regional matching, so hotmail.co.uk has its own window): 20 grants per 30
   days in `registrations/_domain/<registrable domain>/<YYYY-MM>.json`, spent
   at mint (so fake registrations at someone's domain cannot use it up), read
   at register. The window is keyed on the REGISTRABLE domain, so every
