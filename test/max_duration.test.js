@@ -11,7 +11,16 @@ const path = require("node:path");
 const WORST_CASE_MS = 21000;
 const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "vercel.json"), "utf8"));
 
-for (const fn of ["api/pin.js", "api/verify.js"]) {
+// api/fulfill.js carries op=confirm (registration grant): about 25 store
+// calls on the claim path (token index, registration, windows, fulfillment,
+// key, pool, balance, ledger, marks), each able to hit a CAS retry. 60 s is
+// the most this plan allows (the <= 60 assertion below).
+test("MAX DURATION: api/fulfill.js has 60 s for the confirm path", () => {
+  const max = cfg.functions && cfg.functions["api/fulfill.js"] && cfg.functions["api/fulfill.js"].maxDuration;
+  assert.strictEqual(max, 60);
+});
+
+for (const fn of ["api/pin.js", "api/verify.js", "api/fulfill.js"]) {
   test(`MAX DURATION: ${fn} may run longer than the retry loop's worst case`, () => {
     const max = cfg.functions && cfg.functions[fn] && cfg.functions[fn].maxDuration;
     assert.ok(Number.isFinite(max), `${fn} has no maxDuration; the platform default would cut a retrying write short`);

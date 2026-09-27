@@ -833,6 +833,12 @@ the same day against a ten-point review (numbers below are that review's).
   `pending_or_unknown` for both unknown and pending; `confirmed` only with the
   matching `t8`. Never the key. `status_url` and every log line carry the
   email hash, never the address (10).
+- **Function time.** `vercel.json` gives `api/fulfill.js` `maxDuration: 60`
+  (it had the platform default): the confirm path makes about 25 store calls,
+  any of which can take a CAS retry. 60 s is the ceiling this repo holds for
+  the Hobby plan (`test/max_duration.test.js` refuses anything above it);
+  pin and verify stay at 30. On Vercel's newer fluid-compute defaults Hobby
+  may allow more; that was not checked here and 60 is not raised on a guess.
 - `GET ?op=register-report` (Bearer `WITNESS_ADMIN_KEY`) -> the reader: 14
   days of registrations per day (with confirmed, distinct network hashes,
   distinct domains) and the top 10 network hashes and email domains with

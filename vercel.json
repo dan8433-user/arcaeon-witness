@@ -31,6 +31,9 @@
     },
     "api/verify.js": {
       "maxDuration": 30
+    },
+    "api/fulfill.js": {
+      "maxDuration": 60
     }
   }
 }
