@@ -105,6 +105,8 @@ const { SUPPORT_EMAIL, esc, wantsJson, pageShell, copyBox, copyBlock } = require
 // cap and cannot grow a 13th entry.
 const prefixCheck = require("../lib/_prefix_check.js");
 const prefixUi = require("../lib/_prefix_ui.js");
+// The registration grant (verified email -> one key with 500 credits, once).
+const register = require("../lib/_register.js");
 
 const DOCS_URL = process.env.WITNESS_DOCS_URL || "https://arcaeon.io/ai";
 const BASE_URL = process.env.WITNESS_BASE_URL || "https://arcaeon-witness.vercel.app";
@@ -365,6 +367,16 @@ module.exports = async (req, res) => {
   // session gate. It mints nothing — see the REV-2b header note.
   if (String((req.query || {}).op || "") === "prefix-available") {
     return prefixCheck.handle(req, res);
+  }
+
+  // --- co-hosted route: the registration grant (2026-09-27) ---
+  // ?op=register | confirm | register-status | register-report, all in
+  // lib/_register.js. Here because this is already the function that mints
+  // keys and writes fulfillments/ records, and api/ is at the 12-function cap.
+  // Dispatched before the session_id gate: none of these carry a session.
+  const regOp = String((req.query || {}).op || "");
+  if (register.OPS.has(regOp)) {
+    return register.handle(req, res, regOp);
   }
 
   if (req.method !== "GET" && req.method !== "POST") {
