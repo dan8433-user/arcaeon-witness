@@ -898,6 +898,12 @@ the same day against a ten-point review (numbers below are that review's).
   yourself soon after it arrives, press the button, and save the key within
   the 15 minutes; if the page says already claimed and you did not press
   it, contact support@arcaeon.io.
+- **Separate pre-filter buckets (2026-09-27).** The in-memory per-IP
+  pre-filter (`lib/_ratelimit.js`) keeps one budget per bucket name:
+  register-status draws from `status` (30 per 10 minutes), register from
+  `register`, confirm from `confirm`, and verify, status, health, badge and
+  latest keep the shared `read` bucket as before. An agent polling
+  register-status cannot lock its human out of confirm from the same address.
 - **Confirm hardening (2).** The in-memory per-IP pre-filter, plus a durable
   per-network CLAIM window (same buckets and limits,
   `registrations/_ipc/`) spent only when a key is minted. Spend order: the
