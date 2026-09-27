@@ -330,6 +330,25 @@ test("IP WINDOW: last month's events inside 30 days still count (rolling, not ca
   assert.equal((await call(registerReq("roll2@example.com", { ip })))._status, 429);
 });
 
+test("SLOT RACE: if the last slot is taken while the mail is in flight, the link is voided and the answer is 429", async () => {
+  const ip = "192.0.2.88";
+  const iph = register.ipHash(ip);
+  const month = new Date().toISOString().slice(0, 7);
+  const now = new Date().toISOString();
+  gh.seed(USAGE, register.ipPath(iph, month), { ip_hash: iph, month, events: [now, now] });
+  register.setSender(async (msg) => {
+    sent.push(msg);
+    const cur = gh.read(USAGE, register.ipPath(iph, month));
+    gh.seed(USAGE, register.ipPath(iph, month), { ...cur, events: cur.events.concat([now]) }); // a concurrent register won
+    return { ok: true };
+  });
+  const r = await call(registerReq("race@example.com", { ip }));
+  assert.equal(r._status, 429);
+  assert.equal(r._body.reason, "ip_registration_window");
+  const c = await call(confirmReq(tokenFrom(sent[0])));
+  assert.notEqual(c._status, 200, "the voided link mints nothing");
+});
+
 test("NOT CONFIGURED: no sender and no RESEND_* env -> 501 before any write", async () => {
   register.setSender(null);
   const r = await call(registerReq("cfg@example.com"));
@@ -338,12 +357,16 @@ test("NOT CONFIGURED: no sender and no RESEND_* env -> 501 before any write", as
   assert.equal(gh.putLog.length, 0);
 });
 
-test("MAIL FAILURE: 502 retry_safe, and a retry sends a fresh link", async () => {
+test("MAIL FAILURE: 502 mail_failed spends no IP slot; a retry sends a fresh link", async () => {
   register.setSender(async () => { throw new Error("boom"); });
   const ip = freshIp();
-  const r = await call(registerReq("mf@example.com", { ip }));
-  assert.equal(r._status, 502);
-  assert.equal(r._body.reason, "mail_send_failed");
+  for (let i = 0; i < 5; i++) {
+    const r = await call(registerReq("mf@example.com", { ip }));
+    assert.equal(r._status, 502);
+    assert.equal(r._body.reason, "mail_failed");
+  }
+  const month = new Date().toISOString().slice(0, 7);
+  assert.equal(gh.has(USAGE, register.ipPath(register.ipHash(ip), month)), false, "five failed sends consumed nothing");
   register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
   const r2 = await call(registerReq("mf@example.com", { ip }));
   assert.equal(r2._status, 202);
