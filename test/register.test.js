@@ -1,0 +1,447 @@
+// test/register.test.js — the registration grant (lib/_register.js via
+// api/fulfill.js ?op=register|confirm|register-status|register-report), the
+// "grant" plan in lib/_meter.js, the purchased flag in lib/_balance.js, and
+// the durable hourly pin counter in api/pin.js. Mock store only; the mail
+// sender is injected, and a fetch guard fails the test if anything tries to
+// reach a network host that is not the mocked GitHub API.
+"use strict";
+
+process.env.GITHUB_USAGE_REPO = "test-owner/test-usage";
+process.env.GITHUB_PIN_REPO = "test-owner/test-pins";
+process.env.GITHUB_PIN_BRANCH = "main";
+process.env.GITHUB_PIN_TOKEN = "test-token";
+process.env.REGISTER_IP_SALT = "test-salt-not-a-secret";
+process.env.WITNESS_ADMIN_KEY = "test-admin-key";
+delete process.env.RESEND_API_KEY;
+delete process.env.RESEND_FROM;
+delete process.env.WITNESS_KEYS;
+delete process.env.WITNESS_PLANS;
+delete process.env.WITNESS_CADENCE;
+
+const { test, beforeEach, afterEach } = require("node:test");
+const assert = require("node:assert/strict");
+
+const { MockGitHubStore } = require("./helpers/mock_store.js");
+const { makeReq, makeRes } = require("./helpers/http_mocks.js");
+const store = require("../lib/_store.js");
+const balance = require("../lib/_balance.js");
+const keys = require("../lib/_keys.js");
+const meter = require("../lib/_meter.js");
+const register = require("../lib/_register.js");
+const fulfill = require("../api/fulfill.js");
+const pin = require("../api/pin.js");
+
+const USAGE = process.env.GITHUB_USAGE_REPO;
+
+let gh, sent, foreignCalls, restoreFetch;
+const realPutSleep = store._putRetry.sleep;
+
+beforeEach(() => {
+  gh = new MockGitHubStore();
+  sent = [];
+  foreignCalls = [];
+  const original = global.fetch;
+  global.fetch = (url, opts) => {
+    if (!String(url).startsWith("https://api.github.com/")) {
+      foreignCalls.push(String(url));
+      return Promise.resolve({ status: 599, ok: false, json: async () => ({}), text: async () => "blocked in tests" });
+    }
+    return gh.handleFetch(url, opts);
+  };
+  restoreFetch = () => { global.fetch = original; };
+  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  store._putRetry.sleep = async () => {};
+  pin._resetRateBuckets();
+});
+
+afterEach(() => {
+  assert.deepEqual(foreignCalls, [], "a test reached a non-GitHub host (mail must go through the injected sender)");
+  register.setSender(null);
+  store._putRetry.sleep = realPutSleep;
+  restoreFetch();
+});
+
+let ipCounter = 0;
+function freshIp() {
+  ipCounter += 1;
+  return `203.0.113.${ipCounter % 250}`;
+}
+
+async function call(req) {
+  const res = makeRes();
+  await fulfill(req, res);
+  return res;
+}
+
+function registerReq(email, { ip = freshIp(), agent, xff } = {}) {
+  const body = { email };
+  if (agent !== undefined) body.agent = agent;
+  return makeReq({
+    method: "POST",
+    headers: { "x-forwarded-for": xff || ip, accept: "application/json" },
+    body,
+    query: { op: "register" },
+  });
+}
+
+function tokenFrom(msg) {
+  const m = /[?&]t=([0-9a-f]{64})/.exec(msg.text);
+  assert.ok(m, "the email carries a confirm link");
+  return m[1];
+}
+
+function confirmReq(t, json = true) {
+  return makeReq({ method: "GET", headers: json ? { accept: "application/json" } : { accept: "text/html" }, query: { op: "confirm", t } });
+}
+
+function statusReq(email) {
+  return makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", email } });
+}
+
+async function registerAndConfirm(email, opts) {
+  const r = await call(registerReq(email, opts));
+  assert.equal(r._status, 202, JSON.stringify(r._body));
+  const c = await call(confirmReq(tokenFrom(sent[sent.length - 1])));
+  assert.equal(c._status, 200, JSON.stringify(c._body));
+  return c._body;
+}
+
+function pinReq(key, namespace, rows) {
+  return makeReq({
+    method: "POST",
+    headers: { authorization: `Bearer ${key}` },
+    body: { namespace, rows, chain: rows.toString(16).padStart(8, "a") },
+  });
+}
+
+// ---------------------------------------------------------------- happy path
+
+test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credits; second confirm is idempotent", async () => {
+  const r = await call(registerReq("Jane@Example.com", { agent: "claude-agent" }));
+  assert.equal(r._status, 202);
+  assert.equal(r._body.state, "pending");
+  assert.equal(r._body.key, undefined, "register never returns a key");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, "jane@example.com");
+  assert.ok(!/wk_[0-9a-f]{48}/.test(sent[0].text), "the email carries the link, not a key");
+
+  const emailHash = register.sha256("jane@example.com");
+  const reg = gh.read(USAGE, register.regPath(emailHash));
+  assert.equal(reg.state, "pending");
+  assert.equal(reg.agent, "claude-agent");
+  assert.match(reg.token_hash, /^[0-9a-f]{64}$/);
+  assert.match(reg.ip_hash, /^[0-9a-f]{64}$/);
+  assert.ok(!JSON.stringify(reg).includes("jane@"), "the registration stores no raw email");
+  assert.ok(!JSON.stringify(reg).includes("203.0.113."), "the registration stores no raw IP");
+
+  const s1 = await call(statusReq("jane@example.com"));
+  assert.deepEqual(s1._body, { state: "pending" });
+
+  const token = tokenFrom(sent[0]);
+  const c1 = await call(confirmReq(token));
+  assert.equal(c1._status, 200);
+  assert.equal(c1._body.state, "confirmed");
+  assert.match(c1._body.key, /^wk_[0-9a-f]{48}$/);
+  assert.equal(c1._body.credit_balance, 500);
+  assert.equal(c1._body.already_credited, false);
+
+  const keyHash = keys.keyHash(c1._body.key);
+  const issued = gh.read(USAGE, keys.issuedKeyPath(keyHash));
+  assert.equal(issued.plan, "grant");
+  assert.equal(issued.source, "register");
+  const ful = gh.read(USAGE, keys.fulfillmentPath(register.fulfillId(emailHash)));
+  assert.equal(ful.key, c1._body.key);
+  const regAfter = gh.read(USAGE, register.regPath(emailHash));
+  assert.equal(regAfter.state, "confirmed");
+  assert.equal(regAfter.key_hash, keyHash);
+
+  const c2 = await call(confirmReq(token));
+  assert.equal(c2._status, 200);
+  assert.equal(c2._body.key, c1._body.key, "same key on a second confirm");
+  assert.equal(c2._body.already_credited, true);
+  assert.equal(c2._body.credit_balance, 500, "never granted twice");
+  assert.equal((await balance.readBalance(keyHash)).balance, 500);
+
+  const s2 = await call(statusReq("jane@example.com"));
+  assert.deepEqual(s2._body, { state: "confirmed" }, "status returns the state only, never the key");
+});
+
+test("CONFIRM PAGE: HTML shows the key in plain markup (readable without JS)", async () => {
+  await call(registerReq("html@example.com"));
+  const c = await call(confirmReq(tokenFrom(sent[0]), false));
+  assert.equal(c._status, 200);
+  assert.match(c._headers["content-type"], /text\/html/);
+  assert.match(c._body, /<code id="key">wk_[0-9a-f]{48}<\/code>/);
+});
+
+test("CONFIRM: malformed 400, unknown 404, superseded 410, expired 410", async () => {
+  assert.equal((await call(confirmReq("nothex")))._status, 400);
+  assert.equal((await call(confirmReq("a".repeat(64))))._status, 404);
+
+  const ip = freshIp();
+  await call(registerReq("rot@example.com", { ip }));
+  const oldT = tokenFrom(sent[0]);
+  await call(registerReq("rot@example.com", { ip }));
+  assert.equal(sent.length, 2, "a pending email gets a fresh link");
+  const old = await call(confirmReq(oldT));
+  assert.equal(old._status, 410);
+  assert.equal(old._body.reason, "superseded_token");
+
+  await call(registerReq("late@example.com"));
+  const t = tokenFrom(sent[2]);
+  const p = register.regPath(register.sha256("late@example.com"));
+  const rec = gh.read(USAGE, p);
+  rec.token_created_at = new Date(Date.now() - register.TOKEN_TTL_MS - 1000).toISOString();
+  gh.seed(USAGE, p, rec);
+  const exp = await call(confirmReq(t));
+  assert.equal(exp._status, 410);
+  assert.equal(exp._body.reason, "expired_token");
+});
+
+// ---------------------------------------------------------- one grant, ever
+
+test("REPEAT EMAIL: a confirmed email answers 200 confirmed, sends nothing, grants nothing", async () => {
+  const first = await registerAndConfirm("once@example.com");
+  const before = sent.length;
+  const again = await call(registerReq("once@example.com"));
+  assert.equal(again._status, 200);
+  assert.equal(again._body.state, "confirmed");
+  assert.equal(again._body.key, undefined);
+  assert.equal(sent.length, before, "no second email");
+  assert.equal((await balance.readBalance(keys.keyHash(first.key))).balance, 500);
+});
+
+// ---------------------------------------------------------- email hygiene
+
+test("DISPOSABLE DOMAIN: 400, subdomains too, nothing written, nothing sent", async () => {
+  for (const email of ["x@mailinator.com", "x@mx.mailinator.com", "y@yopmail.com"]) {
+    const r = await call(registerReq(email));
+    assert.equal(r._status, 400, email);
+    assert.equal(r._body.reason, "disposable_email");
+  }
+  assert.equal(gh.putLog.length, 0);
+  assert.equal(sent.length, 0);
+});
+
+test("BAD EMAIL: 400 bad_email", async () => {
+  for (const email of ["", "no-at-sign", "a@b", "a..b@example.com", "+tag@example.com", 42]) {
+    const r = await call(registerReq(email));
+    assert.equal(r._status, 400, String(email));
+    assert.equal(r._body.reason, "bad_email");
+  }
+});
+
+test("PLUS-ALIAS COLLAPSE: a+1@x and a@x are one identity; gmail dots and googlemail fold too", async () => {
+  assert.equal(register.normaliseEmail("A+1@X.com").normalised, "a@x.com");
+  assert.equal(register.normaliseEmail("a@x.com").normalised, "a@x.com");
+  assert.equal(register.normaliseEmail("J.Doe+news@googlemail.com").normalised, "jdoe@gmail.com");
+  assert.equal(register.normaliseEmail("jdoe@gmail.com").normalised, "jdoe@gmail.com");
+  assert.equal(register.normaliseEmail("j.doe@example.com").normalised, "j.doe@example.com", "dots only fold at gmail");
+
+  await registerAndConfirm("a+1@x.com");
+  const sentBefore = sent.length;
+  const r = await call(registerReq("a@x.com"));
+  assert.equal(r._status, 200);
+  assert.equal(r._body.state, "confirmed");
+  const r2 = await call(registerReq("a+farm2@x.com"));
+  assert.equal(r2._body.state, "confirmed");
+  assert.equal(sent.length, sentBefore);
+});
+
+// ---------------------------------------------------------- per-IP window
+
+test("IP WINDOW: the 4th registration from one ip_hash in 30 days is 429; another IP is not", async () => {
+  const ip = "198.51.100.7";
+  for (let i = 1; i <= 3; i++) {
+    const r = await call(registerReq(`ipuser${i}@example.com`, { ip }));
+    assert.equal(r._status, 202, `registration ${i}`);
+  }
+  const fourth = await call(registerReq("ipuser4@example.com", { ip }));
+  assert.equal(fourth._status, 429);
+  assert.equal(fourth._body.reason, "ip_registration_window");
+  assert.equal(sent.length, 3, "the refused one sent nothing");
+
+  const other = await call(registerReq("ipuser4@example.com", { ip: "198.51.100.8" }));
+  assert.equal(other._status, 202);
+
+  const iph = register.ipHash(ip);
+  const month = new Date().toISOString().slice(0, 7);
+  const file = gh.read(USAGE, register.ipPath(iph, month));
+  assert.equal(file.events.length, 3);
+  assert.ok(!JSON.stringify(file).includes(ip), "no raw IP at rest");
+});
+
+test("IP WINDOW: a spoofed LEFTMOST x-forwarded-for hop does not buy a new window (rightmost is used)", async () => {
+  const real = "192.0.2.50";
+  for (let i = 1; i <= 3; i++) {
+    const r = await call(registerReq(`spoof${i}@example.com`, { xff: `10.0.0.${i}, ${real}` }));
+    assert.equal(r._status, 202);
+  }
+  const r = await call(registerReq("spoof4@example.com", { xff: `10.9.9.9, ${real}` }));
+  assert.equal(r._status, 429);
+  assert.equal(register.clientIp({ headers: { "x-forwarded-for": "1.1.1.1, 2.2.2.2" } }), "2.2.2.2");
+});
+
+test("IP WINDOW: last month's events inside 30 days still count (rolling, not calendar)", async () => {
+  const ip = "192.0.2.77";
+  const iph = register.ipHash(ip);
+  const now = new Date();
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15)).toISOString().slice(0, 7);
+  const recent = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
+  const old = new Date(Date.now() - 40 * 86400 * 1000).toISOString();
+  gh.seed(USAGE, register.ipPath(iph, prev), { ip_hash: iph, month: prev, events: [recent, recent, old] });
+  assert.equal((await call(registerReq("roll1@example.com", { ip })))._status, 202);
+  assert.equal((await call(registerReq("roll2@example.com", { ip })))._status, 429);
+});
+
+test("NOT CONFIGURED: no sender and no RESEND_* env -> 501 before any write", async () => {
+  register.setSender(null);
+  const r = await call(registerReq("cfg@example.com"));
+  assert.equal(r._status, 501);
+  assert.equal(r._body.reason, "not_configured");
+  assert.equal(gh.putLog.length, 0);
+});
+
+test("MAIL FAILURE: 502 retry_safe, and a retry sends a fresh link", async () => {
+  register.setSender(async () => { throw new Error("boom"); });
+  const ip = freshIp();
+  const r = await call(registerReq("mf@example.com", { ip }));
+  assert.equal(r._status, 502);
+  assert.equal(r._body.reason, "mail_send_failed");
+  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  const r2 = await call(registerReq("mf@example.com", { ip }));
+  assert.equal(r2._status, 202);
+  assert.equal((await call(confirmReq(tokenFrom(sent[0]))))._status, 200);
+});
+
+// ---------------------------------------------------------- grant plan pins
+
+test("GRANT PLAN: a registered key's pin debits a credit; no monthly free counter is touched", async () => {
+  const c = await registerAndConfirm("pinner@example.com");
+  const ns = `${c.namespace}main`;
+  const res = makeRes();
+  await pin(pinReq(c.key, ns, 1), res);
+  assert.equal(res._status, 201, JSON.stringify(res._body));
+  assert.equal(res._headers["x-meter-source"], "credit");
+  assert.equal(res._headers["x-meter-cap"], "0");
+  const h = keys.keyHash(c.key);
+  assert.equal((await balance.readBalance(h)).balance, 499);
+  const month = new Date().toISOString().slice(0, 7);
+  assert.equal(gh.has(USAGE, `usage/${h}/${month}.json`), false, "no monthly free pin was used");
+  assert.equal(meter.PLAN_CAPS.grant, 0);
+  assert.equal(meter.PLAN_CAPS.free, 100, "existing free plan untouched");
+});
+
+test("GRANT PLAN: an empty grant balance is 402 top-up, and the key still reads as never-purchased", async () => {
+  const c = await registerAndConfirm("empty@example.com");
+  const h = keys.keyHash(c.key);
+  const bp = balance.balancePath(h);
+  gh.seed(USAGE, bp, { ...gh.read(USAGE, bp), balance: 0 });
+  const res = makeRes();
+  await pin(pinReq(c.key, `${c.namespace}main`, 1), res);
+  assert.equal(res._status, 402);
+  assert.equal(res._body.reason, "credit_exhausted");
+  assert.equal((await balance.readBalance(h)).ever_purchased, false);
+});
+
+test("FREE PLAN UNCHANGED: a Stripe-style issued key with plan free still gets the monthly free pin", async () => {
+  const key = keys.mintKey();
+  const h = keys.keyHash(key);
+  gh.seed(USAGE, keys.issuedKeyPath(h), { key_hash: h, namespace_prefix: "freeco-", plan: "free", source: "stripe-fulfill" });
+  const res = makeRes();
+  await pin(pinReq(key, "freeco-main", 1), res);
+  assert.equal(res._status, 201);
+  assert.equal(res._headers["x-meter-cap"], "100");
+  assert.equal(res._headers["x-meter-source"], undefined, "charged to the free tier, not credit");
+});
+
+// ---------------------------------------------------------- ever_purchased
+
+test("EVER_PURCHASED: false after the registration grant (and after a refund), true after a Stripe pack", async () => {
+  const h = "b".repeat(64);
+  await balance.grantCredits(h, 500, "registration", "reg-x", "register");
+  let b = await balance.readBalance(h);
+  assert.equal(b.balance, 500);
+  assert.equal(b.ever_purchased, false);
+
+  await balance.grantCredits(h, 1, "refund", "refund-1", "pin-write-failure-refund");
+  assert.equal((await balance.readBalance(h)).ever_purchased, false, "a refund is not a purchase");
+
+  const d = await balance.debitCredits("unused", 1, "x"); // another key, no balance file
+  assert.equal(d.ok, false);
+  assert.equal(d.ever_purchased, false);
+
+  await balance.creditPack(h, "mini", "cs_test_pack123", "stripe-webhook");
+  b = await balance.readBalance(h);
+  assert.equal(b.balance, 1501);
+  assert.equal(b.ever_purchased, true);
+});
+
+test("EVER_PURCHASED: a legacy balance file with no purchased field still reads as purchased", async () => {
+  const h = "c".repeat(64);
+  gh.seed(USAGE, balance.balancePath(h), { key_hash: h, balance: 3, seq: 1, applied_events: ["evt_old"] });
+  assert.equal((await balance.readBalance(h)).ever_purchased, true);
+});
+
+// ---------------------------------------------------------- durable hour cap
+
+test("DURABLE HOUR CAP: 60 pins pass; after a simulated cold start the 61st is still 429", async () => {
+  const c = await registerAndConfirm("hourly@example.com");
+  const ns = `${c.namespace}main`;
+  for (let i = 1; i <= 60; i++) {
+    const res = makeRes();
+    await pin(pinReq(c.key, ns, i), res);
+    assert.equal(res._status, 201, `pin ${i}: ${JSON.stringify(res._body)}`);
+  }
+  pin._resetRateBuckets(); // cold start: the in-memory Map is empty
+  const res = makeRes();
+  await pin(pinReq(c.key, ns, 61), res);
+  assert.equal(res._status, 429);
+  assert.equal(res._body.reason, "hourly_rate_limit");
+  assert.equal(res._body.limit, 60);
+  assert.equal((await balance.readBalance(keys.keyHash(c.key))).balance, 440, "the refused pin charged nothing");
+  const hour = gh.read(USAGE, meter.hourPath(keys.keyHash(c.key), meter.utcHour()));
+  assert.ok(hour.used >= 61);
+});
+
+test("DURABLE HOUR CAP: a store error on the counter fails closed with 503 and charges nothing", async () => {
+  const c = await registerAndConfirm("closed@example.com");
+  const h = keys.keyHash(c.key);
+  gh.forceFailure(USAGE, meter.hourPath(h, meter.utcHour()), 5, 500);
+  const res = makeRes();
+  await pin(pinReq(c.key, `${c.namespace}main`, 1), res);
+  assert.equal(res._status, 503);
+  assert.equal(res._body.reason, "rate_limit_store_error");
+  assert.equal((await balance.readBalance(h)).balance, 500);
+});
+
+// ---------------------------------------------------------- the reader
+
+test("REPORT: admin-only; 14 days per day, top 10 by ip_hash and by domain", async () => {
+  const noAuth = await call(makeReq({ method: "GET", query: { op: "register-report" } }));
+  assert.equal(noAuth._status, 401);
+
+  const ip = "198.51.100.200";
+  await call(registerReq("r1@alpha.com", { ip }));
+  await call(registerReq("r2@alpha.com", { ip }));
+  await registerAndConfirm("r3@beta.com");
+
+  const r = await call(makeReq({ method: "GET", headers: { authorization: "Bearer test-admin-key" }, query: { op: "register-report" } }));
+  assert.equal(r._status, 200, JSON.stringify(r._body));
+  const b = r._body;
+  assert.equal(b.window_days, 14);
+  assert.equal(b.per_day.length, 14);
+  assert.equal(b.total, 3);
+  const today = b.per_day[13];
+  assert.equal(today.date, new Date().toISOString().slice(0, 10));
+  assert.equal(today.registrations, 3);
+  assert.equal(today.confirmed, 1);
+  assert.equal(today.distinct_ip_hashes, 2);
+  assert.equal(today.distinct_domains, 2);
+  assert.ok(b.top_ip_hashes.length <= 10 && b.top_email_domains.length <= 10);
+  assert.deepEqual(b.top_email_domains[0], { email_domain: "alpha.com", count: 2, share: 0.667 });
+  assert.equal(b.top_ip_hashes[0].count, 2);
+  assert.match(b.top_ip_hashes[0].ip_hash, /^[0-9a-f]{16}$/);
+  assert.equal(b.listing_may_be_truncated, false);
+  assert.ok(!JSON.stringify(b).includes(ip));
+});
