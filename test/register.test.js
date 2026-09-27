@@ -1181,3 +1181,13 @@ test("SEND CAP: applies to a non-allowlisted address too, and a failed send does
   assert.equal(sent.length, 3, "failed sends were refunded; three real sends, the 4th capped");
   assert.equal(register.EMAIL_SEND_LIMIT, 3);
 });
+
+// ---------------------------------------------------------- key page wording (third review 5)
+
+test("KEY PAGE WORDING: the raw key is erased by the first request after 15 minutes, not on a timer", async () => {
+  await call(registerReq("wording@example.com"));
+  const c = await call(confirmReq(tokenFrom(sent[0]), false));
+  assert.equal(c._status, 200);
+  assert.ok(!/removed from our store/.test(c._body), "no claim of timed removal");
+  assert.match(c._body, /It is not deleted on a timer: the first request for this link after those 15 minutes erases our stored copy, and from then on it cannot be shown again\./);
+});
