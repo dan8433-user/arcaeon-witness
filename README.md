@@ -744,10 +744,13 @@ and registration answers `501 not_configured` until they are):
 - `WITNESS_REGISTER_ALLOW` (optional, for partners) — comma-separated
   entries, each a DOMAIN or an EXACT IP address (no CIDR ranges; an entry
   with `/` is ignored). A registration or claim whose email domain (or its
-  registrable domain) or caller IP matches skips every durable window
-  (network register, network claim, domain). Verification, the disposable
-  refusal, one grant per email, the in-memory pre-filter and the timing floor
-  still apply. Read per request; no redeploy needed to change it.
+  registrable domain) or caller IP matches skips the NETWORK and DOMAIN
+  windows only (network register, network claim, domain). It never skips
+  anything keyed on the email (third review 4): one grant per email and the
+  per-email send cap (3 mails per 24 hours) apply to every address.
+  Verification, the disposable refusal, the in-memory pre-filter and the
+  timing floor still apply too. Read per request; no redeploy needed to
+  change it.
 
 ## Registration grant (verified email -> one key, 500 credits, once)
 
@@ -832,6 +835,14 @@ the same day against a ten-point review (numbers below are that review's).
   downloaded copy: `node tools/gen_public_suffix.js
   <path to public_suffix_list.dat>` (reads the file, never fetches), then
   `npm test`.
+- **Per-email send cap (third review 4).** Every address, allowlisted or
+  not, gets at most 3 mails (links or held-address notices) per rolling 24
+  hours, counted durably on the email HASH in
+  `registrations/_sends/<emailHash>.json` (CAS, pruned to the window on
+  every write). The 4th request answers the same `200` body, sends nothing,
+  rotates nothing (the last link sent stays the live one) and is logged
+  with the hash prefix only. A send that fails is refunded and does not
+  count. The network slot is still spent on a capped request.
 - **The link does not mint (3).** `GET ?op=confirm&t=<token>` shows one form
   button, "Show my key", and writes nothing (mail scanners GET, they do not
   POST). `POST ?op=confirm` body `{t}` mints (plan `grant`), grants 500

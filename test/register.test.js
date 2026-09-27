@@ -1131,3 +1131,53 @@ test("REPORT: admin-only; 14 days per day, top 10 by ip_hash and by domain", asy
   assert.equal(b.listing_may_be_truncated, false);
   assert.ok(!JSON.stringify(b).includes(ip));
 });
+
+// ---------------------------------------------------------- per-email send cap (third review 4)
+
+test("SEND CAP (third review 4): an allowlisted domain's repeat email gets 3 mails per 24 h; the 4th is the same 200, sends nothing, is logged", async () => {
+  process.env.WITNESS_REGISTER_ALLOW = "partner4.example";
+  const logs = [];
+  const origErr = console.error;
+  console.error = (...a) => logs.push(a.join(" "));
+  try {
+    const bodies = [];
+    for (let i = 1; i <= 4; i++) {
+      const r = await call(registerReq("repeat@partner4.example"));
+      assert.equal(r._status, 200, `register ${i}`);
+      bodies.push(r._body);
+    }
+    assert.equal(sent.length, 3, "three sends, then nothing");
+    assert.deepEqual(Object.keys(bodies[3]).sort(), Object.keys(bodies[0]).sort(), "the 4th answers the same body");
+    assert.equal(bodies[3].note, bodies[0].note);
+    assert.equal(bodies[3].sent, true);
+    const h = register.sha256("repeat@partner4.example");
+    assert.ok(logs.some((l) => l.includes("send cap") && l.includes(h.slice(0, 12))), "the refusal is logged");
+    for (const l of logs) assert.ok(!l.includes("repeat@"), "the log carries the hash, not the address");
+    const counter = gh.read(USAGE, register.sendsPath(h));
+    assert.equal(counter.events.length, 3, "the durable counter holds three sends");
+    assert.ok(!JSON.stringify(counter).includes("repeat@"));
+    // The 3rd link is still the live one: the capped 4th rotated nothing.
+    const c = await call(confirmReq(tokenFrom(sent[2])));
+    assert.equal(c._status, 200, JSON.stringify(c._body));
+    // Past 24 h the counter frees up; one grant per email still holds on the allowlist.
+    const old = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    gh.seed(USAGE, register.sendsPath(h), { events: [old, old, old] });
+    const again = await call(registerReq("repeat@partner4.example"));
+    assert.equal(again._status, 200);
+    assert.equal(sent.length, 4, "a send is allowed again after 24 h");
+    assert.ok(!/op=confirm/.test(sent[3].text), "a held address gets the notice, never a second link");
+    assert.equal(gh.read(USAGE, keys.fulfillmentPath(register.fulfillId(h))).key_hash, keys.keyHash(c._body.key), "still one key");
+  } finally {
+    console.error = origErr;
+    delete process.env.WITNESS_REGISTER_ALLOW;
+  }
+});
+
+test("SEND CAP: applies to a non-allowlisted address too, and a failed send does not count", async () => {
+  register.setSender(async () => { throw new Error("boom"); });
+  for (let i = 0; i < 4; i++) assert.equal((await call(registerReq("capfail@example.com")))._status, 502);
+  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  for (let i = 0; i < 4; i++) assert.equal((await call(registerReq("capfail@example.com")))._status, 200);
+  assert.equal(sent.length, 3, "failed sends were refunded; three real sends, the 4th capped");
+  assert.equal(register.EMAIL_SEND_LIMIT, 3);
+});
