@@ -785,7 +785,13 @@ the same day against a ten-point review (numbers below are that review's).
   response), so a store slow enough to push the fresh path past 1500 ms pads
   the held path to match instead of letting it answer early. The history is
   per warm instance and starts empty on a cold start (then the target is the
-  1500 ms floor).
+  1500 ms floor). **Floored only where it matters (third review 3):** the
+  floor applies to the answers that reached the store and so could carry
+  something about the address: the `200` (fresh or held), the network and
+  domain window `429`s, and the `502`/`503` that can follow store work.
+  Pre-filter answers decided from the request alone (`400` bad input,
+  `405`, the in-memory `429 rate_limited`, `501 not_configured`) return
+  immediately.
 - **Windows (1, 6).** Per NETWORK, not per address, sized for shared
   networks (offices, campuses, carrier NAT): IPv4 whole address 10 per
   rolling 30 days, IPv6 /64 10, plus the IPv6 /48 at 30. Salted

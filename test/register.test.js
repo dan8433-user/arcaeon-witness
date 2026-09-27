@@ -554,19 +554,19 @@ test("STATUS: ?eh= only; the ?email= and ?e= forms are 400 bad_eh and read nothi
   assert.deepEqual(ok._body, { state: "pending_or_unknown" });
 });
 
-test("TIMING FLOOR: every op=register path waits out the rest of 1500 ms before answering", async () => {
+test("TIMING FLOOR (third review 3): the answers that reached the store (200 fresh and held, window 429s, 502) wait out 1500 ms", async () => {
   assert.equal(register._timing.floorMs, 1500);
   await registerAndConfirm("floor-confirmed@example.com");
   const fullIp = "192.0.2.201";
   const month = new Date().toISOString().slice(0, 7);
   const now = new Date().toISOString();
   gh.seed(USAGE, register.ipPath(register.ipHash(fullIp), month), { month, events: Array(register.IP_WINDOW_LIMIT).fill(now) });
+  gh.seed(USAGE, register.domainPath("floorfull.example", month), { month, events: Array(register.DOMAIN_WINDOW_LIMIT).fill(now) });
   const cases = [
-    ["405 wrong method", () => makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register" } }), 405],
-    ["400 bad email", () => registerReq("not-an-email"), 400],
     ["200 fresh", () => registerReq("floor-fresh@example.com"), 200],
     ["200 confirmed address", () => registerReq("floor-confirmed@example.com"), 200],
-    ["429 window", () => registerReq("floor-full@example.com", { ip: fullIp }), 429],
+    ["429 network window", () => registerReq("floor-full@example.com", { ip: fullIp }), 429],
+    ["429 domain window", () => registerReq("x@floorfull.example"), 429],
   ];
   for (const [name, mk, status] of cases) {
     floorWaits = [];
@@ -582,7 +582,43 @@ test("TIMING FLOOR: every op=register path waits out the rest of 1500 ms before 
   floorWaits = [];
   const mf = await call(registerReq("floor-mf@example.com"));
   assert.equal(mf._status, 502);
-  assert.equal(floorWaits.length, 1, "502 mail_failed is floored too");
+  assert.equal(floorWaits.length, 1, "502 mail_failed reached the store and is floored");
+});
+
+test("NO FLOOR ON PRE-FILTERS (third review 3): 400, 405, in-memory 429 and 501 answer at once", async () => {
+  const cases = [
+    ["405 wrong method", () => makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register" } }), 405],
+    ["400 bad email", () => registerReq("not-an-email"), 400],
+    ["400 disposable", () => registerReq("x@mailinator.com"), 400],
+    ["400 bad agent", () => registerReq("ok@example.com", { agent: "<x>" }), 400],
+  ];
+  for (const [name, mk, status] of cases) {
+    floorWaits = [];
+    const r = await call(mk());
+    assert.equal(r._status, status, name);
+    assert.equal(floorWaits.length, 0, `${name}: no floor`);
+  }
+  const ip = "198.51.100.180";
+  let last;
+  for (let i = 0; i <= 30; i++) {
+    floorWaits = [];
+    last = await call(registerReq("not-an-email", { ip }));
+  }
+  assert.equal(last._status, 429);
+  assert.equal(last._body.reason, "rate_limited");
+  assert.equal(floorWaits.length, 0, "in-memory 429: no floor");
+  register.setSender(null);
+  floorWaits = [];
+  const nc = await call(registerReq("cfg2@example.com"));
+  assert.equal(nc._status, 501);
+  assert.equal(floorWaits.length, 0, "501: no floor");
+  // Wall clock, with the real sleep: a 400 comes back well under the floor.
+  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  register._timing.floorSleep = realFloorSleep;
+  const t0 = Date.now();
+  const b = await call(registerReq("still-not-an-email"));
+  assert.equal(b._status, 400);
+  assert.ok(Date.now() - t0 < 500, `a 400 answered in ${Date.now() - t0} ms`);
 });
 
 test("TIMING FLOOR (wall clock): a confirmed address's register takes at least 1500 ms", async () => {
