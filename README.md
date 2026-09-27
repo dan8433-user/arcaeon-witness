@@ -730,6 +730,17 @@ namespace when unset or malformed) and holds no secrets, but lives with the
 others for one reason: it's operational policy, not code — changing it
 shouldn't require a redeploy.
 
+`WITNESS_FETCH_TIMEOUT_MS` (optional, default `10000`) — per-request timeout,
+in milliseconds, on every outbound call: the GitHub contents API (pin store,
+usage store, key store, registration store), Resend (register mail and the
+held-address probe), and the Stripe session check in fulfill. Each call gets
+an AbortController that fires at the timeout, and the timeout also covers the
+response body. A timed-out call is a store error like any other, so the
+caller's existing answers and refunds run: register answers `503 store_error`
+with the window slot given back, a pin write answers its existing `502` with
+the credit refunded. A value that is not a positive number falls back to the
+default. Read per request (`lib/_fetch.js`).
+
 Registration grant env (2026-09-27; all three **not yet set — human step**,
 and registration answers `501 not_configured` until they are):
 

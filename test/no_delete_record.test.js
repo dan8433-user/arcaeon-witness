@@ -53,7 +53,7 @@ test("no DELETE path against the public record in lib/, api/, tools/", () => {
   assert.deepEqual(violations(files, read), []);
   // The allowed DELETE in _balance.js must target the usage repo, not REPO.
   const bal = read("lib/_balance.js");
-  const m = bal.match(/fetch\(`\$\{API\}\/repos\/\$\{(\w+)\}[^`]*`,\s*\{\s*method:\s*"DELETE"/);
+  const m = bal.match(/(?:timedF|f)etch\(`\$\{API\}\/repos\/\$\{(\w+)\}[^`]*`,\s*\{\s*method:\s*"DELETE"/);
   assert.ok(m, "could not find the DELETE call in _balance.js; re-audit the allowlist");
   assert.equal(m[1], "USAGE_REPO");
   // The pin store itself exports nothing that deletes.

@@ -86,6 +86,8 @@
 
 "use strict";
 
+const { timedFetch } = require("../lib/_fetch.js");
+
 const balance = require("../lib/_balance.js");
 const meter = require("../lib/_meter.js");
 const keys = require("../lib/_keys.js");
@@ -413,7 +415,7 @@ module.exports = async (req, res) => {
   // --- verify the session SERVER-SIDE against Stripe ---
   let sr;
   try {
-    sr = await fetch(
+    sr = await timedFetch(
       `https://api.stripe.com/v1/checkout/sessions/${sid}?expand[]=line_items`,
       { headers: { authorization: `Bearer ${sk}` } }
     );
