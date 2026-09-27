@@ -168,7 +168,7 @@ async function durableHourDeny(key) {
   return null;
 }
 
-async function meterAndCharge(key, planHint) {
+async function meterAndCharge(key, planHint, keySource) {
   // Durable per-key hourly limit (2026-09-27). The in-memory Map (rateLimited)
   // resets on every cold start and is per instance, so it never bounded a KEY.
   // This counter lives in the private usage repo and survives both. It runs
@@ -176,10 +176,12 @@ async function meterAndCharge(key, planHint) {
   // idempotent no-op re-pin write nothing (same rule as the charge). Fails
   // CLOSED: if it cannot count, the pin is refused (503), never waved through.
   //
-  // Plan "grant" keys ONLY (review 5): those are the new, free-to-obtain keys
-  // the counter exists for. Env, free-plan and Stripe keys keep the in-memory
-  // check alone, so their per-pin write cost and failure modes are unchanged.
-  if (planHint === "grant") {
+  // REGISTRATION keys ONLY: the issued-key record's source is "register"
+  // (review 5, narrowed 2026-09-27 decision 1). Those are the free-to-obtain
+  // keys the counter exists for. Stripe-minted keys are plan "grant" too (no
+  // monthly free pins) but keep the in-memory check alone: no store write per
+  // pin, no new 503. Env and free-plan keys the same.
+  if (keySource === "register") {
     const d = await durableHourDeny(key);
     if (d) return d;
   }
@@ -522,12 +524,14 @@ module.exports = async (req, res) => {
   const auth = req.headers.authorization || "";
   const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
   let prefix = key ? store.keyPrefixFor(key) : null;
-  let planHint = null; // the issued-key record's plan ("grant" for registration keys)
+  let planHint = null; // the issued-key record's plan ("grant" for registration and new Stripe keys)
+  let keySource = null; // the issued-key record's source; only "register" gets the durable hour counter
   if (prefix === null && key) {
     try {
       const rec = await issuedKeys.issuedKeyRecord(key);
       prefix = rec ? rec.prefix : null;
       planHint = rec ? rec.plan : null;
+      keySource = rec ? rec.source : null;
     } catch (err) {
       return res.status(502).json({ error: `key store error: ${err.message}` });
     }
@@ -688,7 +692,7 @@ module.exports = async (req, res) => {
           if (heal.deny) return res.status(heal.deny.status).json(heal.deny.body);
 
           if (!metered) {
-            const charge = await meterAndCharge(key, planHint);
+            const charge = await meterAndCharge(key, planHint, keySource);
             applyHeaders(res, charge.headers);
             if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
             metered = true;
@@ -812,7 +816,7 @@ module.exports = async (req, res) => {
       if (heal.deny) return res.status(heal.deny.status).json(heal.deny.body);
 
       if (!metered) {
-        const charge = await meterAndCharge(key, planHint);
+        const charge = await meterAndCharge(key, planHint, keySource);
         applyHeaders(res, charge.headers);
         if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
         metered = true;

@@ -224,7 +224,7 @@ function successHtml(record, creditBalance, consentStored) {
     "Your Arcaeon witness key",
     `<h1>Payment verified — your witness key</h1>
 ${copyBox("key", record.key)}
-<p><b>${esc(String(record.credits))} prepaid pins</b> are on your balance (one credit = one pin; new keys have no monthly free allowance). Your key pins any namespace starting with <code>${esc(ns)}</code>.</p>
+<p><b>${esc(String(record.credits))} prepaid pins</b> are on your balance (one credit = one pin; ${record.plan === "free" ? "this key also keeps its monthly free allowance" : "new keys have no monthly free allowance"}). Your key pins any namespace starting with <code>${esc(ns)}</code>.</p>
 <p class="muted">Check your balance any time at <a href="${esc(BASE_URL)}/api/balance">${esc(BASE_URL)}/api/balance</a> — you paste the key on the page; the link itself carries nothing.</p>
 <p class="warn">Save this key now. This page re-shows it any time via your Stripe receipt link — treat that link like the key itself.</p>
 <h2>Install the client</h2>
@@ -698,6 +698,14 @@ module.exports = async (req, res) => {
       kind: "solo",
       created_at: record.created_at,
     });
+    // The plan this key ACTUALLY has: the issued-key record is create-only, so
+    // a session minted before 2026-09-27 still says "free". A first visit just
+    // wrote "grant"; a revisit reads the record (one read) and reports it.
+    let keyPlan = "grant";
+    if (!firstVisit) {
+      const kr = await keys.readIssuedKey(record.key_hash);
+      if (kr && typeof kr.plan === "string") keyPlan = kr.plan;
+    }
     const grant = await balance.creditPack(record.key_hash, record.pack, sid, "stripe-fulfill");
     if (grant.ledger_write_failed) {
       // Same gap as api/pin.js's meterAndCharge / api/stripe-webhook.js
@@ -746,15 +754,15 @@ module.exports = async (req, res) => {
       pool_id: record.pool_id,
       org: record.org,
       credit_balance: grant.balance_after,
-      plan: "grant",
-      free_tier_monthly_cap: meter.PLAN_CAPS.grant, // 0: new keys have no monthly free pins
+      plan: keyPlan, // from the key record, not a literal (an old session's key may be "free")
+      free_tier_monthly_cap: Object.prototype.hasOwnProperty.call(meter.PLAN_CAPS, keyPlan) ? meter.PLAN_CAPS[keyPlan] : null,
       already_fulfilled: !firstVisit,
       ...(grant.ledger_write_failed ? { ledger_write_failed: true } : {}),
       consent_product_updates: consentStored,
       support: SUPPORT_EMAIL,
     };
     return respond(req, res, 200, jsonBody, () =>
-      successHtml({ ...record, namespace_prefix: shownPrefix }, grant.balance_after, consentStored));
+      successHtml({ ...record, namespace_prefix: shownPrefix, plan: keyPlan }, grant.balance_after, consentStored));
   } catch (err) {
     // A red verdict thrown from anywhere below the payment gate is a refusal
     // with its named reason (503, not retry_safe), never the transient

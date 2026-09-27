@@ -800,12 +800,17 @@ field in the balance file set only by a purchase (packs `registration` and
 `refund` do not set it); a pre-existing balance file without the field reads
 as purchased, as before.
 
-Plan `grant` keys also carry a DURABLE limit of 60 pins per key per UTC hour
+Registration keys (issued-key record `source: "register"`) also carry a
+DURABLE limit of 60 pins per key per UTC hour
 (`usage/<hash>/hour-<YYYY-MM-DDTHH>.json`), checked BEFORE the write (a key at
 the limit is refused on a read) behind the in-memory 60/hour pre-filter. It
 runs only on a pin that will be recorded and fails closed: `503
-rate_limit_store_error`. Env, free-plan and Stripe keys keep the in-memory
-check only, so their write cost and failure modes are unchanged (5).
+rate_limit_store_error`. Stripe-minted keys are plan `grant` too (no monthly
+free pins, every pin debits a credit) but keep the in-memory check only: no
+store write per pin and no new 503. Env and free-plan keys the same (5). A
+revisit of a Stripe session reports the plan stored in its key record
+(`plan`, `free_tier_monthly_cap`), so a session minted before 2026-09-27
+still reads `free`.
 
 Every per-IP decision in this service (`lib/_ratelimit.js`, registration,
 stamps) now reads the RIGHTMOST x-forwarded-for hop (8).

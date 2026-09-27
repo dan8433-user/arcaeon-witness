@@ -718,6 +718,24 @@ test("DURABLE HOUR CAP: a free-plan key's pin makes no hour-counter write (in-me
   assert.equal(res2._status, 201, "a free-plan key's pin does not depend on the hour-counter store");
 });
 
+test("DURABLE HOUR CAP: a Stripe-minted plan-grant key debits credits but writes no hour counter and never 503s on it", async () => {
+  const key = keys.mintKey();
+  const h = keys.keyHash(key);
+  gh.seed(USAGE, keys.issuedKeyPath(h), { key_hash: h, namespace_prefix: "stripeg-", plan: "grant", source: "stripe-fulfill" });
+  gh.seed(USAGE, balance.balancePath(h), { key_hash: h, balance: 10, seq: 1, purchased: true, applied_events: [] });
+  const res = makeRes();
+  await pin(pinReq(key, "stripeg-main", 1), res);
+  assert.equal(res._status, 201, JSON.stringify(res._body));
+  assert.equal(res._headers["x-meter-source"], "credit", "plan grant: no monthly free pin");
+  assert.equal(res._headers["x-meter-cap"], "0");
+  assert.equal((await balance.readBalance(h)).balance, 9);
+  assert.equal(gh.putLog.filter((w) => /\/hour-/.test(w.path)).length, 0, "no hour counter written for a Stripe key");
+  gh.forceFailure(USAGE, meter.hourPath(h, meter.utcHour()), 5, 500);
+  const res2 = makeRes();
+  await pin(pinReq(key, "stripeg-main", 2), res2);
+  assert.equal(res2._status, 201, "a Stripe key's pin does not depend on the hour-counter store");
+});
+
 // ---------------------------------------------------------- the reader
 
 test("REPORT: admin-only; 14 days per day, top 10 by ip_hash and by domain", async () => {

@@ -901,6 +901,24 @@ test("BREAK ARM: a hand-built green carrying a prefix cannot reach the page; onl
 // retired for NEW keys, Stripe-minted included). Existing records untouched.
 // ---------------------------------------------------------------------
 
+test("OLD STRIPE SESSION REVISIT: reports the plan stored in its key record, not a literal grant", async () => {
+  const id = sid();
+  stripe.seed(paidSession({ id, _pack: "mini" }));
+  const first = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(first._status, 200);
+  assert.equal(first._body.plan, "grant");
+  const kp = `keys/${keys.keyHash(first._body.key)}.json`;
+  gh.seed(USAGE, kp, { ...gh.read(USAGE, kp), plan: "free" }); // a key minted before 2026-09-27
+  const again = await call({ query: { session_id: id }, headers: JSON_HDR });
+  assert.equal(again._status, 200);
+  assert.equal(again._body.already_fulfilled, true);
+  assert.equal(again._body.plan, "free");
+  assert.equal(again._body.free_tier_monthly_cap, 100);
+  assert.equal(gh.read(USAGE, kp).plan, "free", "the revisit does not rewrite the key record");
+  const page = String((await call({ query: { session_id: id } }))._body);
+  assert.ok(!page.includes("new keys have no monthly free allowance"), "an old free key's page does not deny its allowance");
+});
+
 test("NEW STRIPE KEY: mints as plan grant; JSON and page say no monthly free allowance; welcome email too", async () => {
   const id = sid();
   stripe.seed(paidSession({ id, _pack: "mini" }));

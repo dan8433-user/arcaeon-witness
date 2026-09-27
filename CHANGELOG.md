@@ -1,5 +1,11 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-27 (evening) — registration grant, second review round: eight decisions (branch `register-grant-2026-09-27`, local only, NOT deployed)
+
+One commit per decision, each with its test.
+
+- (1) the durable hour counter keys on the issued-key record's source: "register" only. Stripe-minted keys stay plan grant (no monthly free pins) with the in-memory check only, no store write per pin, no new 503. `keys.issuedKeyRecord` returns `source`; new `keys.readIssuedKey(hash)`. A Stripe session revisit reports the plan stored in its key record (and that plan's cap), not a literal "grant".
+
 ## 2026-09-27 (later) — registration grant hardened against the ten-point review (branch `register-grant-2026-09-27`, rebased onto `release-candidate-2026-09-23b` a9d8fce, local only, NOT deployed)
 
 One commit per finding, each with its tests; README "Registration grant" carries the resulting contract.
@@ -8,7 +14,7 @@ One commit per finding, each with its tests; README "Registration grant" carries
 - (2) confirm: in-memory pre-filter plus a durable per-network claim window; non-matching token = bare 404, at most one read (a replaced token's index is voided at rotation); confirmed revisits write nothing.
 - (3) the GET link never mints: a "Show my key" form; the POST shows the key once, records key_shown_at, removes the raw key from the store; a second claim is 409 already_claimed.
 - (4) no oracle: confirmed and fresh registrations answer the same 200 (decoy t8, no mail, no slot); status is pending_or_unknown unless the caller proves t8.
-- (5) durable hour limit checked before the write, plan grant only; free, env and Stripe keys unchanged.
+- (5) durable hour limit checked before the write, for keys whose issued-key record has source "register" only; Stripe-minted keys are plan grant (no monthly free pins) but keep the in-memory check only, no store write per pin, no new 503; free and env keys unchanged.
 - (6) IP slot spent only after the mail is out; send failure 502 mail_failed consumes nothing; a lost slot race voids the link.
 - (7) agent label out of the mail, record only, [A-Za-z0-9 ._-]{0,32}.
 - (8) lib/_ratelimit.js reads the rightmost x-forwarded-for hop (its old contract test asserted leftmost and was changed with it).
