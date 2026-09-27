@@ -47,9 +47,18 @@ test("CONTRACT: two different IPs get two independent buckets", () => {
   assert.equal(okB.limited, false, "IP B's budget must be untouched by IP A's usage");
 });
 
-test("CONTRACT: x-forwarded-for with multiple hops uses the leftmost (original client)", () => {
+test("CONTRACT: x-forwarded-for with multiple hops uses the RIGHTMOST (the hop our nearest proxy appended; the leftmost is client-written)", () => {
   const req = { headers: { "x-forwarded-for": "198.51.100.7, 10.0.0.1, 10.0.0.2" } };
-  assert.equal(ratelimit.callerIp(req), "198.51.100.7");
+  assert.equal(ratelimit.callerIp(req), "10.0.0.2");
+});
+
+test("REGRESSION: a made-up leftmost hop does not buy a fresh bucket", () => {
+  const real = "192.0.2.201";
+  let last;
+  for (let i = 0; i <= ratelimit.LIMIT; i++) {
+    last = ratelimit.check({ headers: { "x-forwarded-for": `10.1.${i}.1, ${real}` } });
+  }
+  assert.equal(last.limited, true, "one real client spoofing the leftmost hop still hits its limit");
 });
 
 test("CONTRACT: falls back to socket.remoteAddress when x-forwarded-for is absent", () => {
