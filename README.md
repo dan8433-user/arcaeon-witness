@@ -950,6 +950,27 @@ revisit of a Stripe session reports the plan stored in its key record
 (`plan`, `free_tier_monthly_cap`), so a session minted before 2026-09-27
 still reads `free`.
 
+Trial namespace hygiene (2026-09-27, pricing council anti-abuse control 5).
+A registration key gets the namespace prefix `trial-<8 hex>-` (for example
+`trial-3f2a1b0c-`) instead of the random `wk-<12 hex>-`, and the `trial-` stem
+is reserved to custom pickers the same way `wk-` is. It may pin under at most
+**3 distinct namespaces**; the list is durable in
+`trial_namespaces/<key hash>.json` (private usage repo, CAS, a sibling of the
+create-only key record). A 4th namespace answers `403 namespace_cap` with
+`cap` and `namespaces` (the three it holds). The check runs only on a pin that
+will be recorded, before the charge: refusals and idempotent re-pins write
+nothing, a namespace slot is spent when the claim lands (a pin that then
+fails keeps it), and a store error fails closed with `503
+namespace_store_error`. A key that later makes a real purchase (balance file
+`purchased: true`; a refund does not count) is released from the cap and keeps
+its prefix: **a prefix is a name, not a tier.** Nothing reads the `trial-`
+stem to decide what a key may do; the cap reads the key record’s `source`
+and the purchased flag. Stripe-minted and env keys are untouched: no cap, no
+extra store read. No env var; the cap is `TRIAL_NAMESPACE_CAP` in
+`lib/_keys.js`. Keys registered before this change keep their `wk-` prefix
+and are capped the same way. Prefix collisions between two trial keys are
+not checked (32 bits, about 1 in 8,600 at 1,000 keys).
+
 Every per-IP decision in this service (`lib/_ratelimit.js`, registration,
 stamps) now reads the RIGHTMOST x-forwarded-for hop (8).
 

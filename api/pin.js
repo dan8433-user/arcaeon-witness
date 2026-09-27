@@ -168,6 +168,45 @@ async function durableHourDeny(key) {
   return null;
 }
 
+// Trial namespace cap (2026-09-27, pricing council anti-abuse control 5).
+// REGISTRATION keys only (issued-key record source "register"): at most
+// issuedKeys.TRIAL_NAMESPACE_CAP distinct namespaces until the key makes a
+// real purchase (balance file purchased:true). Stripe-minted, env and
+// free-plan keys never reach the store here. Runs on the write paths only,
+// just before the charge, so the refusals and the idempotent no-op re-pin
+// above it write nothing; the claim itself is the one write, and only when a
+// NEW namespace fits under the cap. A 4th namespace is 403 namespace_cap,
+// naming the cap and the three it already holds (they are the key's own).
+// Fails CLOSED on a store error (503), same as the durable hour counter.
+async function trialNamespaceGate(key, keySource, namespace) {
+  if (keySource !== "register") return null;
+  const hash = issuedKeys.keyHash(key);
+  let r;
+  try {
+    r = await issuedKeys.claimTrialNamespace(hash, namespace,
+      async () => (await balance.readBalance(hash)).ever_purchased === true);
+  } catch (err) {
+    return {
+      status: 503,
+      body: {
+        error: "namespace store unavailable, so this pin was not accepted and nothing was charged; retry shortly",
+        reason: "namespace_store_error",
+      },
+    };
+  }
+  if (r.ok) return null;
+  return {
+    status: 403,
+    body: {
+      error: `a registration key may pin under at most ${r.cap} distinct namespaces; this key already uses ${r.namespaces.join(", ")}. Pin under one of those, or buy a pack to lift the cap (the key and its prefix stay the same).`,
+      reason: "namespace_cap",
+      cap: r.cap,
+      namespaces: r.namespaces,
+      packs: balance.PACKS,
+    },
+  };
+}
+
 async function meterAndCharge(key, planHint, keySource) {
   // Durable per-key hourly limit (2026-09-27). The in-memory Map (rateLimited)
   // resets on every cold start and is per instance, so it never bounded a KEY.
@@ -692,6 +731,8 @@ module.exports = async (req, res) => {
           if (heal.deny) return res.status(heal.deny.status).json(heal.deny.body);
 
           if (!metered) {
+            const nsDeny = await trialNamespaceGate(key, keySource, namespace);
+            if (nsDeny) return res.status(nsDeny.status).json(nsDeny.body);
             const charge = await meterAndCharge(key, planHint, keySource);
             applyHeaders(res, charge.headers);
             if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
@@ -816,6 +857,8 @@ module.exports = async (req, res) => {
       if (heal.deny) return res.status(heal.deny.status).json(heal.deny.body);
 
       if (!metered) {
+        const nsDeny = await trialNamespaceGate(key, keySource, namespace);
+        if (nsDeny) return res.status(nsDeny.status).json(nsDeny.body);
         const charge = await meterAndCharge(key, planHint, keySource);
         applyHeaders(res, charge.headers);
         if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
