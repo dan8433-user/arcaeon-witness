@@ -100,7 +100,7 @@ function statusReq(email) {
 
 async function registerAndConfirm(email, opts) {
   const r = await call(registerReq(email, opts));
-  assert.equal(r._status, 202, JSON.stringify(r._body));
+  assert.equal(r._status, 200, JSON.stringify(r._body));
   const c = await call(confirmReq(tokenFrom(sent[sent.length - 1])));
   assert.equal(c._status, 200, JSON.stringify(c._body));
   return c._body;
@@ -118,7 +118,7 @@ function pinReq(key, namespace, rows) {
 
 test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credits; second confirm is idempotent", async () => {
   const r = await call(registerReq("Jane@Example.com", { agent: "claude-agent" }));
-  assert.equal(r._status, 202);
+  assert.equal(r._status, 200);
   assert.equal(r._body.state, "pending");
   assert.equal(r._body.key, undefined, "register never returns a key");
   assert.equal(sent.length, 1);
@@ -135,7 +135,9 @@ test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credi
   assert.ok(!JSON.stringify(reg).includes("203.0.113."), "the registration stores no raw IP");
 
   const s1 = await call(statusReq("jane@example.com"));
-  assert.deepEqual(s1._body, { state: "pending" });
+  assert.deepEqual(s1._body, { state: "pending_or_unknown" });
+  const t8 = r._body.t8;
+  assert.match(t8, /^[0-9a-f]{8}$/);
 
   const token = tokenFrom(sent[0]);
   const c1 = await call(confirmReq(token));
@@ -163,7 +165,9 @@ test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credi
   assert.equal((await balance.readBalance(keyHash)).balance, 500);
 
   const s2 = await call(statusReq("jane@example.com"));
-  assert.deepEqual(s2._body, { state: "confirmed" }, "status returns the state only, never the key");
+  assert.deepEqual(s2._body, { state: "pending_or_unknown" }, "without t8 a confirmed address is not revealed");
+  const s3 = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", e: emailHash, t8 } }));
+  assert.deepEqual(s3._body, { state: "confirmed" }, "with t8 the starter sees confirmed; never the key");
 });
 
 test("CONFIRM PAGE: HTML shows the key in plain markup (readable without JS)", async () => {
@@ -200,7 +204,7 @@ test("CONFIRM: malformed 400, unknown 404, superseded 410, expired 410", async (
 
 test("AGENT LABEL: stored on the record only, never in the mail; outside [A-Za-z0-9 ._-]{0,32} is 400", async () => {
   const r = await call(registerReq("agentlabel@example.com", { agent: "my-agent_1.0" }));
-  assert.equal(r._status, 202);
+  assert.equal(r._status, 200);
   assert.equal(gh.read(USAGE, register.regPath(register.sha256("agentlabel@example.com"))).agent, "my-agent_1.0");
   assert.ok(!sent[0].text.includes("my-agent_1.0") && !sent[0].html.includes("my-agent_1.0"), "agent label is not in the email");
   for (const bad of ["<a href=x>", "x".repeat(33), "urgent: verify now!", 7]) {
@@ -217,7 +221,7 @@ test("NO RAW ADDRESS OUT: status_url carries the email hash; no log line carries
   console.log = (...a) => logs.push(a.join(" "));
   try {
     const r = await call(registerReq("privacy.person@example.com"));
-    assert.equal(r._status, 202);
+    assert.equal(r._status, 200);
     const h = register.sha256("privacy.person@example.com");
     assert.ok(r._body.status_url.includes(`e=${h}`));
     assert.ok(!JSON.stringify(r._body).includes("privacy.person"), "no raw address in the response");
@@ -239,12 +243,34 @@ test("NO RAW ADDRESS OUT: status_url carries the email hash; no log line carries
 test("REPEAT EMAIL: a confirmed email answers 200 confirmed, sends nothing, grants nothing", async () => {
   const first = await registerAndConfirm("once@example.com");
   const before = sent.length;
+  const fresh = await call(registerReq("somebody-new@example.com"));
+  const sentAfterFresh = sent.length;
   const again = await call(registerReq("once@example.com"));
-  assert.equal(again._status, 200);
-  assert.equal(again._body.state, "confirmed");
+  assert.equal(again._status, fresh._status, "same status as a fresh registration");
+  assert.deepEqual(Object.keys(again._body).sort(), Object.keys(fresh._body).sort(), "same fields as a fresh registration");
+  assert.equal(again._body.state, "pending");
   assert.equal(again._body.key, undefined);
-  assert.equal(sent.length, before, "no second email");
+  assert.equal(sent.length, sentAfterFresh, "no mail for the confirmed address");
+  assert.equal(sent.length, before + 1, "only the fresh address was mailed");
   assert.equal((await balance.readBalance(keys.keyHash(first.key))).balance, 500);
+});
+
+test("NO ORACLE: register-status answers the same for unknown and pending; a wrong t8 proves nothing; no slot spent for a confirmed address", async () => {
+  const unknown = await call(statusReq("never-seen@example.com"));
+  await call(registerReq("waiting@example.com"));
+  const pending = await call(statusReq("waiting@example.com"));
+  assert.deepEqual(unknown._body, pending._body);
+  assert.deepEqual(pending._body, { state: "pending_or_unknown" });
+
+  const ip = "198.51.100.61";
+  await registerAndConfirm("already@example.com", { ip: "198.51.100.62" });
+  const month = new Date().toISOString().slice(0, 7);
+  const r = await call(registerReq("already@example.com", { ip }));
+  assert.equal(r._status, 200);
+  assert.equal(gh.has(USAGE, register.ipPath(register.ipHash(ip), month)), false, "no slot spent");
+  const h = register.sha256("already@example.com");
+  const wrong = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", e: h, t8: r._body.t8 } }));
+  assert.deepEqual(wrong._body, { state: "pending_or_unknown" }, "the decoy t8 from a confirmed-address register proves nothing");
 });
 
 // ---------------------------------------------------------- email hygiene
@@ -278,10 +304,9 @@ test("PLUS-ALIAS COLLAPSE: a+1@x and a@x are one identity; gmail dots and google
   const sentBefore = sent.length;
   const r = await call(registerReq("a@x.com"));
   assert.equal(r._status, 200);
-  assert.equal(r._body.state, "confirmed");
   const r2 = await call(registerReq("a+farm2@x.com"));
-  assert.equal(r2._body.state, "confirmed");
-  assert.equal(sent.length, sentBefore);
+  assert.equal(r2._status, 200);
+  assert.equal(sent.length, sentBefore, "the collapsed aliases are the confirmed identity: no mail, no grant");
 });
 
 // ---------------------------------------------------------- per-IP window
@@ -290,7 +315,7 @@ test("IP WINDOW: the 4th registration from one ip_hash in 30 days is 429; anothe
   const ip = "198.51.100.7";
   for (let i = 1; i <= 3; i++) {
     const r = await call(registerReq(`ipuser${i}@example.com`, { ip }));
-    assert.equal(r._status, 202, `registration ${i}`);
+    assert.equal(r._status, 200, `registration ${i}`);
   }
   const fourth = await call(registerReq("ipuser4@example.com", { ip }));
   assert.equal(fourth._status, 429);
@@ -298,7 +323,7 @@ test("IP WINDOW: the 4th registration from one ip_hash in 30 days is 429; anothe
   assert.equal(sent.length, 3, "the refused one sent nothing");
 
   const other = await call(registerReq("ipuser4@example.com", { ip: "198.51.100.8" }));
-  assert.equal(other._status, 202);
+  assert.equal(other._status, 200);
 
   const iph = register.ipHash(ip);
   const month = new Date().toISOString().slice(0, 7);
@@ -311,7 +336,7 @@ test("IP WINDOW: a spoofed LEFTMOST x-forwarded-for hop does not buy a new windo
   const real = "192.0.2.50";
   for (let i = 1; i <= 3; i++) {
     const r = await call(registerReq(`spoof${i}@example.com`, { xff: `10.0.0.${i}, ${real}` }));
-    assert.equal(r._status, 202);
+    assert.equal(r._status, 200);
   }
   const r = await call(registerReq("spoof4@example.com", { xff: `10.9.9.9, ${real}` }));
   assert.equal(r._status, 429);
@@ -326,7 +351,7 @@ test("IP WINDOW: last month's events inside 30 days still count (rolling, not ca
   const recent = new Date(Date.now() - 2 * 86400 * 1000).toISOString();
   const old = new Date(Date.now() - 40 * 86400 * 1000).toISOString();
   gh.seed(USAGE, register.ipPath(iph, prev), { ip_hash: iph, month: prev, events: [recent, recent, old] });
-  assert.equal((await call(registerReq("roll1@example.com", { ip })))._status, 202);
+  assert.equal((await call(registerReq("roll1@example.com", { ip })))._status, 200);
   assert.equal((await call(registerReq("roll2@example.com", { ip })))._status, 429);
 });
 
@@ -370,7 +395,7 @@ test("NETWORKS: IPv6 hashes the /64 (and the /48); IPv4-mapped IPv6 is the IPv4 
 test("NETWORKS: a 4th registration from ANY address in one IPv6 /64 is 429", async () => {
   for (let i = 1; i <= 3; i++) {
     const r = await call(registerReq(`v6user${i}@example.com`, { ip: `2001:db8:aa:1::${i}` }));
-    assert.equal(r._status, 202, `registration ${i}`);
+    assert.equal(r._status, 200, `registration ${i}`);
   }
   const r = await call(registerReq("v6user4@example.com", { ip: "2001:db8:aa:1:dead:beef:0:4" }));
   assert.equal(r._status, 429);
@@ -383,7 +408,7 @@ test("NETWORKS: a /48 caps at 10 per 30 days even when each /64 is under its own
     for (let i = 1; i <= 3; i++) {
       n += 1;
       const r = await call(registerReq(`v48user${n}@example.com`, { ip: `2001:db8:bb:${net}::${i}` }));
-      if (n <= 10) assert.equal(r._status, 202, `registration ${n}`);
+      if (n <= 10) assert.equal(r._status, 200, `registration ${n}`);
       else {
         assert.equal(r._status, 429, `registration ${n}`);
         assert.equal(r._body.scope, "v6/48");
@@ -396,7 +421,7 @@ test("DOMAIN WINDOW: a non-major domain gets 5 grants per 30 days; the 6th confi
   const tokens = [];
   for (let i = 1; i <= 6; i++) {
     const r = await call(registerReq(`staff${i}@smallco.example`));
-    assert.equal(r._status, 202, `register ${i} (pending registrations spend no domain slot)`);
+    assert.equal(r._status, 200, `register ${i} (pending registrations spend no domain slot)`);
     tokens.push(tokenFrom(sent[sent.length - 1]));
   }
   for (let i = 0; i < 5; i++) assert.equal((await call(confirmReq(tokens[i])))._status, 200, `grant ${i + 1}`);
@@ -437,7 +462,7 @@ test("MAIL FAILURE: 502 mail_failed spends no IP slot; a retry sends a fresh lin
   assert.equal(gh.has(USAGE, register.ipPath(register.ipHash(ip), month)), false, "five failed sends consumed nothing");
   register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
   const r2 = await call(registerReq("mf@example.com", { ip }));
-  assert.equal(r2._status, 202);
+  assert.equal(r2._status, 200);
   assert.equal((await call(confirmReq(tokenFrom(sent[0]))))._status, 200);
 });
 
