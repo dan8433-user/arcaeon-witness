@@ -349,6 +349,74 @@ test("SLOT RACE: if the last slot is taken while the mail is in flight, the link
   assert.notEqual(c._status, 200, "the voided link mints nothing");
 });
 
+// ---------------------------------------------------------- networks + domains (review 1)
+
+test("NETWORKS: IPv6 hashes the /64 (and the /48); IPv4-mapped IPv6 is the IPv4 address", () => {
+  assert.deepEqual(register.expandIPv6("2001:db8::1"), ["2001", "0db8", "0000", "0000", "0000", "0000", "0000", "0001"]);
+  assert.deepEqual(register.expandIPv6("::ffff:192.0.2.1").slice(5), ["ffff", "c000", "0201"]);
+  assert.equal(register.expandIPv6("not-an-ip"), null);
+  const a = register.networkBuckets("2001:db8:1:2:aaaa::1");
+  const b = register.networkBuckets("2001:db8:1:2:ffff:ffff:ffff:ffff");
+  const c = register.networkBuckets("2001:db8:1:3::1");
+  assert.equal(a[0].scope, "v6/64");
+  assert.equal(a[0].hash, b[0].hash, "same /64, same bucket");
+  assert.notEqual(a[0].hash, c[0].hash, "different /64");
+  assert.equal(a[1].scope, "v6/48");
+  assert.equal(a[1].hash, c[1].hash, "same /48 bucket across /64s");
+  assert.equal(a[1].limit, 10);
+  assert.equal(register.networkBuckets("::ffff:192.0.2.9")[0].hash, register.networkBuckets("192.0.2.9")[0].hash);
+});
+
+test("NETWORKS: a 4th registration from ANY address in one IPv6 /64 is 429", async () => {
+  for (let i = 1; i <= 3; i++) {
+    const r = await call(registerReq(`v6user${i}@example.com`, { ip: `2001:db8:aa:1::${i}` }));
+    assert.equal(r._status, 202, `registration ${i}`);
+  }
+  const r = await call(registerReq("v6user4@example.com", { ip: "2001:db8:aa:1:dead:beef:0:4" }));
+  assert.equal(r._status, 429);
+  assert.equal(r._body.scope, "v6/64");
+});
+
+test("NETWORKS: a /48 caps at 10 per 30 days even when each /64 is under its own 3", async () => {
+  let n = 0;
+  for (let net = 1; net <= 4; net++) {
+    for (let i = 1; i <= 3; i++) {
+      n += 1;
+      const r = await call(registerReq(`v48user${n}@example.com`, { ip: `2001:db8:bb:${net}::${i}` }));
+      if (n <= 10) assert.equal(r._status, 202, `registration ${n}`);
+      else {
+        assert.equal(r._status, 429, `registration ${n}`);
+        assert.equal(r._body.scope, "v6/48");
+      }
+    }
+  }
+});
+
+test("DOMAIN WINDOW: a non-major domain gets 5 grants per 30 days; the 6th confirm and the next register are 429", async () => {
+  const tokens = [];
+  for (let i = 1; i <= 6; i++) {
+    const r = await call(registerReq(`staff${i}@smallco.example`));
+    assert.equal(r._status, 202, `register ${i} (pending registrations spend no domain slot)`);
+    tokens.push(tokenFrom(sent[sent.length - 1]));
+  }
+  for (let i = 0; i < 5; i++) assert.equal((await call(confirmReq(tokens[i])))._status, 200, `grant ${i + 1}`);
+  const sixth = await call(confirmReq(tokens[5]));
+  assert.equal(sixth._status, 429);
+  assert.equal(sixth._body.reason, "domain_registration_window");
+  const more = await call(registerReq("staff7@smallco.example"));
+  assert.equal(more._status, 429);
+  assert.equal(more._body.reason, "domain_registration_window");
+  assert.equal(sent.length, 6, "no link mailed once the domain is full");
+});
+
+test("DOMAIN WINDOW: major providers are exempt (gmail, outlook, regional yahoo)", async () => {
+  assert.equal(register.isMajorProvider("gmail.com"), true);
+  assert.equal(register.isMajorProvider("yahoo.co.jp"), true);
+  assert.equal(register.isMajorProvider("hotmail.co.uk"), true);
+  assert.equal(register.isMajorProvider("smallco.example"), false);
+  for (let i = 1; i <= 6; i++) await registerAndConfirm(`person${i}@gmail.com`);
+});
+
 test("NOT CONFIGURED: no sender and no RESEND_* env -> 501 before any write", async () => {
   register.setSender(null);
   const r = await call(registerReq("cfg@example.com"));
