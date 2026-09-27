@@ -89,10 +89,12 @@ ${errorBlock}
 // key never appears anywhere in the page.
 function balanceHtml(prefix, bal, freeTier) {
   const freeLine =
-    freeTier.cap === null
+    freeTier.plan === "grant"
+      ? `Registration key (<b>grant</b> plan): no monthly free pins; every pin uses one credit.`
+      : freeTier.cap === null
       ? `Free tier: plan <b>${esc(freeTier.plan)}</b> — no monthly cap configured.`
       : `Free tier (<b>${esc(freeTier.plan)}</b> plan, ${esc(freeTier.month)}): ${esc(String(freeTier.used))} of ${esc(String(freeTier.cap))} used — <b>${esc(String(Math.max(0, freeTier.cap - freeTier.used)))} remaining</b> this month.`;
-  const creditLine = bal.ever_purchased
+  const creditLine = bal.ever_purchased || bal.balance > 0
     ? `<b>${esc(String(bal.balance))} prepaid pins</b> remaining${bal.updated_at ? ` <span class="muted">(updated ${esc(bal.updated_at)})</span>` : ""}.`
     : `<b>0 prepaid pins</b> — no credit pack purchased yet (the free tier below still applies).`;
   return pageShell(
@@ -114,14 +116,17 @@ ${copyBox("curl", `curl -s ${baseUrl()}/api/balance -H "Authorization: Bearer <Y
 // {prefix} | {prefix:null} | {storeError}.
 async function resolvePrefix(key) {
   let prefix = key ? store.keyPrefixFor(key) : null;
+  let plan = null; // issued-key record's plan ("grant" = registration key, no monthly free tier)
   if (prefix === null && key) {
     try {
-      prefix = await issuedKeys.issuedKeyPrefix(key);
+      const rec = await issuedKeys.issuedKeyRecord(key);
+      prefix = rec ? rec.prefix : null;
+      plan = rec ? rec.plan : null;
     } catch (err) {
-      return { prefix: null, storeError: err };
+      return { prefix: null, plan: null, storeError: err };
     }
   }
-  return { prefix, storeError: null };
+  return { prefix, plan, storeError: null };
 }
 
 module.exports = async (req, res) => {
@@ -143,7 +148,7 @@ module.exports = async (req, res) => {
       if (req.method === "GET") return sendHtml(res, 200, formHtml(null));
       return sendHtml(res, 400, formHtml("Paste your witness key first — the field came through empty."));
     }
-    const { prefix, storeError } = await resolvePrefix(key);
+    const { prefix, plan, storeError } = await resolvePrefix(key);
     if (storeError) {
       return sendHtml(res, 502, formHtml("The key store is unreachable right now — nothing is wrong with your key. Retry in a minute."));
     }
@@ -153,7 +158,7 @@ module.exports = async (req, res) => {
     try {
       const [bal, freeTier] = await Promise.all([
         balance.readBalance(balance.keyHash(key)),
-        meter.peek(key),
+        meter.peek(key, plan),
       ]);
       return sendHtml(res, 200, balanceHtml(prefix, bal, freeTier));
     } catch (err) {
@@ -172,9 +177,12 @@ module.exports = async (req, res) => {
   const auth = req.headers.authorization || "";
   const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
   let prefix = key ? store.keyPrefixFor(key) : null;
+  let plan = null;
   if (prefix === null && key) {
     try {
-      prefix = await issuedKeys.issuedKeyPrefix(key);
+      const rec = await issuedKeys.issuedKeyRecord(key);
+      prefix = rec ? rec.prefix : null;
+      plan = rec ? rec.plan : null;
     } catch (err) {
       return res.status(502).json({ error: `key store error: ${err.message}` });
     }
@@ -186,7 +194,7 @@ module.exports = async (req, res) => {
   try {
     const [bal, freeTier] = await Promise.all([
       balance.readBalance(balance.keyHash(key)),
-      meter.peek(key),
+      meter.peek(key, plan),
     ]);
     res.setHeader("cache-control", "no-store");
     return res.status(200).json({

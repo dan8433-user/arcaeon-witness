@@ -135,10 +135,45 @@ function rateLimited(key) {
 // Returns exactly one of:
 //   { ok:true, source, headers }        -> proceed to the write
 //   { deny:{status,body}, headers }     -> caller must return this response
-async function meterAndCharge(key) {
+async function meterAndCharge(key, planHint) {
+  // Durable per-key hourly limit (2026-09-27). The in-memory Map (rateLimited)
+  // resets on every cold start and is per instance, so it never bounded a KEY.
+  // This counter lives in the private usage repo and survives both. It runs
+  // here, on the path that is about to record a write, so refusals and the
+  // idempotent no-op re-pin write nothing (same rule as the charge). Fails
+  // CLOSED: if it cannot count, the pin is refused (503), never waved through.
+  try {
+    const h = await meter.hourCheck(key, RATE_LIMIT);
+    if (h.limited) {
+      return {
+        deny: {
+          status: 429,
+          body: {
+            error: `rate limit exceeded: ${h.limit} pins per key per hour`,
+            reason: "hourly_rate_limit",
+            used: h.used, limit: h.limit, hour_utc: h.hour,
+            retry_after_seconds: h.retryAfterSeconds,
+          },
+        },
+        headers: { "Retry-After": String(h.retryAfterSeconds) },
+      };
+    }
+  } catch (err) {
+    return {
+      deny: {
+        status: 503,
+        body: {
+          error: "rate limit store unavailable, so this pin was not accepted and nothing was charged; retry shortly",
+          reason: "rate_limit_store_error",
+        },
+      },
+      headers: {},
+    };
+  }
+
   let m;
   try {
-    m = await meter.check(key);
+    m = await meter.check(key, planHint);
   } catch (err) {
     return { deny: { status: 502, body: { error: `metering store error: ${err.message}` } }, headers: {} };
   }
@@ -177,7 +212,12 @@ async function meterAndCharge(key) {
       }
       return { ok: true, source: "credit", headers };
     }
-    if (c.ever_purchased) {
+    // A registration-grant key ("grant" plan, cap 0) has no monthly free tier
+    // to have "reached": its only allowance was the one-time grant. So an
+    // empty balance answers 402 "top up", not 429 "monthly cap", WITHOUT
+    // pretending the key ever purchased (ever_purchased stays what the
+    // balance file says; see lib/_balance.js purchasedOf).
+    if (c.ever_purchased || m.plan === "grant") {
       return {
         deny: {
           status: 402,
@@ -467,9 +507,12 @@ module.exports = async (req, res) => {
   const auth = req.headers.authorization || "";
   const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
   let prefix = key ? store.keyPrefixFor(key) : null;
+  let planHint = null; // the issued-key record's plan ("grant" for registration keys)
   if (prefix === null && key) {
     try {
-      prefix = await issuedKeys.issuedKeyPrefix(key);
+      const rec = await issuedKeys.issuedKeyRecord(key);
+      prefix = rec ? rec.prefix : null;
+      planHint = rec ? rec.plan : null;
     } catch (err) {
       return res.status(502).json({ error: `key store error: ${err.message}` });
     }
@@ -502,9 +545,14 @@ module.exports = async (req, res) => {
     });
   }
 
+  // In-memory pre-filter first: free, and it stops one hot loop on one
+  // instance without a store round trip.
   if (rateLimited(key)) {
     return res.status(429).json({ error: "rate limit exceeded (naive Stage-0 limiter)" });
   }
+  // The DURABLE hourly limit runs inside meterAndCharge (first thing, before
+  // any charge), not here: it writes a counter, and every refusal below must
+  // write nothing (test/planted_dead_ledger.test.js holds that line).
 
   // Metering + credit are charged INSIDE the write paths below (via
   // meterAndCharge), never here (2026-08-14 billing/race fix). Every rejection
@@ -625,7 +673,7 @@ module.exports = async (req, res) => {
           if (heal.deny) return res.status(heal.deny.status).json(heal.deny.body);
 
           if (!metered) {
-            const charge = await meterAndCharge(key);
+            const charge = await meterAndCharge(key, planHint);
             applyHeaders(res, charge.headers);
             if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
             metered = true;
@@ -749,7 +797,7 @@ module.exports = async (req, res) => {
       if (heal.deny) return res.status(heal.deny.status).json(heal.deny.body);
 
       if (!metered) {
-        const charge = await meterAndCharge(key);
+        const charge = await meterAndCharge(key, planHint);
         applyHeaders(res, charge.headers);
         if (charge.deny) return res.status(charge.deny.status).json(charge.deny.body);
         metered = true;
@@ -860,3 +908,7 @@ module.exports = async (req, res) => {
     return res.status(502).json({ error: `pin store error: ${err.message}` });
   }
 };
+
+// Test hook: simulate a cold start (the in-memory pre-filter emptied) so a
+// test can prove the DURABLE hourly counter is what holds the line.
+module.exports._resetRateBuckets = () => rateBuckets.clear();
