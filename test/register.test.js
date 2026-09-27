@@ -600,12 +600,37 @@ test("DOMAIN WINDOW: a non-major domain gets 5 grants per 30 days; the 6th confi
   assert.equal(sent.length, 6, "no link mailed once the domain is full");
 });
 
-test("DOMAIN WINDOW: major providers are exempt (gmail, outlook, regional yahoo)", async () => {
-  assert.equal(register.isMajorProvider("gmail.com"), true);
-  assert.equal(register.isMajorProvider("yahoo.co.jp"), true);
-  assert.equal(register.isMajorProvider("hotmail.co.uk"), true);
-  assert.equal(register.isMajorProvider("smallco.example"), false);
+test("DOMAIN WINDOW: the major-provider exemption is an exact list, no prefix or regional matching", async () => {
+  for (const d of ["gmail.com", "googlemail.com", "outlook.com", "hey.com", "mail.com", "t-online.de", "zoho.com"]) {
+    assert.equal(register.isMajorProvider(d), true, d);
+  }
+  for (const d of ["yahoo.co.jp", "hotmail.co.uk", "outlook.fr", "live.de", "gmail.com.evil.example", "evilgmail.com", "x.gmail.com", "smallco.example"]) {
+    assert.equal(register.isMajorProvider(d), false, d);
+  }
+  assert.equal(register.MAJOR_PROVIDERS.size, 40);
   for (let i = 1; i <= 6; i++) await registerAndConfirm(`person${i}@gmail.com`);
+});
+
+test("DOMAIN WINDOW: keyed on the registrable domain; subdomains share one window", async () => {
+  assert.equal(register.registrableDomain("acme.example"), "acme.example");
+  assert.equal(register.registrableDomain("a.b.acme.example"), "acme.example");
+  assert.equal(register.registrableDomain("shop.acme.co.uk"), "acme.co.uk");
+  assert.equal(register.registrableDomain("mail.acme.com.au"), "acme.com.au");
+  assert.equal(register.registrableDomain("x.uni.ac.jp"), "uni.ac.jp");
+  assert.equal(register.registrableDomain("a.b.c.d.example"), "d.example");
+  const tokens = [];
+  const n = register.DOMAIN_WINDOW_LIMIT + 1;
+  for (let i = 1; i <= n; i++) {
+    const r = await call(registerReq(`u${i}@sub${i}.farm.example`));
+    assert.equal(r._status, 200, `register ${i}`);
+    tokens.push(tokenFrom(sent[sent.length - 1]));
+  }
+  for (let i = 0; i < n - 1; i++) assert.equal((await call(confirmReq(tokens[i])))._status, 200, `grant ${i + 1}`);
+  const last = await call(confirmReq(tokens[n - 1]));
+  assert.equal(last._status, 429, "a fresh subdomain is not a fresh window");
+  assert.equal(last._body.reason, "domain_registration_window");
+  const month = new Date().toISOString().slice(0, 7);
+  assert.equal(gh.read(USAGE, register.domainPath("farm.example", month)).events.length, n - 1);
 });
 
 test("NOT CONFIGURED: no sender and no RESEND_* env -> 501 before any write", async () => {

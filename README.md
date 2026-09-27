@@ -772,9 +772,22 @@ the same day against a ten-point review (numbers below are that review's).
   conflict is retried up to 8 times with a jittered pause; exhaustion answers
   `503 store_busy` before any mail, with no slot spent (an IPv6 /64 already
   taken is refunded when its /48 exhausts). Per email
-  DOMAIN, outside a list of major mailbox providers: 5 grants per 30 days in
-  `registrations/_domain/<domain>/<YYYY-MM>.json`, spent at mint (so fake
-  registrations at someone's domain cannot use it up), read at register.
+  DOMAIN, outside an EXACT list of 40 major mailbox domains (gmail.com,
+  googlemail.com, outlook.com, hotmail.com, live.com, msn.com, yahoo.com,
+  ymail.com, icloud.com, me.com, mac.com, proton.me, protonmail.com, pm.me,
+  aol.com, mail.com, gmx.com, gmx.de, gmx.net, yandex.com, yandex.ru, qq.com,
+  163.com, 126.com, naver.com, daum.net, web.de, t-online.de, orange.fr,
+  free.fr, comcast.net, att.net, verizon.net, sbcglobal.net, cox.net,
+  fastmail.com, hey.com, tutanota.com, tuta.io, zoho.com; no prefix or
+  regional matching, so hotmail.co.uk has its own window): 5 grants per 30
+  days in `registrations/_domain/<registrable domain>/<YYYY-MM>.json`, spent
+  at mint (so fake registrations at someone's domain cannot use it up), read
+  at register. The window is keyed on the REGISTRABLE domain, so every
+  subdomain of one owner shares it: the last two labels, or the last three
+  when the second-to-last label is co, com, org, net, ac, gov or edu
+  (shop.acme.co.uk -> acme.co.uk). That is a small public-suffix
+  approximation, not the Public Suffix List; a suffix it does not know
+  collapses onto a broader key, which blocks more, never less.
 - **The link does not mint (3).** `GET ?op=confirm&t=<token>` shows one form
   button, "Show my key", and writes nothing (mail scanners GET, they do not
   POST). `POST ?op=confirm` body `{t}` mints (plan `grant`), grants 500
