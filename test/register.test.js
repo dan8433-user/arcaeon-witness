@@ -57,6 +57,7 @@ beforeEach(() => {
   register._timing.retrySleep = async () => {};
   floorWaits = [];
   register._timing.floorSleep = async (ms) => { floorWaits.push(ms); }; // recorded, not waited
+  register._timing.recentFresh = []; // the ceiling target's history is per test
   pin._resetRateBuckets();
 });
 
@@ -437,37 +438,107 @@ test("NO RAW ADDRESS OUT: status_url carries the email hash; no log line carries
 
 // ---------------------------------------------------------- one grant, ever
 
-test("REPEAT EMAIL: a confirmed email answers 200 confirmed, sends nothing, grants nothing", async () => {
+test("REPEAT EMAIL: a confirmed email answers the fresh 200, gets one notice mail (no link, no key), grants nothing", async () => {
   const first = await registerAndConfirm("once@example.com");
   const before = sent.length;
   const fresh = await call(registerReq("somebody-new@example.com"));
-  const sentAfterFresh = sent.length;
   const again = await call(registerReq("once@example.com"));
   assert.equal(again._status, fresh._status, "same status as a fresh registration");
   assert.deepEqual(Object.keys(again._body).sort(), Object.keys(fresh._body).sort(), "same fields as a fresh registration");
   assert.equal(again._body.state, "pending");
   assert.equal(again._body.key, undefined);
-  assert.equal(sent.length, sentAfterFresh, "no mail for the confirmed address");
-  assert.equal(sent.length, before + 1, "only the fresh address was mailed");
+  assert.equal(sent.length, before + 2, "one mail each: the fresh link and the held-address notice");
+  const notice = sent[sent.length - 1];
+  assert.equal(notice.to, "once@example.com");
+  assert.equal(notice.text, "This address already holds an Arcaeon key. If that was not you, reply to this message.\n");
+  assert.ok(!/op=confirm|https?:\/\//.test(notice.text + notice.html), "the notice carries no link");
+  assert.ok(!/wk_[0-9a-f]{48}/.test(notice.text + notice.html), "the notice carries no key");
   assert.equal((await balance.readBalance(keys.keyHash(first.key))).balance, 500);
 });
 
-test("NO ORACLE: register-status answers the same for unknown and pending; a wrong t8 proves nothing; no slot spent for a confirmed address", async () => {
+test("NO ORACLE (third review 1): a confirmed and a fresh address give the same status, body shape, slot spend, store round trips and one send each", async () => {
+  await registerAndConfirm("held@parity.example", { ip: "198.51.100.90" });
+  const month = new Date().toISOString().slice(0, 7);
+  const shape = (b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, k === "t8" ? /^[0-9a-f]{8}$/.test(v) : typeof v]));
+  async function probe(email, ip) {
+    const g0 = gh.getLog.length, p0 = gh.putLog.length, s0 = sent.length;
+    floorWaits = [];
+    const r = await call(registerReq(email, { ip }));
+    return {
+      status: r._status,
+      body: r._body,
+      shape: shape(r._body),
+      gets: gh.getLog.length - g0,
+      puts: gh.putLog.length - p0,
+      sends: sent.length - s0,
+      slot: gh.read(USAGE, register.ipPath(register.ipHash(ip), month)).events.length,
+      floored: floorWaits.length,
+    };
+  }
+  const fresh = await probe("new@parity.example", "198.51.100.91");
+  const held = await probe("held@parity.example", "198.51.100.92");
+  assert.equal(fresh.status, 200);
+  assert.equal(held.status, fresh.status, "same status");
+  assert.deepEqual(held.shape, fresh.shape, "same body shape");
+  assert.equal(held.body.note, fresh.body.note, "same wording");
+  assert.equal(fresh.slot, 1, "the fresh address spent one network slot");
+  assert.equal(held.slot, 1, "the held address spent one network slot too");
+  assert.equal(fresh.sends, 1);
+  assert.equal(held.sends, 1, "one send each");
+  assert.equal(held.gets + held.puts, fresh.gets + fresh.puts, `same store round trips (fresh ${fresh.gets}r+${fresh.puts}w, held ${held.gets}r+${held.puts}w)`);
+  assert.equal(held.gets - fresh.gets, fresh.puts - held.puts, "each write the fresh path makes is a shadow read on the held path");
+  assert.equal(held.floored, 1);
+  assert.equal(fresh.floored, 1);
+});
+
+test("NO ORACLE: register-status answers the same for unknown and pending; a decoy t8 from a held address proves nothing", async () => {
   const unknown = await call(statusReq("never-seen@example.com"));
   await call(registerReq("waiting@example.com"));
   const pending = await call(statusReq("waiting@example.com"));
   assert.deepEqual(unknown._body, pending._body);
   assert.deepEqual(pending._body, { state: "pending_or_unknown" });
 
-  const ip = "198.51.100.61";
   await registerAndConfirm("already@example.com", { ip: "198.51.100.62" });
-  const month = new Date().toISOString().slice(0, 7);
-  const r = await call(registerReq("already@example.com", { ip }));
+  const r = await call(registerReq("already@example.com", { ip: "198.51.100.61" }));
   assert.equal(r._status, 200);
-  assert.equal(gh.has(USAGE, register.ipPath(register.ipHash(ip), month)), false, "no slot spent");
   const h = register.sha256("already@example.com");
   const wrong = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", eh: h, t8: r._body.t8 } }));
   assert.deepEqual(wrong._body, { state: "pending_or_unknown" }, "the decoy t8 from a confirmed-address register proves nothing");
+});
+
+test("NO ORACLE: a held address whose notice fails answers the same 502 and refunds its slot, like a fresh one", async () => {
+  await registerAndConfirm("heldfail@example.com", { ip: "198.51.100.93" });
+  register.setSender(async () => { throw new Error("boom"); });
+  const month = new Date().toISOString().slice(0, 7);
+  const a = await call(registerReq("heldfail@example.com", { ip: "198.51.100.94" }));
+  const b = await call(registerReq("freshfail@example.com", { ip: "198.51.100.95" }));
+  assert.equal(a._status, 502);
+  assert.deepEqual(a._body, b._body, "identical 502 bodies");
+  assert.deepEqual(gh.read(USAGE, register.ipPath(register.ipHash("198.51.100.94"), month)).events, [], "held slot refunded");
+  assert.deepEqual(gh.read(USAGE, register.ipPath(register.ipHash("198.51.100.95"), month)).events, [], "fresh slot refunded");
+});
+
+test("FLOOR CEILING TARGET: floored answers wait to the median of recent fresh elapsed times, capped at 8 s", async () => {
+  await registerAndConfirm("target@example.com");
+  register._timing.recentFresh = [3000, 3000, 3000];
+  floorWaits = [];
+  const t0 = Date.now();
+  const r = await call(registerReq("target@example.com"));
+  const elapsed = Date.now() - t0;
+  assert.equal(r._status, 200);
+  assert.equal(floorWaits.length, 1);
+  assert.ok(floorWaits[0] > 1500 && floorWaits[0] <= 3000, `held path padded toward the 3000 ms target (waited ${floorWaits[0]})`);
+  assert.ok(elapsed + floorWaits[0] >= 3000 - 1);
+  register._timing.recentFresh = [60000, 60000, 60000];
+  floorWaits = [];
+  await call(registerReq("target2@example.com"));
+  assert.ok(floorWaits[0] <= register._timing.targetCapMs, `capped (waited ${floorWaits[0]})`);
+  assert.ok(floorWaits[0] > 1500);
+  register._timing.recentFresh = [];
+  floorWaits = [];
+  await call(registerReq("target3@example.com"));
+  assert.equal(register._timing.recentFresh.length, 1, "a fresh registration records its own elapsed time");
+  assert.ok(floorWaits[0] <= 1500, "with no slow history the floor is 1500 ms");
 });
 
 test("STATUS: ?eh= only; the ?email= and ?e= forms are 400 bad_eh and read nothing", async () => {
@@ -557,7 +628,9 @@ test("PLUS-ALIAS COLLAPSE: a+1@x and a@x are one identity; gmail dots and google
   assert.equal(r._status, 200);
   const r2 = await call(registerReq("a+farm2@x.com"));
   assert.equal(r2._status, 200);
-  assert.equal(sent.length, sentBefore, "the collapsed aliases are the confirmed identity: no mail, no grant");
+  const after = sent.slice(sentBefore);
+  assert.equal(after.length, 2, "the collapsed aliases are the confirmed identity: a notice each, no link, no grant");
+  for (const m of after) assert.ok(!/op=confirm/.test(m.text), "a notice, not a link");
 });
 
 // ---------------------------------------------------------- per-IP window

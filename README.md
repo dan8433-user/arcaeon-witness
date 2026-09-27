@@ -764,22 +764,35 @@ the same day against a ten-point review (numbers below are that review's).
   bad_agent` (the label is `[A-Za-z0-9 ._-]{0,32}`, stored on the record,
   never put in the mail; 7), `429 ip_registration_window`, `429
   domain_registration_window`, `502 mail_failed` (nothing consumed; 6).
-- **No oracle (4).** An address that already has its key gets the same `200`
-  a fresh one gets, with a decoy `t8`; no mail is sent and no slot spent. The
-  read-only window checks run first for both. **Timing floor:** every
-  `op=register` answer, whatever path it took (400, 405, 429, 501, 502, 503,
-  fresh or confirmed), goes out no sooner than 1500 ms after the request
-  started (a `setTimeout` floor over a buffered response), so a confirmed
-  address, which writes nothing, cannot be told from a fresh one, which
-  writes and mails, by response time. Paths slower than 1500 ms are not
-  padded further.
+- **No oracle (4; third review 1).** An address that already has its key
+  does the same observable work a fresh one does: the read-only window
+  checks, then the network slot is SPENT exactly as for a fresh address, then
+  one shadow store READ for each store WRITE the fresh path makes (the
+  registration record and the token index), so both paths make the same
+  number of store round trips, then ONE mail through the same sender, a
+  notice with no link and no key: "This address already holds an Arcaeon
+  key. If that was not you, reply to this message." (replies go to
+  support@arcaeon.io). The answer is the same `200` body with a decoy `t8`;
+  a notice that cannot be sent answers the same `502 mail_failed` and
+  refunds the slot the same way. The residual difference between the two is
+  the latency of a store read against a store write. The slot spend and the
+  mail make enumeration cost the prober one network slot per probe and put a
+  mail in the owner's inbox for each one. **Timing floor and ceiling
+  target:** a floored answer goes out no sooner than max(1500 ms, the median
+  elapsed time of the last 16 fresh registrations on that warm instance),
+  capped at 8 s, after the request started (a `setTimeout` over a buffered
+  response), so a store slow enough to push the fresh path past 1500 ms pads
+  the held path to match instead of letting it answer early. The history is
+  per warm instance and starts empty on a cold start (then the target is the
+  1500 ms floor).
 - **Windows (1, 6).** Per NETWORK, not per address, sized for shared
   networks (offices, campuses, carrier NAT): IPv4 whole address 10 per
   rolling 30 days, IPv6 /64 10, plus the IPv6 /48 at 30. Salted
   (`REGISTER_IP_SALT`), never the raw IP, in
   `registrations/_ip/<hash>/<YYYY-MM>.json`. Order: read-only checks, the
-  confirmed-address answer (no slot), then the slot is RESERVED by CAS, then
-  the record and token writes, then the mail. A send failure voids the link,
+  registration read, then the slot is RESERVED by CAS for every address,
+  confirmed or not, then the record and token writes (shadow reads for a
+  confirmed address), then the mail. A send failure voids the link,
   refunds the slot best effort and answers `502 mail_failed` with
   `link_sent: false`; if the refund cannot be written the slot stays spent
   (the safe direction) and `slot_refunded: false` says so. A window CAS
