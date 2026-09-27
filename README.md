@@ -768,33 +768,49 @@ the same day against a ten-point review (numbers below are that review's).
   bad_agent` (the label is `[A-Za-z0-9 ._-]{0,32}`, stored on the record,
   never put in the mail; 7), `429 ip_registration_window`, `429
   domain_registration_window`, `502 mail_failed` (nothing consumed; 6).
-- **No oracle (4; third review 1).** An address that already has its key
-  does the same observable work a fresh one does: the read-only window
-  checks, then the network slot is SPENT exactly as for a fresh address, then
-  one shadow store READ for each store WRITE the fresh path makes (the
-  registration record and the token index), so both paths make the same
-  number of store round trips, then ONE mail through the same sender, a
-  notice with no link and no key: "This address already holds an Arcaeon
-  key. If that was not you, reply to this message." (replies go to
-  support@arcaeon.io). The answer is the same `200` body with a decoy `t8`;
-  a notice that cannot be sent answers the same `502 mail_failed` and
-  refunds the slot the same way. The residual difference between the two is
-  the latency of a store read against a store write. The slot spend and the
-  mail make enumeration cost the prober one network slot per probe and put a
-  mail in the owner's inbox for each one. **Timing floor and ceiling
-  target:** a floored answer goes out no sooner than max(1500 ms, the median
-  elapsed time of the last 16 fresh registrations on that warm instance),
-  capped at 8 s, after the request started (a `setTimeout` over a buffered
-  response), so a store slow enough to push the fresh path past 1500 ms pads
-  the held path to match instead of letting it answer early. The history is
-  per warm instance and starts empty on a cold start (then the target is the
-  1500 ms floor). **Floored only where it matters (third review 3):** the
+- **No oracle (4; third review 1; fourth review 1-4).** Three kinds of
+  address reach the store: new, pending (its token is rotated and the old
+  link stops working) and confirmed ("held"). All three spend the network
+  slot, make the same number of store round trips after it (six: the send
+  counter read and write, the record write, a token-index void read and
+  write, the token-index write; a new registration writes a void marker for
+  a never-issued token so it makes the same number AND kind of calls as a
+  rotation, in the same order; a held address makes six shadow READS), make
+  exactly ONE outbound call to the mail provider through the same sender,
+  and answer the same `200` body (a decoy `t8` for a held address). New and
+  pending send the link. **A held address is sent nothing, ever:** in place
+  of a mail the sender's `probe()` makes one authenticated, read-only request
+  to Resend (`GET https://api.resend.com/domains`, similar latency, mails
+  nobody; a sending-only key answers `401 restricted_api_key` there, which
+  still counts as the round trip). A provider that cannot be reached (network
+  error, `429`, `5xx`) answers the same `502 mail_failed` on every path and
+  refunds the slot the same way. (The notice mail the third review added was
+  removed: three of our mails a day to any address, forever, was a spam
+  vector aimed at the owner, and it spent the owner's own send cap.)
+  **Timing target:** a floored answer goes out no sooner than max(1500 ms,
+  the 90th percentile (nearest rank) of the last 32 fresh-path durations),
+  capped at 6 s, after the request started (a `setTimeout` over a buffered
+  response). The durations are the elapsed times of requests that actually
+  sent a link (new or pending), kept in the private store at
+  `registrations/_timing/fresh.json` (CAS, best effort, written at most once
+  per 30 s per instance, merged with what other instances wrote); a cold
+  instance reads that file before its first floored answer, so it pads to
+  the fleet's history, not to an empty list. The high percentile, not the
+  median, is the point: a median left half of all fresh answers slower than
+  the pad. **Floored only where it matters (third review 3):** the
   floor applies to the answers that reached the store and so could carry
-  something about the address: the `200` (fresh or held), the network and
-  domain window `429`s, and the `502`/`503` that can follow store work.
+  something about the address: the `200` (new, pending or held), the network
+  and domain window `429`s, and the `502`/`503` that can follow store work.
   Pre-filter answers decided from the request alone (`400` bad input,
   `405`, the in-memory `429 rate_limited`, `501 not_configured`) return
   immediately.
+- **What a stranger can still learn.** With many timed probes a determined
+  party may still infer whether an address is registered. Each probe costs
+  them a network slot (one of the 10 a network gets per 30 days), no mail
+  is sent to the address, and no key or credit is exposed. The mitigation is padding every
+  store-reaching answer to a persisted high percentile of real fresh
+  durations; the residual variance is provider latency (store and mail
+  provider) above that percentile.
 - **Windows (1, 6).** Per NETWORK, not per address, sized for shared
   networks (offices, campuses, carrier NAT): IPv4 whole address 10 per
   rolling 30 days, IPv6 /64 10, plus the IPv6 /48 at 30. Salted
@@ -835,14 +851,17 @@ the same day against a ten-point review (numbers below are that review's).
   downloaded copy: `node tools/gen_public_suffix.js
   <path to public_suffix_list.dat>` (reads the file, never fetches), then
   `npm test`.
-- **Per-email send cap (third review 4).** Every address, allowlisted or
-  not, gets at most 3 mails (links or held-address notices) per rolling 24
-  hours, counted durably on the email HASH in
+- **Per-email send cap (third review 4; fourth review 2).** Every address,
+  allowlisted or not, gets at most 3 link mails per rolling 24 hours. Only
+  real sends (new and pending registrations) count; a held address is never
+  mailed and never touches its counter, so probes cannot use up the owner's
+  cap. Counted durably on the email HASH in
   `registrations/_sends/<emailHash>.json` (CAS, pruned to the window on
   every write). The 4th request answers the same `200` body, sends nothing,
   rotates nothing (the last link sent stays the live one) and is logged
   with the hash prefix only. A send that fails is refunded and does not
-  count. The network slot is still spent on a capped request.
+  count. The network slot is still spent on a capped request, and it makes
+  the same round trips (shadow reads) and one `probe()`, like a held one.
 - **The link does not mint (3).** `GET ?op=confirm&t=<token>` shows one form
   button, "Show my key", and writes nothing (mail scanners GET, they do not
   POST). `POST ?op=confirm` body `{t}` mints (plan `grant`), grants 500

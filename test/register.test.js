@@ -38,6 +38,21 @@ const realPutSleep = store._putRetry.sleep;
 const realRetrySleep = register._timing.retrySleep;
 const realFloorSleep = register._timing.floorSleep;
 let floorWaits = [];
+let senderCalls = []; // ["send" | "probe"], every call the handler made on the sender, in order
+
+// The injected sender (lib/_register.js: {send, probe}). send records the mail;
+// probe records that the provider was touched and mails nobody.
+function okSender() {
+  return {
+    send: async (msg) => { senderCalls.push("send"); sent.push(msg); return { ok: true }; },
+    probe: async () => { senderCalls.push("probe"); return { ok: true }; },
+  };
+}
+// A provider that is down: both calls fail (a probe fails where a send would).
+function failSender(message, before) {
+  const boom = async (kind) => { senderCalls.push(kind); if (before) before(); throw new Error(message); };
+  return { send: () => boom("send"), probe: () => boom("probe") };
+}
 
 beforeEach(() => {
   gh = new MockGitHubStore();
@@ -52,12 +67,13 @@ beforeEach(() => {
     return gh.handleFetch(url, opts);
   };
   restoreFetch = () => { global.fetch = original; };
-  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  register.setSender(okSender());
   store._putRetry.sleep = async () => {};
   register._timing.retrySleep = async () => {};
   floorWaits = [];
   register._timing.floorSleep = async (ms) => { floorWaits.push(ms); }; // recorded, not waited
-  register._timing.recentFresh = []; // the ceiling target's history is per test
+  senderCalls = [];
+  register._timing.reset(); // a cold instance per test: the p90 history comes from the (fresh) mock store
   pin._resetRateBuckets();
 });
 
@@ -425,7 +441,7 @@ test("NO RAW ADDRESS OUT: status_url carries the email hash; no log line carries
     assert.ok(!JSON.stringify(r._body).includes("privacy.person"), "no raw address in the response");
     const s = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", eh: h } }));
     assert.equal(s._status, 200);
-    register.setSender(async () => { throw new Error("upstream said privacy.person@example.com bounced"); });
+    register.setSender(failSender("upstream said privacy.person@example.com bounced"));
     await call(registerReq("privacy.person@example.com"));
     await call(confirmReq(tokenFrom(sent[0])));
   } finally {
@@ -438,57 +454,135 @@ test("NO RAW ADDRESS OUT: status_url carries the email hash; no log line carries
 
 // ---------------------------------------------------------- one grant, ever
 
-test("REPEAT EMAIL: a confirmed email answers the fresh 200, gets one notice mail (no link, no key), grants nothing", async () => {
+test("REPEAT EMAIL: a confirmed email answers the fresh 200, is sent NOTHING (one probe, no mail), grants nothing", async () => {
   const first = await registerAndConfirm("once@example.com");
   const before = sent.length;
   const fresh = await call(registerReq("somebody-new@example.com"));
+  senderCalls = [];
   const again = await call(registerReq("once@example.com"));
   assert.equal(again._status, fresh._status, "same status as a fresh registration");
   assert.deepEqual(Object.keys(again._body).sort(), Object.keys(fresh._body).sort(), "same fields as a fresh registration");
   assert.equal(again._body.state, "pending");
   assert.equal(again._body.key, undefined);
-  assert.equal(sent.length, before + 2, "one mail each: the fresh link and the held-address notice");
-  const notice = sent[sent.length - 1];
-  assert.equal(notice.to, "once@example.com");
-  assert.equal(notice.text, "This address already holds an Arcaeon key. If that was not you, reply to this message.\n");
-  assert.ok(!/op=confirm|https?:\/\//.test(notice.text + notice.html), "the notice carries no link");
-  assert.ok(!/wk_[0-9a-f]{48}/.test(notice.text + notice.html), "the notice carries no key");
+  assert.equal(sent.length, before + 1, "only the fresh address got a mail; the held address got none");
+  assert.deepEqual(senderCalls, ["probe"], "the held path made exactly one sender call, and it was probe(), not send()");
+  assert.ok(sent.every((m) => m.to !== "once@example.com" || /op=confirm/.test(m.text)), "the held address was never sent a notice");
+  assert.ok(sent.every((m) => m.replyTo === undefined), "no reply_to plumbing is left on any mail");
   assert.equal((await balance.readBalance(keys.keyHash(first.key))).balance, 500);
 });
 
-test("NO ORACLE (third review 1): a confirmed and a fresh address give the same status, body shape, slot spend, store round trips and one send each", async () => {
+test("NO ORACLE (fourth review 1-3): new, pending and held give the same status, body shape, slot spend, store round trips and ONE sender call each", async () => {
   await registerAndConfirm("held@parity.example", { ip: "198.51.100.90" });
+  await call(registerReq("pend@parity.example", { ip: "198.51.100.89" })); // now pending
   const month = new Date().toISOString().slice(0, 7);
   const shape = (b) => Object.fromEntries(Object.entries(b).map(([k, v]) => [k, k === "t8" ? /^[0-9a-f]{8}$/.test(v) : typeof v]));
+  // Every store call, in order, by method (the fixture's fetch, not a count the handler reports).
+  const inner = global.fetch;
+  let trips = [];
+  global.fetch = (url, opts) => {
+    if (String(url).startsWith("https://api.github.com/")) trips.push((opts && opts.method) || "GET");
+    return inner(url, opts);
+  };
+  const heldCounterBefore = JSON.stringify(gh.read(USAGE, register.sendsPath(register.sha256("held@parity.example"))));
   async function probe(email, ip) {
-    const g0 = gh.getLog.length, p0 = gh.putLog.length, s0 = sent.length;
+    register._timing.lastPersistAt = Date.now(); // no timing-history write inside the measured request
+    trips = [];
+    senderCalls = [];
+    const s0 = sent.length;
     floorWaits = [];
     const r = await call(registerReq(email, { ip }));
     return {
       status: r._status,
       body: r._body,
       shape: shape(r._body),
-      gets: gh.getLog.length - g0,
-      puts: gh.putLog.length - p0,
-      sends: sent.length - s0,
+      trips: trips.slice(),
+      calls: senderCalls.slice(),
+      mails: sent.length - s0,
       slot: gh.read(USAGE, register.ipPath(register.ipHash(ip), month)).events.length,
       floored: floorWaits.length,
     };
   }
   const fresh = await probe("new@parity.example", "198.51.100.91");
+  const pending = await probe("pend@parity.example", "198.51.100.93");
   const held = await probe("held@parity.example", "198.51.100.92");
+  global.fetch = inner;
   assert.equal(fresh.status, 200);
-  assert.equal(held.status, fresh.status, "same status");
-  assert.deepEqual(held.shape, fresh.shape, "same body shape");
-  assert.equal(held.body.note, fresh.body.note, "same wording");
-  assert.equal(fresh.slot, 1, "the fresh address spent one network slot");
-  assert.equal(held.slot, 1, "the held address spent one network slot too");
-  assert.equal(fresh.sends, 1);
-  assert.equal(held.sends, 1, "one send each");
-  assert.equal(held.gets + held.puts, fresh.gets + fresh.puts, `same store round trips (fresh ${fresh.gets}r+${fresh.puts}w, held ${held.gets}r+${held.puts}w)`);
-  assert.equal(held.gets - fresh.gets, fresh.puts - held.puts, "each write the fresh path makes is a shadow read on the held path");
-  assert.equal(held.floored, 1);
+  for (const [name, p] of [["pending", pending], ["held", held]]) {
+    assert.equal(p.status, fresh.status, `${name}: same status`);
+    assert.deepEqual(p.shape, fresh.shape, `${name}: same body shape`);
+    assert.equal(p.body.note, fresh.body.note, `${name}: same wording`);
+    assert.equal(p.slot, 1, `${name}: spent one network slot`);
+    assert.equal(p.trips.length, fresh.trips.length, `${name}: same store round trips (new ${fresh.trips.join(",")}; ${name} ${p.trips.join(",")})`);
+    assert.equal(p.floored, 1, `${name}: floored`);
+    assert.equal(p.calls.length, 1, `${name}: exactly one sender call`);
+  }
+  assert.equal(fresh.slot, 1);
+  assert.deepEqual(pending.trips, fresh.trips, "a rotation makes the same number AND kind of store calls, in the same order, as a new registration");
+  assert.ok(fresh.trips.filter((m) => m === "PUT").length >= 4, "the new path's writes: send counter, record, token void, token index");
+  assert.equal(held.trips.filter((m) => m === "PUT").length, 1, "the held path's one write is the network slot; the rest are shadow reads");
+  assert.equal(fresh.trips.filter((m) => m === "PUT").length - 1, register.STORE_TRIPS - 2, "past the slot, the new path writes STORE_TRIPS - 2 times (two of its trips are reads)");
+  assert.deepEqual(fresh.calls, ["send"]);
+  assert.deepEqual(pending.calls, ["send"]);
+  assert.deepEqual(held.calls, ["probe"], "held: one probe(), never send()");
+  assert.equal(fresh.mails, 1);
+  assert.equal(pending.mails, 1);
+  assert.equal(held.mails, 0, "the held address is sent nothing");
   assert.equal(fresh.floored, 1);
+  assert.equal(JSON.stringify(gh.read(USAGE, register.sendsPath(register.sha256("held@parity.example")))), heldCounterBefore, "the held address's send counter was not touched");
+});
+
+test("SEND CAP (fourth review 2): probes at a confirmed address never touch its send counter, so they cannot use up its cap", async () => {
+  await registerAndConfirm("victim@example.com");
+  const h = register.sha256("victim@example.com");
+  const before = gh.read(USAGE, register.sendsPath(h));
+  assert.equal(before.events.length, 1, "the one real send is counted");
+  const s0 = sent.length;
+  senderCalls = [];
+  for (let i = 0; i < 6; i++) assert.equal((await call(registerReq("victim@example.com")))._status, 200);
+  assert.equal(sent.length, s0, "six probes, no mail");
+  assert.deepEqual(senderCalls, Array(6).fill("probe"));
+  assert.deepEqual(gh.read(USAGE, register.sendsPath(h)), before, "the counter is exactly as it was");
+});
+
+test("RESEND SENDER: a new address is one POST /emails (no reply_to); a held address is one GET /domains and no mail; a 401 probe still counts", async () => {
+  process.env.RESEND_API_KEY = "re_test_not_a_key";
+  process.env.RESEND_FROM = "Test <keys@example.com>";
+  register.setSender(null); // the real Resend sender, over a stubbed fetch
+  const inner = global.fetch;
+  const resend = [];
+  let probeStatus = 200;
+  global.fetch = (url, opts) => {
+    if (String(url).startsWith("https://api.resend.com/")) {
+      const method = (opts && opts.method) || "GET";
+      resend.push({ method, url: String(url), body: opts && opts.body ? JSON.parse(opts.body) : null });
+      const status = method === "GET" ? probeStatus : 200;
+      return Promise.resolve({ status, ok: status < 300, json: async () => ({ id: "em_1" }), text: async () => "" });
+    }
+    return inner(url, opts);
+  };
+  try {
+    const r = await call(registerReq("rs@example.com"));
+    assert.equal(r._status, 200);
+    assert.equal(resend.length, 1);
+    assert.equal(resend[0].method, "POST");
+    assert.equal(resend[0].url, "https://api.resend.com/emails");
+    assert.equal(resend[0].body.reply_to, undefined, "no reply_to on the link mail");
+    const t = /[?&]t=([0-9a-f]{64})/.exec(resend[0].body.text)[1];
+    assert.equal((await call(confirmReq(t)))._status, 200);
+    resend.length = 0;
+    const held = await call(registerReq("rs@example.com"));
+    assert.equal(held._status, 200);
+    assert.deepEqual(resend.map((c) => `${c.method} ${c.url}`), ["GET https://api.resend.com/domains"], "held: exactly one provider call, a read");
+    resend.length = 0;
+    probeStatus = 401; // a sending-only key: restricted_api_key on /domains
+    assert.equal((await call(registerReq("rs@example.com")))._status, 200, "a completed 401 round trip is still a probe");
+    probeStatus = 503;
+    assert.equal((await call(registerReq("rs@example.com")))._status, 502, "provider down: the same 502 a failed send gets");
+  } finally {
+    global.fetch = inner;
+    delete process.env.RESEND_API_KEY;
+    delete process.env.RESEND_FROM;
+  }
 });
 
 test("NO ORACLE: register-status answers the same for unknown and pending; a decoy t8 from a held address proves nothing", async () => {
@@ -506,9 +600,9 @@ test("NO ORACLE: register-status answers the same for unknown and pending; a dec
   assert.deepEqual(wrong._body, { state: "pending_or_unknown" }, "the decoy t8 from a confirmed-address register proves nothing");
 });
 
-test("NO ORACLE: a held address whose notice fails answers the same 502 and refunds its slot, like a fresh one", async () => {
+test("NO ORACLE: a held address whose probe fails (provider down) answers the same 502 and refunds its slot, like a fresh one", async () => {
   await registerAndConfirm("heldfail@example.com", { ip: "198.51.100.93" });
-  register.setSender(async () => { throw new Error("boom"); });
+  register.setSender(failSender("boom"));
   const month = new Date().toISOString().slice(0, 7);
   const a = await call(registerReq("heldfail@example.com", { ip: "198.51.100.94" }));
   const b = await call(registerReq("freshfail@example.com", { ip: "198.51.100.95" }));
@@ -518,27 +612,106 @@ test("NO ORACLE: a held address whose notice fails answers the same 502 and refu
   assert.deepEqual(gh.read(USAGE, register.ipPath(register.ipHash("198.51.100.95"), month)).events, [], "fresh slot refunded");
 });
 
-test("FLOOR CEILING TARGET: floored answers wait to the median of recent fresh elapsed times, capped at 8 s", async () => {
-  await registerAndConfirm("target@example.com");
-  register._timing.recentFresh = [3000, 3000, 3000];
-  floorWaits = [];
+test("FLOOR TARGET (fourth review 4): a cold instance pads to the PERSISTED p90 of fresh durations, not the median", async () => {
+  // 20 fast and 12 slow: the median is 1000 ms (so a median pad would be the
+  // 1500 ms floor); the nearest-rank p90 is 4000 ms.
+  const seeded = Array(20).fill(1000).concat(Array(12).fill(4000));
+  gh.seed(USAGE, register.TIMING_PATH, { samples: seeded });
+  register._timing.reset(); // cold
+  const g0 = gh.getLog.length;
   const t0 = Date.now();
-  const r = await call(registerReq("target@example.com"));
+  const r = await call(registerReq("cold@example.com"));
   const elapsed = Date.now() - t0;
   assert.equal(r._status, 200);
+  assert.ok(gh.getLog.slice(g0).includes(register.TIMING_PATH), "the cold instance read the persisted history");
+  assert.equal(register._timing.loaded, true);
   assert.equal(floorWaits.length, 1);
-  assert.ok(floorWaits[0] > 1500 && floorWaits[0] <= 3000, `held path padded toward the 3000 ms target (waited ${floorWaits[0]})`);
-  assert.ok(elapsed + floorWaits[0] >= 3000 - 1);
-  register._timing.recentFresh = [60000, 60000, 60000];
+  assert.ok(floorWaits[0] > 3000 && floorWaits[0] <= 4000, `padded to the 4000 ms p90 (waited ${floorWaits[0]})`);
+  assert.ok(elapsed + floorWaits[0] >= 4000 - 1);
+});
+
+test("FLOOR TARGET: new, pending, held and both window 429s all answer at the same target", async () => {
+  await registerAndConfirm("t-held@example.com");
+  await call(registerReq("t-pend@example.com"));
+  const seeded = Array(20).fill(1000).concat(Array(12).fill(4000));
+  gh.seed(USAGE, register.TIMING_PATH, { samples: seeded });
+  register._timing.reset();
+  const fullIp = "192.0.2.211";
+  const month = new Date().toISOString().slice(0, 7);
+  const now = new Date().toISOString();
+  gh.seed(USAGE, register.ipPath(register.ipHash(fullIp), month), { month, events: Array(register.IP_WINDOW_LIMIT).fill(now) });
+  gh.seed(USAGE, register.domainPath("tfull.example", month), { month, events: Array(register.DOMAIN_WINDOW_LIMIT).fill(now) });
+  const cases = [
+    ["new", () => registerReq("t-new@example.com"), 200],
+    ["pending", () => registerReq("t-pend@example.com"), 200],
+    ["held", () => registerReq("t-held@example.com"), 200],
+    ["429 network window", () => registerReq("t-full@example.com", { ip: fullIp }), 429],
+    ["429 domain window", () => registerReq("x@tfull.example"), 429],
+  ];
+  for (const [name, mk, status] of cases) {
+    floorWaits = [];
+    const t0 = Date.now();
+    const r = await call(mk());
+    const elapsed = Date.now() - t0;
+    assert.equal(r._status, status, name);
+    assert.equal(floorWaits.length, 1, `${name}: floored once`);
+    assert.ok(floorWaits[0] <= 4000 && elapsed + floorWaits[0] >= 4000 - 1, `${name}: answered at the 4000 ms target (${elapsed} + ${floorWaits[0]})`);
+  }
+});
+
+test("FLOOR TARGET: capped at 6 s; 1500 ms floor with no slow history", async () => {
+  assert.equal(register._timing.targetCapMs, 6000);
+  assert.equal(register._timing.floorMs, 1500);
+  gh.seed(USAGE, register.TIMING_PATH, { samples: Array(32).fill(60000) });
+  register._timing.reset();
   floorWaits = [];
-  await call(registerReq("target2@example.com"));
-  assert.ok(floorWaits[0] <= register._timing.targetCapMs, `capped (waited ${floorWaits[0]})`);
-  assert.ok(floorWaits[0] > 1500);
-  register._timing.recentFresh = [];
+  const t0 = Date.now();
+  await call(registerReq("cap@example.com"));
+  const elapsed = Date.now() - t0;
+  assert.ok(floorWaits[0] <= 6000 && floorWaits[0] > 5000, `capped at 6000 ms (waited ${floorWaits[0]})`);
+  assert.ok(elapsed + floorWaits[0] >= 6000 - 1);
+  gh.seed(USAGE, register.TIMING_PATH, { samples: [] });
+  register._timing.reset();
   floorWaits = [];
-  await call(registerReq("target3@example.com"));
-  assert.equal(register._timing.recentFresh.length, 1, "a fresh registration records its own elapsed time");
-  assert.ok(floorWaits[0] <= 1500, "with no slow history the floor is 1500 ms");
+  await call(registerReq("fast@example.com"));
+  assert.ok(floorWaits[0] <= 1500 && floorWaits[0] > 1000, `the 1500 ms floor (waited ${floorWaits[0]})`);
+});
+
+test("FLOOR HISTORY: fresh durations are persisted by CAS, last 32 kept, at most one write per 30 s per instance; held adds nothing", async () => {
+  const seeded = Array(32).fill(2000);
+  gh.seed(USAGE, register.TIMING_PATH, { samples: seeded });
+  register._timing.reset();
+  const writes = () => gh.putLog.filter((w) => w.path === register.TIMING_PATH).length;
+  await call(registerReq("h1@example.com"));
+  assert.equal(writes(), 1, "the first fresh sample on an instance is written");
+  const stored = gh.read(USAGE, register.TIMING_PATH).samples;
+  assert.equal(stored.length, 32, "last 32 kept");
+  assert.ok(stored[31] < 2000, "the new (fast) sample is the newest entry");
+  await call(registerReq("h2@example.com"));
+  await call(registerReq("h3@example.com"));
+  assert.equal(writes(), 1, "no second write inside 30 s");
+  assert.equal(register._timing.unpersisted.length, 2, "held for the next write");
+  register._timing.lastPersistAt -= 31 * 1000;
+  await call(registerReq("h4@example.com"));
+  assert.equal(writes(), 2, "after 30 s the next fresh sample writes, carrying the held ones");
+  assert.equal(register._timing.unpersisted.length, 0);
+  const s2 = gh.read(USAGE, register.TIMING_PATH).samples;
+  assert.equal(s2.length, 32);
+  assert.equal(s2.filter((x) => x < 2000).length, 4, "all four fresh samples landed");
+  // A held answer records no sample.
+  const c = await call(confirmReq(tokenFrom(sent[sent.length - 1])));
+  assert.equal(c._status, 200);
+  const n = register._timing.recentFresh.length;
+  const u = register._timing.unpersisted.length;
+  await call(registerReq("h4@example.com"));
+  assert.equal(register._timing.unpersisted.length, u, "a held answer is not a fresh sample");
+  assert.equal(register._timing.recentFresh.length, n);
+  // A lost CAS race is best effort: the answer is unaffected, the samples wait.
+  register._timing.lastPersistAt = 0;
+  gh.forceConflict(USAGE, register.TIMING_PATH, 1);
+  const r = await call(registerReq("h5@example.com"));
+  assert.equal(r._status, 200, "a failed history write does not fail the registration");
+  assert.equal(register._timing.unpersisted.length, 1, "the sample waits for the next attempt");
 });
 
 test("STATUS: ?eh= only; the ?email= and ?e= forms are 400 bad_eh and read nothing", async () => {
@@ -578,7 +751,7 @@ test("TIMING FLOOR (third review 3): the answers that reached the store (200 fre
     assert.ok(floorWaits[0] > 0 && floorWaits[0] <= 1500, `${name}: waited ${floorWaits[0]} ms`);
     assert.ok(elapsed + floorWaits[0] >= 1500 - 1, `${name}: answered before the floor (${elapsed} + ${floorWaits[0]})`);
   }
-  register.setSender(async () => { throw new Error("boom"); });
+  register.setSender(failSender("boom"));
   floorWaits = [];
   const mf = await call(registerReq("floor-mf@example.com"));
   assert.equal(mf._status, 502);
@@ -613,7 +786,7 @@ test("NO FLOOR ON PRE-FILTERS (third review 3): 400, 405, in-memory 429 and 501 
   assert.equal(nc._status, 501);
   assert.equal(floorWaits.length, 0, "501: no floor");
   // Wall clock, with the real sleep: a 400 comes back well under the floor.
-  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  register.setSender(okSender());
   register._timing.floorSleep = realFloorSleep;
   const t0 = Date.now();
   const b = await call(registerReq("still-not-an-email"));
@@ -664,9 +837,7 @@ test("PLUS-ALIAS COLLAPSE: a+1@x and a@x are one identity; gmail dots and google
   assert.equal(r._status, 200);
   const r2 = await call(registerReq("a+farm2@x.com"));
   assert.equal(r2._status, 200);
-  const after = sent.slice(sentBefore);
-  assert.equal(after.length, 2, "the collapsed aliases are the confirmed identity: a notice each, no link, no grant");
-  for (const m of after) assert.ok(!/op=confirm/.test(m.text), "a notice, not a link");
+  assert.equal(sent.length, sentBefore, "the collapsed aliases are the confirmed identity: no mail, no link, no grant");
 });
 
 // ---------------------------------------------------------- per-IP window
@@ -902,10 +1073,9 @@ test("MAIL FAILURE: the slot is reserved before the send and refunded on failure
   const ip = freshIp();
   const month = new Date().toISOString().slice(0, 7);
   const p = register.ipPath(register.ipHash(ip), month);
-  register.setSender(async () => {
+  register.setSender(failSender("boom", () => {
     assert.equal(gh.read(USAGE, p).events.length, 1, "the slot is held while the mail is in flight");
-    throw new Error("boom");
-  });
+  }));
   for (let i = 0; i < 5; i++) {
     const r = await call(registerReq("mf@example.com", { ip }));
     assert.equal(r._status, 502);
@@ -914,7 +1084,7 @@ test("MAIL FAILURE: the slot is reserved before the send and refunded on failure
     assert.equal(r._body.slot_refunded, true);
   }
   assert.deepEqual(gh.read(USAGE, p).events, [], "five failed sends consumed nothing");
-  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  register.setSender(okSender());
   const r2 = await call(registerReq("mf@example.com", { ip }));
   assert.equal(r2._status, 200);
   assert.equal((await call(confirmReq(tokenFrom(sent[0]))))._status, 200);
@@ -924,10 +1094,9 @@ test("MAIL FAILURE, REFUND FAILS: the slot stays spent (safe direction) and the 
   const ip = freshIp();
   const month = new Date().toISOString().slice(0, 7);
   const p = register.ipPath(register.ipHash(ip), month);
-  register.setSender(async () => {
+  register.setSender(failSender("boom", () => {
     gh.forceFailure(USAGE, p, 20, 500); // the refund write cannot land
-    throw new Error("boom");
-  });
+  }));
   const r = await call(registerReq("mf2@example.com", { ip }));
   assert.equal(r._status, 502);
   assert.equal(r._body.reason, "mail_failed");
@@ -1134,7 +1303,7 @@ test("REPORT: admin-only; 14 days per day, top 10 by ip_hash and by domain", asy
 
 // ---------------------------------------------------------- per-email send cap (third review 4)
 
-test("SEND CAP (third review 4): an allowlisted domain's repeat email gets 3 mails per 24 h; the 4th is the same 200, sends nothing, is logged", async () => {
+test("SEND CAP (third review 4): an allowlisted domain's repeat email gets 3 mails per 24 h; the 4th is the same 200, sends nothing (one probe), is logged", async () => {
   process.env.WITNESS_REGISTER_ALLOW = "partner4.example";
   const logs = [];
   const origErr = console.error;
@@ -1147,6 +1316,7 @@ test("SEND CAP (third review 4): an allowlisted domain's repeat email gets 3 mai
       bodies.push(r._body);
     }
     assert.equal(sent.length, 3, "three sends, then nothing");
+    assert.deepEqual(senderCalls, ["send", "send", "send", "probe"], "the capped 4th still makes one provider call: a probe");
     assert.deepEqual(Object.keys(bodies[3]).sort(), Object.keys(bodies[0]).sort(), "the 4th answers the same body");
     assert.equal(bodies[3].note, bodies[0].note);
     assert.equal(bodies[3].sent, true);
@@ -1159,13 +1329,16 @@ test("SEND CAP (third review 4): an allowlisted domain's repeat email gets 3 mai
     // The 3rd link is still the live one: the capped 4th rotated nothing.
     const c = await call(confirmReq(tokenFrom(sent[2])));
     assert.equal(c._status, 200, JSON.stringify(c._body));
-    // Past 24 h the counter frees up; one grant per email still holds on the allowlist.
+    // Confirmed now: one grant per email still holds on the allowlist, and a
+    // held address is sent nothing at all (fourth review 1), cap or no cap.
     const old = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
     gh.seed(USAGE, register.sendsPath(h), { events: [old, old, old] });
+    senderCalls = [];
     const again = await call(registerReq("repeat@partner4.example"));
     assert.equal(again._status, 200);
-    assert.equal(sent.length, 4, "a send is allowed again after 24 h");
-    assert.ok(!/op=confirm/.test(sent[3].text), "a held address gets the notice, never a second link");
+    assert.equal(sent.length, 3, "a held address gets no mail, never a second link");
+    assert.deepEqual(senderCalls, ["probe"]);
+    assert.deepEqual(gh.read(USAGE, register.sendsPath(h)).events, [old, old, old], "and its counter is not written");
     assert.equal(gh.read(USAGE, keys.fulfillmentPath(register.fulfillId(h))).key_hash, keys.keyHash(c._body.key), "still one key");
   } finally {
     console.error = origErr;
@@ -1174,9 +1347,9 @@ test("SEND CAP (third review 4): an allowlisted domain's repeat email gets 3 mai
 });
 
 test("SEND CAP: applies to a non-allowlisted address too, and a failed send does not count", async () => {
-  register.setSender(async () => { throw new Error("boom"); });
+  register.setSender(failSender("boom"));
   for (let i = 0; i < 4; i++) assert.equal((await call(registerReq("capfail@example.com")))._status, 502);
-  register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
+  register.setSender(okSender());
   for (let i = 0; i < 4; i++) assert.equal((await call(registerReq("capfail@example.com")))._status, 200);
   assert.equal(sent.length, 3, "failed sends were refunded; three real sends, the 4th capped");
   assert.equal(register.EMAIL_SEND_LIMIT, 3);
@@ -1206,4 +1379,15 @@ test("RE-SHOW SERVES THE TOKEN HOLDER: inside 15 minutes a POST from any network
   assert.ok(readme.includes("the window serves whoever holds the token"), "README documents the re-show window's audience");
   assert.ok(readme.includes("one that submits forms (POSTs the \"Show my key\" form) claims the key"), "README documents the POSTing scanner");
   assert.ok(readme.includes("open the link yourself soon after it arrives"), "README recommends the human open it within the window");
+});
+
+// ---------------------------------------------------------- the residual, stated (fourth review 5)
+
+test("README: says what a stranger can still learn, and that no mail goes to a held address", () => {
+  const readme = require("fs").readFileSync(require("path").join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes("What a stranger can still learn."));
+  assert.ok(readme.includes("a determined party may still infer whether an address is registered"));
+  assert.ok(readme.includes("no mail is sent to the address, and no key or credit is exposed"));
+  assert.ok(readme.includes("the residual variance is provider latency"));
+  assert.ok(readme.includes("A held address is sent nothing, ever"));
 });
