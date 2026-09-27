@@ -271,6 +271,58 @@ test("CLAIM WINDOW: the 11th key claimed from one IPv4 address in 30 days is 429
   assert.equal(gh.has(USAGE, keys.fulfillmentPath(register.fulfillId(register.sha256(`claimer${L + 1}@example.com`)))), false);
 });
 
+test("CLAIM SPEND ORDER: domain window, then the claim-network slot, then the mint; a failed first mint write spends nothing", async () => {
+  await call(registerReq("order@orderco.example"));
+  const t = tokenFrom(sent[0]);
+  const h = register.sha256("order@orderco.example");
+  const claimIp = "198.51.100.170";
+  const month = new Date().toISOString().slice(0, 7);
+  const domP = register.domainPath("orderco.example", month);
+  const netP = register.claimIpPath(register.networkBuckets(claimIp)[0].hash, month);
+  const fulP = keys.fulfillmentPath(register.fulfillId(h));
+  const claim = () => makeReq({ method: "POST", headers: { accept: "application/json", "x-forwarded-for": claimIp }, query: { op: "confirm" }, body: { t } });
+
+  gh.forceFailure(USAGE, fulP, 1, 500); // the mint's first create-only write fails
+  const failed = await call(claim());
+  assert.equal(failed._status, 503, JSON.stringify(failed._body));
+  assert.equal(gh.has(USAGE, fulP), false, "nothing minted");
+  assert.deepEqual(gh.read(USAGE, domP).events, [], "the domain slot was given back");
+  assert.deepEqual(gh.read(USAGE, netP).events, [], "the claim-network slot was given back");
+
+  const mark = gh.putLog.length;
+  const ok = await call(claim());
+  assert.equal(ok._status, 200, JSON.stringify(ok._body));
+  const order = gh.putLog.slice(mark).map((w) => w.path).filter((p) => p === domP || p === netP || p === fulP);
+  assert.deepEqual(order, [domP, netP, fulP], "domain first, then the network slot, then the mint");
+  assert.equal(gh.read(USAGE, domP).events.length, 1);
+  assert.equal(gh.read(USAGE, netP).events.length, 1);
+});
+
+test("CLAIM SPEND ORDER: a full claim network after the domain spend refunds the domain slot", async () => {
+  await call(registerReq("order2@orderco2.example"));
+  const t = tokenFrom(sent[0]);
+  const claimIp = "198.51.100.171";
+  const month = new Date().toISOString().slice(0, 7);
+  const domP = register.domainPath("orderco2.example", month);
+  const netP = register.claimIpPath(register.networkBuckets(claimIp)[0].hash, month);
+  const now = new Date().toISOString();
+  const orig = gh.handleFetch.bind(gh);
+  gh.handleFetch = async (url, opts) => {
+    // The network fills between the read-only check and the spend (a racer).
+    if (opts && opts.method === "PUT" && String(url).includes(domP)) {
+      const r = await orig(url, opts);
+      gh.seed(USAGE, netP, { month, events: Array(register.IP_WINDOW_LIMIT).fill(now) });
+      return r;
+    }
+    return orig(url, opts);
+  };
+  const r = await call(makeReq({ method: "POST", headers: { accept: "application/json", "x-forwarded-for": claimIp }, query: { op: "confirm" }, body: { t } }));
+  gh.handleFetch = orig;
+  assert.equal(r._status, 429);
+  assert.equal(r._body.reason, "ip_claim_window");
+  assert.deepEqual(gh.read(USAGE, domP).events, [], "the domain slot spent first was refunded");
+});
+
 test("GRANT GATE: the registration's granted flag stops a second grant even when applied_events no longer holds the id", async () => {
   await call(registerReq("gate@example.com"));
   const t = tokenFrom(sent[0]);

@@ -10,6 +10,7 @@ One commit per decision, each with its test.
 - (4) the domain window is keyed on the registrable domain (last two labels, or last three when the second-to-last is co|com|org|net|ac|gov|edu; a documented small public-suffix approximation), so subdomains of one owner share one window. The major-provider exemption is an exact 40-domain list; the regional-brand regex and the extra entries (rocketmail, mail.ru, laposte, the .br/.ca/.au ISPs and others) are gone.
 - (5) limits sized for shared networks: IPv4 address 10 per 30 days (was 3), IPv6 /64 10 (was 3), /48 30 (was 10), registrable domain 20 (was 5); the claim window uses the same buckets. New optional env `WITNESS_REGISTER_ALLOW`: comma-separated domains and exact IPs (no CIDR) that skip the durable windows, for partners.
 - (6) every op=register answer waits out a 1500 ms floor from the request start on every path (buffered response, replayed after `_timing.floorSleep`), so a confirmed address cannot be told apart by timing. register-status takes `?eh=<sha256 of the normalised email>` only; `?email=` and `?e=` are 400 bad_eh; status_url carries `eh=`.
+- (7) confirm spends the domain window first, then the claim-network slot, then mints; a full network after the domain spend, a store error, a failed first create-only mint write, or a lost create race refunds what this call spent.
 
 ## 2026-09-27 (later) — registration grant hardened against the ten-point review (branch `register-grant-2026-09-27`, rebased onto `release-candidate-2026-09-23b` a9d8fce, local only, NOT deployed)
 

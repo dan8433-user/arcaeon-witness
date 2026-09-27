@@ -818,7 +818,10 @@ the same day against a ten-point review (numbers below are that review's).
   there is no sweeper.)
 - **Confirm hardening (2).** The in-memory per-IP pre-filter, plus a durable
   per-network CLAIM window (same buckets and limits,
-  `registrations/_ipc/`) spent only when a key is minted. A token that does
+  `registrations/_ipc/`) spent only when a key is minted. Spend order: the
+  domain window first, then the claim-network slot, then the mint; a later
+  step that is full, throws, or loses the create-only mint write refunds the
+  earlier spends, so no slot is spent when the mint's first write fails. A token that does
   not match (malformed, unknown, replaced) is a bare `404 {error:"not
   found"}` costing at most one store read. A confirmed registration is
   answered from its record alone, with no write.
