@@ -210,6 +210,30 @@ test("AGENT LABEL: stored on the record only, never in the mail; outside [A-Za-z
   }
 });
 
+test("NO RAW ADDRESS OUT: status_url carries the email hash; no log line carries the address", async () => {
+  const logs = [];
+  const origErr = console.error, origLog = console.log;
+  console.error = (...a) => logs.push(a.join(" "));
+  console.log = (...a) => logs.push(a.join(" "));
+  try {
+    const r = await call(registerReq("privacy.person@example.com"));
+    assert.equal(r._status, 202);
+    const h = register.sha256("privacy.person@example.com");
+    assert.ok(r._body.status_url.includes(`e=${h}`));
+    assert.ok(!JSON.stringify(r._body).includes("privacy.person"), "no raw address in the response");
+    const s = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", e: h } }));
+    assert.equal(s._status, 200);
+    register.setSender(async () => { throw new Error("upstream said privacy.person@example.com bounced"); });
+    await call(registerReq("privacy.person@example.com"));
+    await call(confirmReq(tokenFrom(sent[0])));
+  } finally {
+    console.error = origErr;
+    console.log = origLog;
+  }
+  assert.ok(logs.length > 0, "the failure path did log");
+  for (const line of logs) assert.ok(!line.includes("privacy.person"), `log line carries the address: ${line}`);
+});
+
 // ---------------------------------------------------------- one grant, ever
 
 test("REPEAT EMAIL: a confirmed email answers 200 confirmed, sends nothing, grants nothing", async () => {
