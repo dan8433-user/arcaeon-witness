@@ -772,11 +772,17 @@ the same day against a ten-point review (numbers below are that review's).
 - **The link does not mint (3).** `GET ?op=confirm&t=<token>` shows one form
   button, "Show my key", and writes nothing (mail scanners GET, they do not
   POST). `POST ?op=confirm` body `{t}` mints (plan `grant`), grants 500
-  credits, marks the registration confirmed with `key_shown_at`, shows the
-  raw key ONCE, then removes it from `fulfillments/reg-<emailHash>.json`. A
-  second POST answers `409 already_claimed`: "already claimed on <time>; the
-  key was shown once; if you lost it, register again with another address or
-  email hello@arcaeon.io". The key is never in the email.
+  credits, marks the registration confirmed with `key_shown_at` and shows the
+  raw key. Double-submit safety: the raw key stays readable in
+  `fulfillments/reg-<emailHash>.json` for 15 minutes after `key_shown_at`; a
+  second POST with the same valid token inside that window re-shows the same
+  key page (`reshown: true`), with no second grant and no write. After the
+  window the next confirm request nulls the raw key and answers `409
+  already_claimed`: "already claimed on <time>; the key was shown then; if
+  you lost it, contact support@arcaeon.io with the address you registered".
+  A GET never shows the key. The key is never in the email. (A raw key nobody
+  revisits after its window stays in the private store until a request comes;
+  there is no sweeper.)
 - **Confirm hardening (2).** The in-memory per-IP pre-filter, plus a durable
   per-network CLAIM window (same buckets and limits,
   `registrations/_ipc/`) spent only when a key is minted. A token that does

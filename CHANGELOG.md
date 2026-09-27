@@ -5,6 +5,7 @@
 One commit per decision, each with its test.
 
 - (1) the durable hour counter keys on the issued-key record's source: "register" only. Stripe-minted keys stay plan grant (no monthly free pins) with the in-memory check only, no store write per pin, no new 503. `keys.issuedKeyRecord` returns `source`; new `keys.readIssuedKey(hash)`. A Stripe session revisit reports the plan stored in its key record (and that plan's cap), not a literal "grant".
+- (2) double-submit safety on POST confirm: the raw key stays in the fulfillment record for 15 minutes after key_shown_at; a second POST with the same valid token inside the window re-shows the same key (reads only, no grant, no write); after the window the next request nulls it and answers already-claimed, which now says "contact support@arcaeon.io with the address you registered" and never "register again". GET never shows the key.
 
 ## 2026-09-27 (later) — registration grant hardened against the ten-point review (branch `register-grant-2026-09-27`, rebased onto `release-candidate-2026-09-23b` a9d8fce, local only, NOT deployed)
 

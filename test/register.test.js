@@ -162,16 +162,23 @@ test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credi
   assert.equal(regAfter.state, "confirmed");
   assert.equal(regAfter.key_hash, keyHash);
 
-  assert.equal(ful.key, null, "shown once: the raw key is removed from the store after the showing");
+  assert.equal(ful.key, c1._body.key, "the raw key stays readable for the 15-minute re-show window");
   assert.ok(regAfter.key_shown_at, "key_shown_at recorded");
 
-  const writesBefore = gh.putLog.length;
+  // Past the window: the next request nulls the raw key and answers already-claimed.
+  const rp = register.regPath(emailHash);
+  gh.seed(USAGE, rp, { ...regAfter, key_shown_at: new Date(Date.now() - register.KEY_RESHOW_MS - 1000).toISOString() });
   const c2 = await call(confirmReq(token));
   assert.equal(c2._status, 409);
   assert.equal(c2._body.reason, "already_claimed");
-  assert.equal(c2._body.key, undefined, "the key is never shown twice");
-  assert.match(c2._body.error, /^already claimed on .+; the key was shown once; if you lost it, register again with another address or email hello@arcaeon\.io$/);
-  assert.equal(gh.putLog.length, writesBefore, "a second claim writes nothing");
+  assert.equal(c2._body.key, undefined, "past the window the key is not shown");
+  assert.match(c2._body.error, /^already claimed on .+; the key was shown then; if you lost it, contact support@arcaeon\.io with the address you registered$/);
+  assert.ok(!/register again/.test(c2._body.error), "never says register again");
+  assert.equal(gh.read(USAGE, keys.fulfillmentPath(register.fulfillId(emailHash))).key, null, "the raw key is nulled");
+  const writesBefore = gh.putLog.length;
+  const c2b = await call(confirmReq(token));
+  assert.equal(c2b._status, 409);
+  assert.equal(gh.putLog.length, writesBefore, "after the null, a claim writes nothing");
   assert.equal((await balance.readBalance(keyHash)).balance, 500, "never granted twice");
 
   const s2 = await call(statusReq("jane@example.com"));
@@ -204,6 +211,27 @@ test("THE LINK DOES NOT MINT: GET shows one 'Show my key' form; nothing is writt
   const again = await call(confirmGetReq(t));
   assert.equal(again._status, 409);
   assert.ok(!/wk_[0-9a-f]{48}/.test(again._body));
+});
+
+test("DOUBLE SUBMIT: a second POST inside 15 minutes re-shows the same key with no write and no second grant; GET never shows it", async () => {
+  await call(registerReq("double@example.com"));
+  const t = tokenFrom(sent[0]);
+  const c1 = await call(confirmReq(t));
+  assert.equal(c1._status, 200);
+  const writesBefore = gh.putLog.length;
+  const c2 = await call(confirmReq(t));
+  assert.equal(c2._status, 200, JSON.stringify(c2._body));
+  assert.equal(c2._body.key, c1._body.key, "the same key");
+  assert.equal(c2._body.reshown, true);
+  assert.equal(c2._body.credit_balance, 500);
+  const html = await call(confirmReq(t, false));
+  assert.equal(html._status, 200);
+  assert.ok(html._body.includes(c1._body.key), "the HTML re-show carries the same key");
+  const g = await call(confirmGetReq(t));
+  assert.equal(g._status, 409, "a GET inside the window does not show the key");
+  assert.ok(!g._body.includes(c1._body.key));
+  assert.equal(gh.putLog.length, writesBefore, "re-shows and the GET wrote nothing");
+  assert.equal((await balance.readBalance(keys.keyHash(c1._body.key))).balance, 500, "granted once");
 });
 
 test("CONFIRM RATE LIMIT: the in-memory per-IP pre-filter covers confirm (GET and POST)", async () => {
