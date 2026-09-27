@@ -1,5 +1,20 @@
 # Changelog — arcaeon-witness
 
+## 2026-09-27 — registration grant: verified email -> one key, 500 credits, once (branch `register-grant-2026-09-27` from origin/main `8242bfa`, local only, NOT deployed)
+
+The pricing decision of 2026-09-27 8:47 AM (velouria `memory/PRICING_DECISION_2026-09-17.md`): every new key comes with 500 credits once, at verified registration; the 100/month free tier is retired for new keys; farming is stopped by verification, one grant per email, a per-IP window and a durable per-key hour cap.
+
+- **Route.** `api/fulfill.js` gains `?op=register | confirm | register-status | register-report`, dispatched to the new `lib/_register.js` before the session gate. fulfill.js already mints keys and writes `fulfillments/`; api/ holds 12 functions, the Hobby cap, so no new file under api/.
+- **Register.** Email syntax check, disposable-domain refusal (`lib/_disposable_domains.js`, 560 domains, parent-domain match), one identity per inbox (lowercase, plus-suffix dropped, Gmail dots dropped and googlemail folded). `registrations/<sha256(normalised)>.json` create-only with a token HASH, salted IP hash, agent label, state pending; token index `registrations/_tok/`. Magic link via Resend (`RESEND_API_KEY`, `RESEND_FROM`) behind an injectable sender; the repo had no outbound mail (the welcome email is a logging stub), so this is the first real sender. Key is never in the email.
+- **Confirm.** Mints (plan `grant`, source `register`), `fulfillments/reg-<emailHash>.json` create-only as the one-key gate, pool record, `grantCredits(hash, 500, "registration", "reg-"+emailHash, "register")`, marks confirmed. Revisits re-show the same key and grant nothing.
+- **Per-IP window.** 3 per salted IP hash per rolling 30 days, `registrations/_ip/<ip_hash>/<YYYY-MM>.json`, count and append in one CAS. IP = rightmost x-forwarded-for hop, then socket. No raw IP at rest; `REGISTER_IP_SALT` required (501 without it).
+- **Plan grant.** `PLAN_CAPS.grant = 0`; lib/_meter.js takes a plan hint from the issued-key record and honours only "grant" from it. pin.js and balance.js read it via the new `keys.issuedKeyRecord`. Empty grant balance -> 402.
+- **ever_purchased.** Now a `purchased` field on the balance file, set only by a purchase grant (`registration` and `refund` excluded). Legacy files without the field read as purchased, as before.
+- **Durable hour cap.** `usage/<hash>/hour-<YYYY-MM-DDTHH>.json`, 60/hour, behind the in-memory pre-filter, inside `meterAndCharge` so refusals still write nothing; store error -> 503. One more private-repo commit per pin.
+- **Reader.** `op=register-report`, Bearer `WITNESS_ADMIN_KEY`: 14 days per day plus top 10 IP hashes and domains with share; says when the 1000-entry directory listing may have truncated it.
+- `test/register.test.js` +20. Mutation-checked: emptying the non-purchase set fails 2; using the leftmost XFF hop fails 1.
+- Suite 666, 666 pass, 0 fail.
+
 ## 2026-09-23 (late night): the battery plants a record each fence must refuse (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
 
 - **Why.** The battery line says a check is DEFINED and was CALLED. Neither can see a check that ran and saw nothing: a fence whose refusal is removed is still defined, still called, and on a clean day every record passes it anyway (a correspondent measured the class as "0 of 17 probes noticed a guard removed"). This is the third guard, promised publicly for 2026-09-24.

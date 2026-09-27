@@ -702,6 +702,7 @@ lib/_status_data.js shared data-gathering pass behind /status, /api/status.json,
 lib/_meter.js   per-key monthly usage caps against the PRIVATE usage repo (not routed)
 lib/_balance.js per-key decrementing credit balance + ledger against the PRIVATE usage repo (not routed)
 lib/_cors.js, lib/_keys.js, lib/_page.js, lib/_ratelimit.js, lib/_status_json.js,
+lib/_register.js, lib/_disposable_domains.js  the registration grant (op=register|confirm|register-status|register-report on api/fulfill.js), 2026-09-27
 lib/_welcome_email.js  supporting modules, not independently routed (this line
                         added 2026-08-24 -- a prior version of this table omitted
                         all six; regenerate this block from `ls api/ lib/` rather
@@ -724,6 +725,59 @@ repos. `WITNESS_CADENCE` is optional (default cadence is 24h for every
 namespace when unset or malformed) and holds no secrets, but lives with the
 others for one reason: it's operational policy, not code — changing it
 shouldn't require a redeploy.
+
+Registration grant env (2026-09-27; all three **not yet set — human step**,
+and registration answers `501 not_configured` until they are):
+
+- `REGISTER_IP_SALT` — a long random string. The per-IP registration window
+  stores `sha256(salt + ip)`, never the IP. Required: an unsalted hash of an
+  IPv4 address is reversible by enumeration, so registration refuses to run
+  without it. Changing it resets every IP window (old hashes stop matching).
+- `RESEND_API_KEY` — Resend API key for the magic-link email. Secret.
+- `RESEND_FROM` — the sender, e.g. `Arcaeon <keys@arcaeon.io>`; the domain must
+  be verified in Resend.
+- `WITNESS_ADMIN_KEY` (existing) also gates `op=register-report`.
+
+## Registration grant (verified email -> one key, 500 credits, once)
+
+All on `api/fulfill.js` (the function that already mints keys; api/ is at the
+12-function cap). Logic in `lib/_register.js`; disposable-domain list in
+`lib/_disposable_domains.js`. Decision: velouria
+`memory/PRICING_DECISION_2026-09-17.md`, 2026-09-27 8:47 AM entry.
+
+- `POST /api/fulfill?op=register` body `{email, agent?}` -> `202 {state:"pending"}`
+  and a confirm link to the address. An agent may start it; only the human's
+  click mints. Refusals: `400 bad_email`, `400 disposable_email`,
+  `429 ip_registration_window` (more than 3 per salted IP hash in a rolling
+  30 days, counted in `registrations/_ip/<ip_hash>/<YYYY-MM>.json`). A
+  confirmed email answers `200 {state:"confirmed"}` and sends nothing. A
+  pending email gets a fresh link (the old one stops working) and spends
+  another IP slot. Identity is the normalised email: lowercased, plus-suffix
+  dropped, and for Gmail dots dropped and googlemail.com folded in.
+- `GET /api/fulfill?op=confirm&t=<token>` -> mints the key (plan `grant`),
+  grants 500 credits idempotent on `reg-<emailHash>`, shows the key on the
+  page. Revisiting the link re-shows the same key and grants nothing; the link
+  is a bearer of the key, like the Stripe receipt URL. Links expire after
+  48 hours while pending. The key is never in the email.
+- `GET /api/fulfill?op=register-status&email=...` -> `{state}` only
+  (`none` | `pending` | `confirmed`), never the key. Note: this answers
+  whether an address has registered; it is behind the per-IP read limiter.
+- `GET /api/fulfill?op=register-report` (Bearer `WITNESS_ADMIN_KEY`) -> the
+  reader: 14 days of registrations per day (with confirmed, distinct IP
+  hashes, distinct domains) and the top 10 IP hashes and email domains with
+  share. Flip rule: one IP hash or domain over 5% share means card gate first.
+
+Plan `grant`: `PLAN_CAPS.grant = 0`, no monthly free pins, every pin debits a
+credit; an empty balance answers `402`. `ever_purchased` is now a `purchased`
+field in the balance file set only by a purchase (packs `registration` and
+`refund` do not set it); a pre-existing balance file without the field reads
+as purchased, as before.
+
+Pins also carry a DURABLE per-key limit of 60 per UTC hour
+(`usage/<hash>/hour-<YYYY-MM-DDTHH>.json`, CAS increment) behind the old
+in-memory 60/hour pre-filter. It runs only on a pin that will be recorded
+(refusals still write nothing) and fails closed: `503 rate_limit_store_error`.
+Cost: one more private-repo commit per pin.
 
 ## Testing
 
