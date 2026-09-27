@@ -232,6 +232,34 @@ test("CLAIM WINDOW: the 4th key claimed from one network in 30 days is 429 and m
   assert.equal(gh.has(USAGE, keys.fulfillmentPath(register.fulfillId(register.sha256("claimer4@example.com")))), false);
 });
 
+test("GRANT GATE: the registration's granted flag stops a second grant even when applied_events no longer holds the id", async () => {
+  await call(registerReq("gate@example.com"));
+  const t = tokenFrom(sent[0]);
+  const h = register.sha256("gate@example.com");
+  // Crash shape: the grant landed and the flag was written, the mark did not.
+  const origPut = gh.handleFetch.bind(gh);
+  let regPuts = 0;
+  gh.handleFetch = async (url, opts) => {
+    if (opts && opts.method === "PUT" && String(url).endsWith(`registrations/${h}.json`)) {
+      regPuts += 1;
+      if (regPuts === 2) return { status: 500, ok: false, json: async () => ({}), text: async () => "mock: mark fails" };
+    }
+    return origPut(url, opts);
+  };
+  const first = await call(confirmReq(t));
+  assert.equal(first._status, 503, "the mark failed after the grant and the flag");
+  gh.handleFetch = origPut;
+  assert.equal(gh.read(USAGE, register.regPath(h)).granted, true);
+  const keyHash = gh.read(USAGE, keys.fulfillmentPath(register.fulfillId(h))).key_hash;
+  // applied_events aged out: only the flag stands between this and a second +500.
+  const bp = balance.balancePath(keyHash);
+  gh.seed(USAGE, bp, { ...gh.read(USAGE, bp), applied_events: [] });
+  const second = await call(confirmReq(t));
+  assert.equal(second._status, 200);
+  assert.equal((await balance.readBalance(keyHash)).balance, 500, "granted once, by the flag");
+  assert.equal(second._body.credit_balance, 500);
+});
+
 test("CLAIM RESUMES AFTER A CRASH: minted but not marked -> the next POST shows that key once, grants once", async () => {
   await call(registerReq("crash@example.com"));
   const t = tokenFrom(sent[0]);
