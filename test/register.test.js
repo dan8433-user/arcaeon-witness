@@ -198,6 +198,18 @@ test("CONFIRM: malformed 400, unknown 404, superseded 410, expired 410", async (
   assert.equal(exp._body.reason, "expired_token");
 });
 
+test("AGENT LABEL: stored on the record only, never in the mail; outside [A-Za-z0-9 ._-]{0,32} is 400", async () => {
+  const r = await call(registerReq("agentlabel@example.com", { agent: "my-agent_1.0" }));
+  assert.equal(r._status, 202);
+  assert.equal(gh.read(USAGE, register.regPath(register.sha256("agentlabel@example.com"))).agent, "my-agent_1.0");
+  assert.ok(!sent[0].text.includes("my-agent_1.0") && !sent[0].html.includes("my-agent_1.0"), "agent label is not in the email");
+  for (const bad of ["<a href=x>", "x".repeat(33), "urgent: verify now!", 7]) {
+    const b = await call(registerReq("agentbad@example.com", { agent: bad }));
+    assert.equal(b._status, 400, String(bad));
+    assert.equal(b._body.reason, "bad_agent");
+  }
+});
+
 // ---------------------------------------------------------- one grant, ever
 
 test("REPEAT EMAIL: a confirmed email answers 200 confirmed, sends nothing, grants nothing", async () => {
