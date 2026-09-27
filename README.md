@@ -763,9 +763,15 @@ the same day against a ten-point review (numbers below are that review's).
 - **Windows (1, 6).** Per NETWORK, not per address: IPv4 whole address, IPv6
   the /64, both 3 per rolling 30 days, plus the IPv6 /48 at 10. Salted
   (`REGISTER_IP_SALT`), never the raw IP, in
-  `registrations/_ip/<hash>/<YYYY-MM>.json`. Checked before the send, spent
-  only after the mail goes out; if a concurrent register took the last slot
-  meanwhile, the just-sent link is voided and the answer is 429. Per email
+  `registrations/_ip/<hash>/<YYYY-MM>.json`. Order: read-only checks, the
+  confirmed-address answer (no slot), then the slot is RESERVED by CAS, then
+  the record and token writes, then the mail. A send failure voids the link,
+  refunds the slot best effort and answers `502 mail_failed` with
+  `link_sent: false`; if the refund cannot be written the slot stays spent
+  (the safe direction) and `slot_refunded: false` says so. A window CAS
+  conflict is retried up to 8 times with a jittered pause; exhaustion answers
+  `503 store_busy` before any mail, with no slot spent (an IPv6 /64 already
+  taken is refunded when its /48 exhausts). Per email
   DOMAIN, outside a list of major mailbox providers: 5 grants per 30 days in
   `registrations/_domain/<domain>/<YYYY-MM>.json`, spent at mint (so fake
   registrations at someone's domain cannot use it up), read at register.

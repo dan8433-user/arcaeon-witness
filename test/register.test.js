@@ -35,6 +35,7 @@ const USAGE = process.env.GITHUB_USAGE_REPO;
 
 let gh, sent, foreignCalls, restoreFetch;
 const realPutSleep = store._putRetry.sleep;
+const realRetrySleep = register._timing.retrySleep;
 
 beforeEach(() => {
   gh = new MockGitHubStore();
@@ -51,6 +52,7 @@ beforeEach(() => {
   restoreFetch = () => { global.fetch = original; };
   register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
   store._putRetry.sleep = async () => {};
+  register._timing.retrySleep = async () => {};
   pin._resetRateBuckets();
 });
 
@@ -58,6 +60,7 @@ afterEach(() => {
   assert.deepEqual(foreignCalls, [], "a test reached a non-GitHub host (mail must go through the injected sender)");
   register.setSender(null);
   store._putRetry.sleep = realPutSleep;
+  register._timing.retrySleep = realRetrySleep;
   restoreFetch();
 });
 
@@ -489,23 +492,52 @@ test("IP WINDOW: last month's events inside 30 days still count (rolling, not ca
   assert.equal((await call(registerReq("roll2@example.com", { ip })))._status, 429);
 });
 
-test("SLOT RACE: if the last slot is taken while the mail is in flight, the link is voided and the answer is 429", async () => {
+test("SLOT RACE: a concurrent register taking the last slot between our read and our CAS write is 429 and no mail is sent", async () => {
   const ip = "192.0.2.88";
   const iph = register.ipHash(ip);
   const month = new Date().toISOString().slice(0, 7);
+  const p = register.ipPath(iph, month);
   const now = new Date().toISOString();
-  gh.seed(USAGE, register.ipPath(iph, month), { ip_hash: iph, month, events: [now, now] });
-  register.setSender(async (msg) => {
-    sent.push(msg);
-    const cur = gh.read(USAGE, register.ipPath(iph, month));
-    gh.seed(USAGE, register.ipPath(iph, month), { ...cur, events: cur.events.concat([now]) }); // a concurrent register won
-    return { ok: true };
-  });
+  gh.seed(USAGE, p, { ip_hash: iph, month, events: [now, now] });
+  const orig = gh.handleFetch.bind(gh);
+  let raced = false;
+  gh.handleFetch = async (url, opts) => {
+    if (!raced && opts && opts.method === "PUT" && String(url).includes(p)) {
+      raced = true; // a concurrent register lands first: the file (and its sha) moves
+      gh.seed(USAGE, p, { ...gh.read(USAGE, p), events: [now, now, now] });
+    }
+    return orig(url, opts);
+  };
   const r = await call(registerReq("race@example.com", { ip }));
-  assert.equal(r._status, 429);
+  gh.handleFetch = orig;
+  assert.equal(raced, true);
+  assert.equal(r._status, 429, JSON.stringify(r._body));
   assert.equal(r._body.reason, "ip_registration_window");
-  const c = await call(confirmReq(tokenFrom(sent[0])));
-  assert.notEqual(c._status, 200, "the voided link mints nothing");
+  assert.equal(sent.length, 0, "the slot is reserved before the mail, so the loser mails nothing");
+  assert.equal(gh.read(USAGE, p).events.length, 3);
+  assert.equal(gh.has(USAGE, register.regPath(register.sha256("race@example.com"))), false, "no record written");
+});
+
+test("CAS EXHAUSTION: 8 conflicts on the window answer 503 store_busy, no mail sent, no slot spent, no record", async () => {
+  assert.equal(register.WINDOW_CAS_ATTEMPTS, 8);
+  const ip = "192.0.2.89";
+  const month = new Date().toISOString().slice(0, 7);
+  const p = register.ipPath(register.ipHash(ip), month);
+  gh.forceConflict(USAGE, p, 8);
+  const r = await call(registerReq("busy@example.com", { ip }));
+  assert.equal(r._status, 503, JSON.stringify(r._body));
+  assert.equal(r._body.reason, "store_busy");
+  assert.equal(sent.length, 0);
+  assert.equal(gh.has(USAGE, p), false, "no slot spent");
+  assert.equal(gh.has(USAGE, register.regPath(register.sha256("busy@example.com"))), false);
+  // IPv6: the /64 is spent, then the /48 exhausts -> the /64 is refunded.
+  const ip6 = "2001:db8:cc:1::1";
+  const [b64, b48] = register.networkBuckets(ip6);
+  gh.forceConflict(USAGE, register.ipPath(b48.hash, month), 8);
+  const r6 = await call(registerReq("busy6@example.com", { ip: ip6 }));
+  assert.equal(r6._status, 503);
+  assert.equal(sent.length, 0);
+  assert.deepEqual(gh.read(USAGE, register.ipPath(b64.hash, month)).events, [], "the /64 slot was given back");
 });
 
 // ---------------------------------------------------------- networks + domains (review 1)
@@ -584,20 +616,43 @@ test("NOT CONFIGURED: no sender and no RESEND_* env -> 501 before any write", as
   assert.equal(gh.putLog.length, 0);
 });
 
-test("MAIL FAILURE: 502 mail_failed spends no IP slot; a retry sends a fresh link", async () => {
-  register.setSender(async () => { throw new Error("boom"); });
+test("MAIL FAILURE: the slot is reserved before the send and refunded on failure; 502 mail_failed; a retry sends a fresh link", async () => {
   const ip = freshIp();
+  const month = new Date().toISOString().slice(0, 7);
+  const p = register.ipPath(register.ipHash(ip), month);
+  register.setSender(async () => {
+    assert.equal(gh.read(USAGE, p).events.length, 1, "the slot is held while the mail is in flight");
+    throw new Error("boom");
+  });
   for (let i = 0; i < 5; i++) {
     const r = await call(registerReq("mf@example.com", { ip }));
     assert.equal(r._status, 502);
     assert.equal(r._body.reason, "mail_failed");
+    assert.equal(r._body.link_sent, false);
+    assert.equal(r._body.slot_refunded, true);
   }
-  const month = new Date().toISOString().slice(0, 7);
-  assert.equal(gh.has(USAGE, register.ipPath(register.ipHash(ip), month)), false, "five failed sends consumed nothing");
+  assert.deepEqual(gh.read(USAGE, p).events, [], "five failed sends consumed nothing");
   register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
   const r2 = await call(registerReq("mf@example.com", { ip }));
   assert.equal(r2._status, 200);
   assert.equal((await call(confirmReq(tokenFrom(sent[0]))))._status, 200);
+});
+
+test("MAIL FAILURE, REFUND FAILS: the slot stays spent (safe direction) and the answer says no link was sent", async () => {
+  const ip = freshIp();
+  const month = new Date().toISOString().slice(0, 7);
+  const p = register.ipPath(register.ipHash(ip), month);
+  register.setSender(async () => {
+    gh.forceFailure(USAGE, p, 20, 500); // the refund write cannot land
+    throw new Error("boom");
+  });
+  const r = await call(registerReq("mf2@example.com", { ip }));
+  assert.equal(r._status, 502);
+  assert.equal(r._body.reason, "mail_failed");
+  assert.equal(r._body.link_sent, false);
+  assert.equal(r._body.slot_refunded, false);
+  assert.match(r._body.error, /no link was sent/);
+  assert.equal(gh.read(USAGE, p).events.length, 1, "the slot stays spent");
 });
 
 // ---------------------------------------------------------- grant plan pins
