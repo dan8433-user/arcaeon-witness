@@ -13,7 +13,8 @@ The pricing decision of 2026-09-27 8:47 AM (velouria `memory/PRICING_DECISION_20
 - **Durable hour cap.** `usage/<hash>/hour-<YYYY-MM-DDTHH>.json`, 60/hour, behind the in-memory pre-filter, inside `meterAndCharge` so refusals still write nothing; store error -> 503. One more private-repo commit per pin.
 - **Reader.** `op=register-report`, Bearer `WITNESS_ADMIN_KEY`: 14 days per day plus top 10 IP hashes and domains with share; says when the 1000-entry directory listing may have truncated it.
 - `test/register.test.js` +20. Mutation-checked: emptying the non-purchase set fails 2; using the leftmost XFF hop fails 1.
-- Suite 666, 666 pass, 0 fail.
+- **Stale free-tier wording (addendum).** New Stripe-minted keys now mint as plan `grant` too (issued-key record is create-only, so keys minted before keep `free`); fulfill JSON gains `plan:"grant"`, `free_tier_monthly_cap` is 0. "(plus the free tier: 100 pins/month)" removed from the key page and both welcome-email renders. Balance page shows the monthly line only when the plan has a cap; an empty grant key reads "no credits left on the key: buy a pack". pin 402 and distill 429 say "this key's monthly allowance" only for a capped plan, else "no credits left on the key: buy a pack". README: new keys are plan grant; existing free keys keep 100/month. `api/distill.js` exports `meterAndCharge` for its test. +4 tests (fulfill, balance_endpoint x2, register).
+- Suite 670, 670 pass, 0 fail.
 
 ## 2026-09-23 (late night): the battery plants a record each fence must refuse (branch `release-candidate-2026-09-23b`, local only, NOT deployed, nothing published)
 

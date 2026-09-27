@@ -51,7 +51,10 @@ silently:
 - On grant, `X-Meter-Cap` / `X-Meter-Used` are set on the success response
   too, so callers can see how much headroom is left.
 
-Default plan is **free: 100 pins/month**. Per-key overrides (including
+New keys (registration and Stripe alike, from 2026-09-27) are plan **grant**:
+no monthly free pins, every pin debits a credit; a verified registration
+carries 500 credits once (see "Registration grant" below). Existing
+free-plan keys keep their **100 pins/month** cap. Per-key overrides (including
 explicit unlimited) live in the `WITNESS_PLANS` env var — JSON keyed by
 `sha256(key)`, e.g. `{"<sha256 of a key>": {"plan": "internal"}}` (defers
 to the built-in `internal` plan, which is unlimited but still counted) or
