@@ -857,6 +857,17 @@ the same day against a ten-point review (numbers below are that review's).
   A GET never shows the key. The key is never in the email. (A raw key nobody
   revisits after its window stays in the private store until a request comes;
   there is no sweeper.)
+- **Who the link serves (third review 6).** The token in the link is the
+  only credential. Whoever holds it and POSTs the form claims the key, and
+  inside the 15-minute re-show window every POST with that token, from any
+  network, is shown the same key: the window serves whoever holds the token,
+  not only the first presser. A mail scanner or link previewer that only
+  GETs claims nothing, but one that submits forms (POSTs the "Show my key"
+  form) claims the key, and a scanner that POSTs inside the window after the
+  human would be shown it too. Recommendation for the human: open the link
+  yourself soon after it arrives, press the button, and save the key within
+  the 15 minutes; if the page says already claimed and you did not press
+  it, contact support@arcaeon.io.
 - **Confirm hardening (2).** The in-memory per-IP pre-filter, plus a durable
   per-network CLAIM window (same buckets and limits,
   `registrations/_ipc/`) spent only when a key is minted. Spend order: the

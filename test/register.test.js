@@ -1191,3 +1191,19 @@ test("KEY PAGE WORDING: the raw key is erased by the first request after 15 minu
   assert.ok(!/removed from our store/.test(c._body), "no claim of timed removal");
   assert.match(c._body, /It is not deleted on a timer: the first request for this link after those 15 minutes erases our stored copy, and from then on it cannot be shown again\./);
 });
+
+// ---------------------------------------------------------- who the link serves (third review 6)
+
+test("RE-SHOW SERVES THE TOKEN HOLDER: inside 15 minutes a POST from any network with the token sees the key; README says so", async () => {
+  await call(registerReq("holder@example.com"));
+  const t = tokenFrom(sent[0]);
+  const human = await call(confirmReq(t));
+  assert.equal(human._status, 200);
+  const other = await call(makeReq({ method: "POST", headers: { accept: "application/json", "x-forwarded-for": "203.0.113.77" }, query: { op: "confirm" }, body: { t } }));
+  assert.equal(other._status, 200, "a second holder of the token, elsewhere, inside the window");
+  assert.equal(other._body.key, human._body.key, "is shown the same key");
+  const readme = require("fs").readFileSync(require("path").join(__dirname, "..", "README.md"), "utf8").replace(/\s+/g, " ");
+  assert.ok(readme.includes("the window serves whoever holds the token"), "README documents the re-show window's audience");
+  assert.ok(readme.includes("one that submits forms (POSTs the \"Show my key\" form) claims the key"), "README documents the POSTing scanner");
+  assert.ok(readme.includes("open the link yourself soon after it arrives"), "README recommends the human open it within the window");
+});
