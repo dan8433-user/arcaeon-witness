@@ -766,7 +766,13 @@ the same day against a ten-point review (numbers below are that review's).
   domain_registration_window`, `502 mail_failed` (nothing consumed; 6).
 - **No oracle (4).** An address that already has its key gets the same `200`
   a fresh one gets, with a decoy `t8`; no mail is sent and no slot spent. The
-  read-only window checks run first for both.
+  read-only window checks run first for both. **Timing floor:** every
+  `op=register` answer, whatever path it took (400, 405, 429, 501, 502, 503,
+  fresh or confirmed), goes out no sooner than 1500 ms after the request
+  started (a `setTimeout` floor over a buffered response), so a confirmed
+  address, which writes nothing, cannot be told from a fresh one, which
+  writes and mails, by response time. Paths slower than 1500 ms are not
+  padded further.
 - **Windows (1, 6).** Per NETWORK, not per address, sized for shared
   networks (offices, campuses, carrier NAT): IPv4 whole address 10 per
   rolling 30 days, IPv6 /64 10, plus the IPv6 /48 at 30. Salted
@@ -818,7 +824,9 @@ the same day against a ten-point review (numbers below are that review's).
   answered from its record alone, with no write.
 - **Grant gate (9).** The registration record's `granted` flag gates
   `grantCredits`; `applied_events` on `reg-<emailHash>` is the second layer.
-- `GET ?op=register-status&e=<emailHash>&t8=<t8>` (or `email=`) -> `{state}`:
+- `GET ?op=register-status&eh=<sha256 of the normalised email>&t8=<t8>` ->
+  `{state}` (`eh` only; the `email=` and `e=` forms are gone and answer
+  `400 bad_eh`):
   `pending_or_unknown` for both unknown and pending; `confirmed` only with the
   matching `t8`. Never the key. `status_url` and every log line carry the
   email hash, never the address (10).

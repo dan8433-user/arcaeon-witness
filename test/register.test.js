@@ -36,6 +36,8 @@ const USAGE = process.env.GITHUB_USAGE_REPO;
 let gh, sent, foreignCalls, restoreFetch;
 const realPutSleep = store._putRetry.sleep;
 const realRetrySleep = register._timing.retrySleep;
+const realFloorSleep = register._timing.floorSleep;
+let floorWaits = [];
 
 beforeEach(() => {
   gh = new MockGitHubStore();
@@ -53,6 +55,8 @@ beforeEach(() => {
   register.setSender(async (msg) => { sent.push(msg); return { ok: true }; });
   store._putRetry.sleep = async () => {};
   register._timing.retrySleep = async () => {};
+  floorWaits = [];
+  register._timing.floorSleep = async (ms) => { floorWaits.push(ms); }; // recorded, not waited
   pin._resetRateBuckets();
 });
 
@@ -61,6 +65,7 @@ afterEach(() => {
   register.setSender(null);
   store._putRetry.sleep = realPutSleep;
   register._timing.retrySleep = realRetrySleep;
+  register._timing.floorSleep = realFloorSleep;
   restoreFetch();
 });
 
@@ -104,7 +109,8 @@ function confirmGetReq(t, json = false) {
 }
 
 function statusReq(email) {
-  return makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", email } });
+  const eh = register.sha256(register.normaliseEmail(email).normalised);
+  return makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", eh } });
 }
 
 async function registerAndConfirm(email, opts) {
@@ -186,7 +192,7 @@ test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credi
 
   const s2 = await call(statusReq("jane@example.com"));
   assert.deepEqual(s2._body, { state: "pending_or_unknown" }, "without t8 a confirmed address is not revealed");
-  const s3 = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", e: emailHash, t8 } }));
+  const s3 = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", eh: emailHash, t8 } }));
   assert.deepEqual(s3._body, { state: "confirmed" }, "with t8 the starter sees confirmed; never the key");
 });
 
@@ -362,9 +368,9 @@ test("NO RAW ADDRESS OUT: status_url carries the email hash; no log line carries
     const r = await call(registerReq("privacy.person@example.com"));
     assert.equal(r._status, 200);
     const h = register.sha256("privacy.person@example.com");
-    assert.ok(r._body.status_url.includes(`e=${h}`));
+    assert.ok(r._body.status_url.includes(`&eh=${h}`));
     assert.ok(!JSON.stringify(r._body).includes("privacy.person"), "no raw address in the response");
-    const s = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", e: h } }));
+    const s = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", eh: h } }));
     assert.equal(s._status, 200);
     register.setSender(async () => { throw new Error("upstream said privacy.person@example.com bounced"); });
     await call(registerReq("privacy.person@example.com"));
@@ -408,8 +414,62 @@ test("NO ORACLE: register-status answers the same for unknown and pending; a wro
   assert.equal(r._status, 200);
   assert.equal(gh.has(USAGE, register.ipPath(register.ipHash(ip), month)), false, "no slot spent");
   const h = register.sha256("already@example.com");
-  const wrong = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", e: h, t8: r._body.t8 } }));
+  const wrong = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", eh: h, t8: r._body.t8 } }));
   assert.deepEqual(wrong._body, { state: "pending_or_unknown" }, "the decoy t8 from a confirmed-address register proves nothing");
+});
+
+test("STATUS: ?eh= only; the ?email= and ?e= forms are 400 bad_eh and read nothing", async () => {
+  const h = register.sha256("form@example.com");
+  const readsBefore = gh.getLog.length;
+  for (const query of [{ email: "form@example.com" }, { e: h }, { eh: "nothex" }, {}]) {
+    const r = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", ...query } }));
+    assert.equal(r._status, 400, JSON.stringify(query));
+    assert.equal(r._body.reason, "bad_eh");
+  }
+  assert.equal(gh.getLog.length, readsBefore, "a refused status query reads nothing");
+  const ok = await call(makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register-status", eh: h } }));
+  assert.deepEqual(ok._body, { state: "pending_or_unknown" });
+});
+
+test("TIMING FLOOR: every op=register path waits out the rest of 1500 ms before answering", async () => {
+  assert.equal(register._timing.floorMs, 1500);
+  await registerAndConfirm("floor-confirmed@example.com");
+  const fullIp = "192.0.2.201";
+  const month = new Date().toISOString().slice(0, 7);
+  const now = new Date().toISOString();
+  gh.seed(USAGE, register.ipPath(register.ipHash(fullIp), month), { month, events: Array(register.IP_WINDOW_LIMIT).fill(now) });
+  const cases = [
+    ["405 wrong method", () => makeReq({ method: "GET", headers: { "x-forwarded-for": freshIp() }, query: { op: "register" } }), 405],
+    ["400 bad email", () => registerReq("not-an-email"), 400],
+    ["200 fresh", () => registerReq("floor-fresh@example.com"), 200],
+    ["200 confirmed address", () => registerReq("floor-confirmed@example.com"), 200],
+    ["429 window", () => registerReq("floor-full@example.com", { ip: fullIp }), 429],
+  ];
+  for (const [name, mk, status] of cases) {
+    floorWaits = [];
+    const t0 = Date.now();
+    const r = await call(mk());
+    const elapsed = Date.now() - t0;
+    assert.equal(r._status, status, name);
+    assert.equal(floorWaits.length, 1, `${name}: the floor ran once`);
+    assert.ok(floorWaits[0] > 0 && floorWaits[0] <= 1500, `${name}: waited ${floorWaits[0]} ms`);
+    assert.ok(elapsed + floorWaits[0] >= 1500 - 1, `${name}: answered before the floor (${elapsed} + ${floorWaits[0]})`);
+  }
+  register.setSender(async () => { throw new Error("boom"); });
+  floorWaits = [];
+  const mf = await call(registerReq("floor-mf@example.com"));
+  assert.equal(mf._status, 502);
+  assert.equal(floorWaits.length, 1, "502 mail_failed is floored too");
+});
+
+test("TIMING FLOOR (wall clock): a confirmed address's register takes at least 1500 ms", async () => {
+  await registerAndConfirm("wall@example.com");
+  register._timing.floorSleep = realFloorSleep;
+  const t0 = Date.now();
+  const r = await call(registerReq("wall@example.com"));
+  const elapsed = Date.now() - t0;
+  assert.equal(r._status, 200);
+  assert.ok(elapsed >= 1495, `answered after ${elapsed} ms`);
 });
 
 // ---------------------------------------------------------- email hygiene
