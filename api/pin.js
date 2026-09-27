@@ -135,13 +135,8 @@ function rateLimited(key) {
 // Returns exactly one of:
 //   { ok:true, source, headers }        -> proceed to the write
 //   { deny:{status,body}, headers }     -> caller must return this response
-async function meterAndCharge(key, planHint) {
-  // Durable per-key hourly limit (2026-09-27). The in-memory Map (rateLimited)
-  // resets on every cold start and is per instance, so it never bounded a KEY.
-  // This counter lives in the private usage repo and survives both. It runs
-  // here, on the path that is about to record a write, so refusals and the
-  // idempotent no-op re-pin write nothing (same rule as the charge). Fails
-  // CLOSED: if it cannot count, the pin is refused (503), never waved through.
+// The durable hourly check as a helper: returns a deny object, or null to proceed.
+async function durableHourDeny(key) {
   try {
     const h = await meter.hourCheck(key, RATE_LIMIT);
     if (h.limited) {
@@ -169,6 +164,24 @@ async function meterAndCharge(key, planHint) {
       },
       headers: {},
     };
+  }
+  return null;
+}
+
+async function meterAndCharge(key, planHint) {
+  // Durable per-key hourly limit (2026-09-27). The in-memory Map (rateLimited)
+  // resets on every cold start and is per instance, so it never bounded a KEY.
+  // This counter lives in the private usage repo and survives both. It runs
+  // here, on the path that is about to record a write, so refusals and the
+  // idempotent no-op re-pin write nothing (same rule as the charge). Fails
+  // CLOSED: if it cannot count, the pin is refused (503), never waved through.
+  //
+  // Plan "grant" keys ONLY (review 5): those are the new, free-to-obtain keys
+  // the counter exists for. Env, free-plan and Stripe keys keep the in-memory
+  // check alone, so their per-pin write cost and failure modes are unchanged.
+  if (planHint === "grant") {
+    const d = await durableHourDeny(key);
+    if (d) return d;
   }
 
   let m;

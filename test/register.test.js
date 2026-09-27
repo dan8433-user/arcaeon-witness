@@ -432,7 +432,7 @@ test("DURABLE HOUR CAP: 60 pins pass; after a simulated cold start the 61st is s
   assert.equal(res._body.limit, 60);
   assert.equal((await balance.readBalance(keys.keyHash(c.key))).balance, 440, "the refused pin charged nothing");
   const hour = gh.read(USAGE, meter.hourPath(keys.keyHash(c.key), meter.utcHour()));
-  assert.ok(hour.used >= 61);
+  assert.equal(hour.used, 60, "the refused 61st was decided on a read: no counter write");
 });
 
 test("DURABLE HOUR CAP: a store error on the counter fails closed with 503 and charges nothing", async () => {
@@ -444,6 +444,20 @@ test("DURABLE HOUR CAP: a store error on the counter fails closed with 503 and c
   assert.equal(res._status, 503);
   assert.equal(res._body.reason, "rate_limit_store_error");
   assert.equal((await balance.readBalance(h)).balance, 500);
+});
+
+test("DURABLE HOUR CAP: a free-plan key's pin makes no hour-counter write (in-memory check only)", async () => {
+  const key = keys.mintKey();
+  const h = keys.keyHash(key);
+  gh.seed(USAGE, keys.issuedKeyPath(h), { key_hash: h, namespace_prefix: "hourfree-", plan: "free", source: "stripe-fulfill" });
+  const res = makeRes();
+  await pin(pinReq(key, "hourfree-main", 1), res);
+  assert.equal(res._status, 201);
+  assert.equal(gh.putLog.filter((w) => /\/hour-/.test(w.path)).length, 0, "no hour counter written for a free-plan key");
+  gh.forceFailure(USAGE, meter.hourPath(h, meter.utcHour()), 5, 500);
+  const res2 = makeRes();
+  await pin(pinReq(key, "hourfree-main", 2), res2);
+  assert.equal(res2._status, 201, "a free-plan key's pin does not depend on the hour-counter store");
 });
 
 // ---------------------------------------------------------- the reader
