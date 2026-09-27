@@ -90,7 +90,11 @@ function tokenFrom(msg) {
   return m[1];
 }
 
+// The claim: POST with the token in the body (review 3: the GET link never mints).
 function confirmReq(t, json = true) {
+  return makeReq({ method: "POST", headers: json ? { accept: "application/json" } : { accept: "text/html" }, query: { op: "confirm" }, body: { t } });
+}
+function confirmGetReq(t, json = false) {
   return makeReq({ method: "GET", headers: json ? { accept: "application/json" } : { accept: "text/html" }, query: { op: "confirm", t } });
 }
 
@@ -145,24 +149,28 @@ test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credi
   assert.equal(c1._body.state, "confirmed");
   assert.match(c1._body.key, /^wk_[0-9a-f]{48}$/);
   assert.equal(c1._body.credit_balance, 500);
-  assert.equal(c1._body.already_credited, false);
+  assert.equal(c1._body.shown_once, true);
 
   const keyHash = keys.keyHash(c1._body.key);
   const issued = gh.read(USAGE, keys.issuedKeyPath(keyHash));
   assert.equal(issued.plan, "grant");
   assert.equal(issued.source, "register");
   const ful = gh.read(USAGE, keys.fulfillmentPath(register.fulfillId(emailHash)));
-  assert.equal(ful.key, c1._body.key);
   const regAfter = gh.read(USAGE, register.regPath(emailHash));
   assert.equal(regAfter.state, "confirmed");
   assert.equal(regAfter.key_hash, keyHash);
 
+  assert.equal(ful.key, null, "shown once: the raw key is removed from the store after the showing");
+  assert.ok(regAfter.key_shown_at, "key_shown_at recorded");
+
+  const writesBefore = gh.putLog.length;
   const c2 = await call(confirmReq(token));
-  assert.equal(c2._status, 200);
-  assert.equal(c2._body.key, c1._body.key, "same key on a second confirm");
-  assert.equal(c2._body.already_credited, true);
-  assert.equal(c2._body.credit_balance, 500, "never granted twice");
-  assert.equal((await balance.readBalance(keyHash)).balance, 500);
+  assert.equal(c2._status, 409);
+  assert.equal(c2._body.reason, "already_claimed");
+  assert.equal(c2._body.key, undefined, "the key is never shown twice");
+  assert.match(c2._body.error, /^already claimed on .+; the key was shown once; if you lost it, register again with another address or email hello@arcaeon\.io$/);
+  assert.equal(gh.putLog.length, writesBefore, "a second claim writes nothing");
+  assert.equal((await balance.readBalance(keyHash)).balance, 500, "never granted twice");
 
   const s2 = await call(statusReq("jane@example.com"));
   assert.deepEqual(s2._body, { state: "pending_or_unknown" }, "without t8 a confirmed address is not revealed");
@@ -170,12 +178,45 @@ test("HAPPY PATH: register -> pending + one email; confirm -> key with 500 credi
   assert.deepEqual(s3._body, { state: "confirmed" }, "with t8 the starter sees confirmed; never the key");
 });
 
-test("CONFIRM PAGE: HTML shows the key in plain markup (readable without JS)", async () => {
+test("THE LINK DOES NOT MINT: GET shows one 'Show my key' form; nothing is written; the POST shows the key in plain markup", async () => {
   await call(registerReq("html@example.com"));
-  const c = await call(confirmReq(tokenFrom(sent[0]), false));
+  const t = tokenFrom(sent[0]);
+  const writesBefore = gh.putLog.length;
+  for (let i = 0; i < 3; i++) {
+    const g = await call(confirmGetReq(t));
+    assert.equal(g._status, 200);
+    assert.match(g._headers["content-type"], /text\/html/);
+    assert.match(g._body, /<form method="post" action="[^"]*op=confirm">/);
+    assert.match(g._body, /<input type="hidden" name="t" value="[0-9a-f]{64}">/);
+    assert.match(g._body, /<button type="submit">Show my key<\/button>/);
+    assert.ok(!/wk_[0-9a-f]{48}/.test(g._body), "no key on the GET page");
+  }
+  const gj = await call(confirmGetReq(t, true));
+  assert.equal(gj._body.state, "pending");
+  assert.equal(gh.putLog.length, writesBefore, "a scanner's GETs mint, grant and mark nothing");
+  assert.equal(gh.has(USAGE, keys.fulfillmentPath(register.fulfillId(register.sha256("html@example.com")))), false);
+
+  const c = await call(confirmReq(t, false));
   assert.equal(c._status, 200);
-  assert.match(c._headers["content-type"], /text\/html/);
   assert.match(c._body, /<code id="key">wk_[0-9a-f]{48}<\/code>/);
+  const again = await call(confirmGetReq(t));
+  assert.equal(again._status, 409);
+  assert.ok(!/wk_[0-9a-f]{48}/.test(again._body));
+});
+
+test("CLAIM RESUMES AFTER A CRASH: minted but not marked -> the next POST shows that key once, grants once", async () => {
+  await call(registerReq("crash@example.com"));
+  const t = tokenFrom(sent[0]);
+  const h = register.sha256("crash@example.com");
+  gh.forceFailure(USAGE, register.regPath(h), 1, 500); // the mark fails once, after the mint and grant
+  const first = await call(confirmReq(t));
+  assert.equal(first._status, 503);
+  const minted = gh.read(USAGE, keys.fulfillmentPath(register.fulfillId(h)));
+  assert.match(minted.key, /^wk_/);
+  const second = await call(confirmReq(t));
+  assert.equal(second._status, 200);
+  assert.equal(second._body.key, minted.key, "the same key, not a second one");
+  assert.equal((await balance.readBalance(keys.keyHash(minted.key))).balance, 500);
 });
 
 test("CONFIRM: malformed 400, unknown 404, superseded 410, expired 410", async () => {
