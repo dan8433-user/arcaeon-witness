@@ -752,6 +752,21 @@ and registration answers `501 not_configured` until they are):
 - `RESEND_FROM` — the sender, e.g. `Arcaeon <keys@arcaeon.io>`; the domain must
   be verified in Resend.
 - `WITNESS_ADMIN_KEY` (existing) also gates `op=register-report`.
+- `REGISTER_STORE_REPO`, `REGISTER_STORE_TOKEN` (optional, a pair; **not yet
+  set — human step**) — a private repo and its own fine-grained token for
+  registration's files, so a signup spike spends its own GitHub write budget,
+  not the one paying pins share on `GITHUB_PIN_TOKEN`. With both set,
+  `lib/_keys.js` `registerStore()` sends `registrations/` (and its `_ip/`,
+  `_ipc/`, `_domain/`, `_sends/`, `_tok/`, `_timing/` subtrees),
+  `trial_namespaces/`, `fulfillments/reg-*`, the registration key's
+  `pools/` record and the durable hour counter (`usage/<hash>/hour-*`, only
+  written for register-sourced keys) there. With either unset, all of it
+  stays in the usage repo on `GITHUB_PIN_TOKEN`, exactly as before. The
+  issued-key record (`keys/`) and the credit balance (`balance/`, `ledger/`)
+  stay in the usage repo either way, because `api/pin.js` reads them there.
+  Read per request.
+- `REGISTER_STORE_BRANCH` (optional, default `main`) — the register store's
+  branch; only read when the pair above is set.
 - `WITNESS_REGISTER_ALLOW` (optional, for partners) — comma-separated
   entries, each a DOMAIN or an EXACT IP address (no CIDR ranges; an entry
   with `/` is ignored). A registration or claim whose email domain (or its
