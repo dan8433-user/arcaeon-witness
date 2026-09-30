@@ -21,6 +21,7 @@
 
 const store = require("../lib/_store.js");
 const verdict = require("../lib/_verdict.js");
+const { StoreFileUnreadableError } = require("../lib/_contents.js");
 const ratelimit = require("../lib/_ratelimit.js");
 
 const HISTORY_BASE = `https://github.com/${store.REPO}/commits/${store.BRANCH}`;
@@ -70,6 +71,15 @@ module.exports = async (req, res) => {
     // serving the last good copy would answer 200 over a head that is, right
     // now, damaged. So a parse failure is a red verdict and goes nowhere else.
     if (primaryErr instanceof SyntaxError) unparseable = true;
+    // Same for a 200 whose body is not the file (encoding "none" on a >1 MB
+    // file, or a size that disagrees with the content; lib/_contents.js). The
+    // store was reached and could not be read: that is a store failure, and
+    // it answers the way every other store failure here does, a 502 carrying
+    // the class word. Falling back from it answered 404 "no pin recorded".
+    if (primaryErr instanceof StoreFileUnreadableError) {
+      res.setHeader("cache-control", "no-store");
+      return res.status(502).json({ error: `pin store read error: ${primaryErr.message}` });
+    }
   }
   if (pinRead === undefined && !unparseable) {
     // Fallback: raw CDN with cache-buster. Honest note: raw can lag well

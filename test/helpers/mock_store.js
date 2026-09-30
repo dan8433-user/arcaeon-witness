@@ -8,7 +8,10 @@
 // this — the CAS conflict shape is load-bearing to every regression here):
 //
 //   GET  /repos/<repo>/contents/<path>?ref=<branch>
-//        -> 200 {content:<base64>, sha:<hex>}   | 404 if missing
+//        -> 200 {content:<base64>, encoding:"base64", size:<bytes>, sha:<hex>}
+//           | 404 if missing. encoding/size are the real API's fields and
+//           lib/_contents.js checks both (task 171); plantRawGet() overrides
+//           the whole 200 body for one path to plant a malformed answer.
 //
 //   PUT  /repos/<repo>/contents/<path>
 //        body {message, branch, content:<base64>, sha?}
@@ -54,6 +57,7 @@ class MockGitHubStore {
     this.getLog = []; // [path] — every GET attempted, hit or miss, in order
     this._forced = new Map(); // "repo::path" -> remaining forced-conflict count
     this._forcedFailure = new Map(); // "repo::path" -> {remaining, status}
+    this._rawGet = new Map(); // "repo::path" -> exact 200 body to answer a GET with (task 171)
     // GET /repos/<repo>/git/trees/<branch>?recursive=1 -> {tree:[{path,type}], truncated}
     // Added 2026-09-20 for tools/reconcile_batches.js: the reconciler walks the
     // whole repo through store.getTreeMeta, and `truncated` is the field that
@@ -106,6 +110,14 @@ class MockGitHubStore {
     this._forcedFailure.set(`${repo}::${path}`, { remaining: n, status });
   }
 
+  // Answer every GET of `path` with exactly `body` (status 200), bypassing
+  // the stored record. For planting contents-API answers the real service
+  // can give and the happy path never does: encoding "none" on a >1 MB file,
+  // a size field that disagrees with the content (task 171).
+  plantRawGet(repo, path, body) {
+    this._rawGet.set(`${repo}::${path}`, body);
+  }
+
   async handleFetch(url, opts) {
     const u = new URL(String(url));
 
@@ -129,10 +141,16 @@ class MockGitHubStore {
 
     if (method === "GET") {
       this.getLog.push(path);
+      const planted = this._rawGet.get(`${repo}::${path}`);
+      if (planted !== undefined) return fakeResponse(200, planted);
       const rec = map.get(path);
       if (rec) {
+        const bytes = Buffer.from(rec.content, "utf-8");
         return fakeResponse(200, {
-          content: Buffer.from(rec.content, "utf-8").toString("base64"),
+          type: "file",
+          encoding: "base64",
+          size: bytes.length,
+          content: bytes.toString("base64"),
           sha: rec.sha,
         });
       }
